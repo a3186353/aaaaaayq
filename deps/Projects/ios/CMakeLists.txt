@@ -1069,10 +1069,10 @@ target_include_directories(SDL_Mixer_X_fw PRIVATE
     "${SDL_INCLUDE_DIR}"
     "${AUDIO_CODECS_DIR}/include"
     "${AUDIO_CODECS_DIR}/libvorbisidec-1.2.1"
-    "${DEPS_DIR}/libsndfile/include"
-    # 编解码器头文件
+    # modplug 头文件必须在 libsndfile 之前 (两者都有 sndfile.h，modplug 源码需要自己的版本)
+    "${MODPLUG_DIR}/src/libmodplug"     # stdafx.h, sndfile.h (modplug 版本)
     "${MODPLUG_DIR}/src"               # modplug.h
-    "${MODPLUG_DIR}/src/libmodplug"     # sndfile.h, stdafx.h
+    "${DEPS_DIR}/libsndfile/include"    # sndfile.h (libsndfile 版本，SDL_Mixer_X 自身用)
     "${LIBOGG_DIR}/include"             # ogg/ogg.h
     "${LIBOGG_DIR}/android"             # config_types.h
     "${MPG123_DIR}/android"             # config.h + mpg123.h
