@@ -4,12 +4,12 @@ on:
   push:
     branches: [ main, master, 引擎升级 ]
     paths:
-      - 'GGELUA3/**'
+      - 'deps/**'
       - '.github/workflows/build_ios.yml'
   pull_request:
     branches: [ main, master, 引擎升级 ]
     paths:
-      - 'GGELUA3/**'
+      - 'deps/**'
   workflow_dispatch:
     inputs:
       configuration:
@@ -22,7 +22,7 @@ on:
           - Release
 
 env:
-  IOS_PROJECT_DIR: GGELUA3/Projects/ios
+  IOS_PROJECT_DIR: deps/Projects/ios
 
 jobs:
   build-ios-frameworks:
@@ -124,7 +124,7 @@ jobs:
         FW_DIR="${INSTALL_DIR}/Frameworks"
 
         # --- 复制预编译的 libvgmstream.framework (fsb.c 用 dlopen 运行时加载) ---
-        VGMSTREAM_SRC="${{ github.workspace }}/GGELUA/build/ios/Frameworks/libvgmstream.framework"
+        VGMSTREAM_SRC="${{ github.workspace }}/deps/build/ios/Frameworks/libvgmstream.framework"
         if [ -d "$VGMSTREAM_SRC" ]; then
           cp -R "${VGMSTREAM_SRC}" "${FW_DIR}/"
           echo "  ✅ libvgmstream.framework (预编译，from template)"
