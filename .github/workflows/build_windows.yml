@@ -43,9 +43,9 @@ jobs:
       shell: pwsh
       run: |
         # CI checkout 不保留 junction，需要重新创建
-        $winDeps = "deps/Projects/windows/Dependencies"
+        # cmd /c mklink 必须使用反斜杠路径
+        $winDeps = "deps\Projects\windows\Dependencies"
         if (Test-Path $winDeps) {
-          # 如果已存在（可能是普通目录），检查是否为 junction
           $item = Get-Item $winDeps -Force
           if ($item.LinkType -ne 'Junction') {
             Remove-Item $winDeps -Recurse -Force
@@ -59,7 +59,7 @@ jobs:
           Write-Host "✅ Junction 已创建"
         }
         # 验证
-        Test-Path "$winDeps/libhv/hconfig.h"
+        Test-Path "$winDeps\libhv\hconfig.h"
 
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh
