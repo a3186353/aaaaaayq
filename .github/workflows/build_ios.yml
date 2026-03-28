@@ -286,7 +286,7 @@ jobs:
 
         echo ""
         echo "=== 完整文件列表 ==="
-        unzip -l "$GGELUA_ZIP" | tail -n +4 | head -n -2
+        unzip -l "$GGELUA_ZIP" | tail -n +4 | sed '$d' | sed '$d'
 
     - name: Upload prebuilt template
       uses: actions/upload-artifact@v4

@@ -39,25 +39,23 @@ jobs:
     - name: Install VS Android C++ workload
       shell: pwsh
       run: |
-        # windows-latest 预装了 VS 2022 但没有 Android C++ 工作负载
-        # Clang_5_0 PlatformToolset 依赖此工作负载
-        $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-        if (Test-Path $vsInstaller) {
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -property installationPath
-          Write-Host "VS Path: $vsPath"
+        # 使用 .vsconfig 安装完整的 Android 移动C++开发工作负载
+        # 这确保 NDK27 和 Clang_5_0 PlatformToolset 所需的所有组件都被正确安装
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vsWhere -latest -property installationPath
+        Write-Host "VS Path: $vsPath"
 
-          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
-            --installPath "$vsPath" `
-            --add Microsoft.VisualStudio.Component.VC.Android.NDK `
-            --add Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core `
-            --quiet --norestart --wait
+        # 使用项目中的 .vsconfig 确保精确的组件匹配
+        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
+          --installPath "$vsPath" `
+          --add Component.MDD.Android `
+          --add Component.Android.NDK27 `
+          --add Component.Android.SDK.MAUI `
+          --add Component.Ant `
+          --add Component.OpenJDK `
+          --quiet --norestart --wait
 
-          Write-Host "Android C++ workload installed"
-        } else {
-          Write-Error "VS Installer not found"
-          exit 1
-        }
+        Write-Host "Android C++ 移动开发工作负载已安装 (NDK27)"
 
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2

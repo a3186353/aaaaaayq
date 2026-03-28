@@ -96,6 +96,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libsndfile", "dep\libsndfil
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "hiredis", "lib\hiredis\hiredis.vcxproj", "{221EDBDD-4373-437D-BDED-0CB4F8A9EA4F}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ghv", "lib\ghv\ghv.vcxproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -172,6 +174,10 @@ Global
 		{EA56E5FC-03ED-327A-8286-D3364218C5F2}.Release|x64.ActiveCfg = Release|x64
 		{221EDBDD-4373-437D-BDED-0CB4F8A9EA4F}.Debug|x64.ActiveCfg = Debug|x64
 		{221EDBDD-4373-437D-BDED-0CB4F8A9EA4F}.Release|x64.ActiveCfg = Release|x64
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Debug|x64.ActiveCfg = Debug|x64
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Debug|x64.Build.0 = Debug|x64
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Release|x64.ActiveCfg = Release|x64
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -210,6 +216,7 @@ Global
 		{0E8AB1D4-76D0-4CBD-8A67-FAA062B60C0E} = {8B78C654-0550-43A0-B0B0-82304584AB3F}
 		{EA56E5FC-03ED-327A-8286-D3364218C5F2} = {43E7C20B-0BE5-4774-930A-B875BB50A587}
 		{221EDBDD-4373-437D-BDED-0CB4F8A9EA4F} = {8286A76F-269C-4C17-B8AE-240AFCC1A0BC}
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890} = {8286A76F-269C-4C17-B8AE-240AFCC1A0BC}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {E6EA96F6-C769-42B8-B9C2-DDF3F46F5FA9}
