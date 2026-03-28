@@ -1,0 +1,93 @@
+name: Build Windows DLLs
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'deps/**'
+      - '.github/workflows/build_windows.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'deps/**'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+env:
+  SOLUTION_FILE: deps/Projects/windows/Windows.sln
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        configuration: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.configuration)) || fromJSON('["Release"]') }}
+        platform: [x64]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Restore Junction (Dependencies)
+      shell: pwsh
+      run: |
+        # CI checkout 不保留 junction，需要重新创建
+        $winDeps = "deps/Projects/windows/Dependencies"
+        if (Test-Path $winDeps) {
+          # 如果已存在（可能是普通目录），检查是否为 junction
+          $item = Get-Item $winDeps -Force
+          if ($item.LinkType -ne 'Junction') {
+            Remove-Item $winDeps -Recurse -Force
+            cmd /c mklink /J "$winDeps" "..\..\Dependencies"
+            Write-Host "✅ Junction 已重建"
+          } else {
+            Write-Host "✅ Junction 已存在"
+          }
+        } else {
+          cmd /c mklink /J "$winDeps" "..\..\Dependencies"
+          Write-Host "✅ Junction 已创建"
+        }
+        # 验证
+        Test-Path "$winDeps/libhv/hconfig.h"
+
+    - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
+      shell: pwsh
+      run: |
+        msbuild ${{ env.SOLUTION_FILE }} `
+          /p:Configuration=${{ matrix.configuration }} `
+          /p:Platform=${{ matrix.platform }} `
+          /m /v:minimal
+
+    - name: Collect DLL artifacts
+      shell: pwsh
+      run: |
+        $outDir = "artifacts"
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+        # 搜索 x64/Release 目录下的 DLL 和 EXE
+        $buildRoot = "deps/Projects/windows"
+        Get-ChildItem -Path $buildRoot -Include "*.dll","*.exe" -Recurse |
+          Where-Object { $_.FullName -match '\.x64[\\/](Release|Debug)' } |
+          ForEach-Object {
+            Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)"
+            Copy-Item $_.FullName -Destination $outDir -Force
+          }
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-dlls-${{ matrix.platform }}-${{ matrix.configuration }}
+        path: artifacts/
+        if-no-files-found: warn
+        retention-days: 30

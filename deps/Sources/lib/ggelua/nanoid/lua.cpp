@@ -1,5 +1,5 @@
 extern "C" {
-    #include "luaopen.h"
+    #include "../luaopen.h"
 }
 #include "nanoid/nanoid.h"
 

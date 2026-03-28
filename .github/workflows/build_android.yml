@@ -1,0 +1,108 @@
+name: Build Android Native Libraries
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'deps/**'
+      - '.github/workflows/build_android.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'deps/**'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+env:
+  SOLUTION_FILE: deps/Projects/android-vs/Android.sln
+
+jobs:
+  build-android:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        configuration: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.configuration)) || fromJSON('["Release"]') }}
+        platform: [ARM, ARM64, x86, x64]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install VS Android C++ workload
+      shell: pwsh
+      run: |
+        # windows-latest 预装了 VS 2022 但没有 Android C++ 工作负载
+        # Clang_5_0 PlatformToolset 依赖此工作负载
+        $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+        if (Test-Path $vsInstaller) {
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -property installationPath
+          Write-Host "VS Path: $vsPath"
+
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
+            --installPath "$vsPath" `
+            --add Microsoft.VisualStudio.Component.VC.Android.NDK `
+            --add Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core `
+            --quiet --norestart --wait
+
+          Write-Host "Android C++ workload installed"
+        } else {
+          Write-Error "VS Installer not found"
+          exit 1
+        }
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
+      shell: pwsh
+      run: |
+        msbuild ${{ env.SOLUTION_FILE }} `
+          /p:Configuration=${{ matrix.configuration }} `
+          /p:Platform=${{ matrix.platform }} `
+          /m /v:minimal
+
+    - name: Collect .so artifacts
+      shell: pwsh
+      run: |
+        # VS Android 输出: $(SolutionDir).$(Platform)\$(Configuration)\
+        $buildDir = "deps/Projects/android-vs/.${{ matrix.platform }}/${{ matrix.configuration }}"
+
+        # 映射 VS Platform -> APK ABI 目录名
+        $abiMap = @{
+          'ARM64' = 'arm64-v8a'
+          'ARM'   = 'armeabi-v7a'
+          'x64'   = 'x86_64'
+          'x86'   = 'x86'
+        }
+        $abi = $abiMap['${{ matrix.platform }}']
+        $outDir = "artifacts/$abi"
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+        if (Test-Path $buildDir) {
+          Get-ChildItem -Path $buildDir -Filter "*.so" -Recurse | ForEach-Object {
+            Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)"
+            Copy-Item $_.FullName -Destination $outDir -Force
+          }
+        } else {
+          Write-Warning "Build output directory not found: $buildDir"
+          Get-ChildItem -Path "deps/Projects/android-vs" -Filter ".*" -Directory | ForEach-Object {
+            Write-Host "Found dir: $($_.Name)"
+          }
+        }
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-so-${{ matrix.platform }}-${{ matrix.configuration }}
+        path: artifacts/
+        if-no-files-found: warn
+        retention-days: 30

@@ -105,8 +105,7 @@ set(LIBHV_SOURCES
 )
 add_library(libhv STATIC ${LIBHV_SOURCES})
 target_include_directories(libhv PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/compat"  # hconfig.h (手动配置，替代 libhv CMake 生成)
-    "${LIBHV_DIR}"
+    "${LIBHV_DIR}"            # hconfig.h (跨平台统一版本, 含 __APPLE__ 分支)
     "${LIBHV_DIR}/base"
     "${LIBHV_DIR}/event"
     "${LIBHV_DIR}/evpp"
@@ -822,8 +821,7 @@ target_include_directories(ggelua_fw PRIVATE
     "${DEPS_DIR}/openssl/include"
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"
     "${SDL_INCLUDE_DIR}"
-    # libhv include dirs
-    "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+    # libhv include dirs (hconfig.h 已统一至 LIBHV_DIR 根目录)
     "${LIBHV_DIR}" "${LIBHV_DIR}/base" "${LIBHV_DIR}/event"
     "${LIBHV_DIR}/evpp" "${LIBHV_DIR}/http" "${LIBHV_DIR}/http/client"
     "${LIBHV_DIR}/ssl" "${LIBHV_DIR}/cpputil" "${LIBHV_DIR}/util"

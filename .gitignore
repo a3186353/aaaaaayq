@@ -1,0 +1,39 @@
+# Build outputs
+deps/Projects/ios/build-*/
+deps/Projects/ios/install-*/
+deps/Projects/ios/xcframeworks/
+deps/Projects/android-vs/build/
+deps/Projects/android-vs/.vs/
+
+# MSBuild 编译缓存 (.obj 中间产物)
+deps/Projects/android-vs/.obj/
+deps/Projects/android-vs/.ARM/
+deps/Projects/android-vs/.ARM64/
+deps/Projects/android-vs/.x86/
+deps/Projects/android-vs/.x64/
+deps/Projects/windows/.x64/
+
+# Windows junction (CI 重建, 指向 ../../Dependencies)
+deps/Projects/windows/Dependencies/
+
+# Gradle 缓存
+.gradle/
+
+# IDE
+.vscode/
+.vs/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 二进制编译产物
+*.so
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.recipe
+*.o
+*.a

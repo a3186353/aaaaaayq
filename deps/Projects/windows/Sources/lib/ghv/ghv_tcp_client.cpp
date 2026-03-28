@@ -256,10 +256,22 @@ static int l_tcp_client_connect(lua_State* L) {
             size_t incoming_len = buf->size();
             rb.insert(rb.end(), incoming, incoming + incoming_len);
 
-            while (rb.size() >= 6) {  // 至少需要 Magic(2) + Length(4)
+            // P3-1: 基于偏移量遍历，循环结束后批量 erase（单次 memmove）
+            size_t consumed = 0;
+            while (rb.size() - consumed >= 6) {  // 至少需要 Magic(2) + Length(4)
+                uint8_t* ptr = rb.data() + consumed;
+
+                // P3-5: 快速校验 Magic 字节，非法数据立即失败
+                if (ptr[0] != GHV_MAGIC_BYTE_0 || ptr[1] != GHV_MAGIC_BYTE_1) {
+                    fprintf(stderr, "[ghv] SECURITY: client invalid magic in recv buffer, closing\n");
+                    rb.clear();
+                    notify_client_security_and_close(L, self, channel, GHV_CLI_SEC_MAC_FAILED, 0);
+                    return;
+                }
+
                 // 读取 Length 字段（LE, offset 2, 4 bytes）
                 uint32_t body_len;
-                memcpy(&body_len, rb.data() + 2, 4);
+                memcpy(&body_len, ptr + 2, 4);
                 size_t frame_size = static_cast<size_t>(body_len) + 6;
 
                 // 帧尺寸合法性校验
@@ -271,13 +283,13 @@ static int l_tcp_client_connect(lua_State* L) {
                     return;
                 }
 
-                if (rb.size() < frame_size) {
+                if (rb.size() - consumed < frame_size) {
                     break;  // 帧未完整，等待更多数据
                 }
 
-                // 完整帧：解密
+                // 完整帧：就地解密（ptr 指向 rb 内部可写区域）
                 CryptoProtocol::DecryptResult decrypt_out;
-                if (!self->crypto.DecryptAndVerify(rb.data(), frame_size, decrypt_out)) {
+                if (!self->crypto.DecryptAndVerify(ptr, frame_size, decrypt_out)) {
                     fprintf(stderr, "[ghv] SECURITY: decrypt/MAC failed, closing connection\n");
                     rb.clear();
                     notify_client_security_and_close(L, self, channel, GHV_CLI_SEC_MAC_FAILED, 0);
@@ -295,7 +307,7 @@ static int l_tcp_client_connect(lua_State* L) {
 
                 // 投递解密后的明文给 Lua
                 // NOTE: plaintext 指向 rb 内部（就地解密），lua_pushlstring 会复制数据，
-                //       因此后续的 erase 操作不会影响已复制的 Lua 字符串。
+                //       后续操作不会影响已复制的 Lua 字符串。
                 if (push_self_userdata(L, self)) {
                     int ud_idx = lua_gettop(L);
                     if (ghv_get_lua_ref(L, ud_idx, "on_message")) {
@@ -309,8 +321,11 @@ static int l_tcp_client_connect(lua_State* L) {
                     lua_pop(L, 1);
                 }
 
-                // 移除已处理的帧（必须在 lua_pushlstring 之后）
-                rb.erase(rb.begin(), rb.begin() + static_cast<ptrdiff_t>(frame_size));
+                consumed += frame_size;
+            }
+            // P3-1: 批量移除已处理的帧（单次 memmove，替代逐帧 erase）
+            if (consumed > 0) {
+                rb.erase(rb.begin(), rb.begin() + static_cast<ptrdiff_t>(consumed));
             }
             return;
         } else if (self->security_state_ == ConnectionSecurityState::Handshaking) {
