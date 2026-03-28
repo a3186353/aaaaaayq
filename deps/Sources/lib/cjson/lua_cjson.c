@@ -46,6 +46,12 @@
 #include "strbuf.h"
 #include "fpconv.h"
 
+/* MSVC 没有 POSIX strncasecmp，使用 _strnicmp 替代 */
+#ifdef _MSC_VER
+#include <string.h>
+#define strncasecmp _strnicmp
+#endif
+
 #ifndef CJSON_MODNAME
 #define CJSON_MODNAME   "cjson"
 #endif
