@@ -80,10 +80,12 @@ jobs:
         $outDir = "artifacts"
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-        # 搜索 x64/Release 目录下的 DLL 和 EXE
+        # 直接搜索 .x64 编译输出目录，避免递归进入 Dependencies junction
         $buildRoot = "deps/Projects/windows"
-        Get-ChildItem -Path $buildRoot -Include "*.dll","*.exe" -Recurse |
-          Where-Object { $_.FullName -match '\.x64[\\/](Release|Debug)' } |
+        Get-ChildItem -Path $buildRoot -Directory -Filter ".x64" -Recurse -ErrorAction SilentlyContinue |
+          ForEach-Object {
+            Get-ChildItem -Path $_.FullName -Include "*.dll","*.exe" -Recurse -ErrorAction SilentlyContinue
+          } |
           ForEach-Object {
             Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)"
             Copy-Item $_.FullName -Destination $outDir -Force
