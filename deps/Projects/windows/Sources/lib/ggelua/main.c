@@ -412,6 +412,8 @@ static const luaL_Reg lib_list[] = {
     {"ghv.HttpRequests", luaopen_ghv_HttpRequests},
     {"ghv.download", luaopen_ghv_download},
     {"gge.core", luaopen_ggecore},  /* 脚本加解密, preload 保证引导阶段可用 */
+    {"cjson", luaopen_cjson},        /* JSON 编解码 */
+    {"cjson.safe", luaopen_cjson_safe},
     
     {NULL, NULL},
 };

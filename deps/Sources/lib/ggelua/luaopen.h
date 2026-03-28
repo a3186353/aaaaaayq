@@ -40,4 +40,8 @@ int luaopen_ghv_download(lua_State* L);
 // gge.core (脚本加解密引擎, 内嵌于 libggelua)
 int luaopen_ggecore(lua_State* L);
 
+// cjson (JSON 编解码)
+int luaopen_cjson(lua_State* L);
+int luaopen_cjson_safe(lua_State* L);
+
 GGE_EXPORT int luaopen_ggelua(lua_State* L);

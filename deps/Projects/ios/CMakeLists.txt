@@ -169,6 +169,10 @@ set(GGELUA_SOURCES
     "${GGELUA_SRC_DIR}/script.c"
     "${GGELUA_SRC_DIR}/lua_aes.c"
     "${GGELUA_SRC_DIR}/core.c"
+    # cjson (JSON 编解码, Windows 上是独立 DLL, iOS/Android 静态链入)
+    "${SOURCES_DIR}/lib/cjson/lua_cjson.c"
+    "${SOURCES_DIR}/lib/cjson/fpconv.c"
+    "${SOURCES_DIR}/lib/cjson/strbuf.c"
     "${GGELUA_SRC_DIR}/ios_network.m"
     "${GGELUA_SRC_DIR}/print/cprint.c"
     "${GGELUA_SRC_DIR}/nanoid/crypto_random.cpp"
@@ -184,6 +188,7 @@ target_include_directories(ggelua PRIVATE
     "${GGELUA_SRC_DIR}/print"
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"  # rijndael.h (AES)
     "${SDL_INCLUDE_DIR}"                      # main.c/script.c 依赖 SDL 头文件
+    "${SOURCES_DIR}/lib/cjson"                # cjson 头文件 (strbuf.h, fpconv.h)
 )
 target_link_libraries(ggelua PUBLIC lua54 zlib ghv)
 target_compile_definitions(ggelua PRIVATE
