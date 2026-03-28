@@ -36,7 +36,7 @@ static int LUA_GBK2UTF8(lua_State *L)
     luaL_Buffer b;
     luaL_buffinit(L, &b);
     SDL_iconv_t ic = SDL_iconv_open("UTF-8", "GBK");
-    if (ic != NULL)
+    if (ic != (SDL_iconv_t)-1 && ic != NULL)
     {
         for (;;)
         {
@@ -76,7 +76,7 @@ static int LUA_UTF82GBK(lua_State *L)
     luaL_Buffer b;
     luaL_buffinit(L, &b);
     SDL_iconv_t ic = SDL_iconv_open("GBK", "UTF-8");
-    if (ic != NULL)
+    if (ic != (SDL_iconv_t)-1 && ic != NULL)
     {
         for (;;)
         {
@@ -312,15 +312,16 @@ static int LUA_GetBasePath(lua_State *L)
 //ANDROID /data/data/com.GGELUA.game/files
 static int LUA_GetPrefPath(lua_State *L)
 {
-    const char *application = luaL_optstring(L, 1, "GGELUA");
+#ifdef __WIN32__
+    const char *application = luaL_checkstring(L, 1);
+#else
+    const char *application = NULL;
+#endif
     char *str = SDL_GetPrefPath("GGELUA", application);
 
-    if (str) {
-        lua_pushstring(L, str);
-        SDL_free(str);
-        return 1;
-    }
-    return 0;
+    lua_pushstring(L, str);
+    SDL_free(str);
+    return 1;
 }
 
 static int LUA_MessageBox(lua_State *L)
@@ -412,8 +413,6 @@ static const luaL_Reg lib_list[] = {
     {"ghv.HttpRequests", luaopen_ghv_HttpRequests},
     {"ghv.download", luaopen_ghv_download},
     {"gge.core", luaopen_ggecore},  /* 脚本加解密, preload 保证引导阶段可用 */
-    {"cjson", luaopen_cjson},        /* JSON 编解码 */
-    {"cjson.safe", luaopen_cjson_safe},
     
     {NULL, NULL},
 };
