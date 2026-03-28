@@ -216,7 +216,7 @@
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;crypto;%(LibraryDependencies)</LibraryDependencies>

@@ -195,7 +195,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -204,7 +204,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -213,7 +213,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -222,7 +222,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -231,7 +231,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -240,7 +240,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -249,7 +249,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -258,7 +258,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\flac-$(libflac_ver)\src\libFLAC\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libogg-$(libogg_ver)\android;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

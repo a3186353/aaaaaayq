@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -94,7 +94,7 @@
       <AdditionalDependencies>lua54_64.lib;nng_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y $(OutDir)$(TargetFileName) $(SolutionDir)..\GGELUA\R64\lib</Command>
+      <Command>if exist "$(SolutionDir)..\GGELUA\R64\lib\" (copy /y $(OutDir)$(TargetFileName) $(SolutionDir)..\GGELUA\R64\lib) else (echo PostBuild: skip copy)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

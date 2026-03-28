@@ -153,7 +153,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -164,7 +164,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -175,7 +175,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -186,7 +186,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -197,7 +197,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -208,7 +208,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -219,7 +219,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -230,7 +230,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_ttf;$(SolutionDir)..\..\Dependencies\SDL_FontCache;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

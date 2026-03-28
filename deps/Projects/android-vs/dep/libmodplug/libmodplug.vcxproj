@@ -204,56 +204,56 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-$(libmodplug_ver)\src\libmodplug;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>HAVE_SETENV;HAVE_SINF;HAVE_STDINT_H;MMCMP_SUPPORT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
