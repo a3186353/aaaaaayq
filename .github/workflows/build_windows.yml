@@ -72,7 +72,7 @@ jobs:
           /p:Platform=${{ matrix.platform }} `
           /p:PlatformToolset=v143 `
           /p:PostBuildEventUseInBuild=false `
-          /m /v:normal /clp:Summary
+          /m /v:minimal
 
     - name: Collect DLL artifacts
       shell: pwsh
