@@ -37,3 +37,7 @@ Thumbs.db
 *.recipe
 *.o
 *.a
+
+# 例外: Android 预编译第三方静态库 (无法在 CI 交叉编译)
+!deps/Dependencies/HP-Socket/Linux/dependent/**/*.a
+!deps/Dependencies/openssl/android/**/*.a

@@ -66,10 +66,12 @@ jobs:
       run: |
         # 强制使用 v143 工具集 (VS 2022)
         # 项目文件中的 v145 在 CI Runner 上不可用
+        # PostBuildEvent 禁用: 仅用于本地开发的 copy 操作，CI 上目标不存在
         msbuild ${{ env.SOLUTION_FILE }} `
           /p:Configuration=${{ matrix.configuration }} `
           /p:Platform=${{ matrix.platform }} `
           /p:PlatformToolset=v143 `
+          /p:PostBuildEventUseInBuild=false `
           /m /v:minimal
 
     - name: Collect DLL artifacts

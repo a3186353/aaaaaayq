@@ -79,6 +79,34 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
+    - name: Verify prebuilt libraries
+      shell: pwsh
+      run: |
+        # ggelua.so 链接 libcrypto.a, ghpsocket.so 链接 libbrotli.a + libcrypto.a
+        # 这些预编译的 .a 文件已提交到仓库中
+        $platform = '${{ matrix.platform }}'
+
+        # 检查 openssl libcrypto.a (ggelua 依赖)
+        $opensslLib = "deps/Dependencies/openssl/android/$platform/lib/libcrypto.a"
+        if (Test-Path $opensslLib) {
+          $size = [math]::Round((Get-Item $opensslLib).Length/1KB, 1)
+          Write-Host "✅ OpenSSL libcrypto.a ($platform): $size KB"
+        } else {
+          Write-Warning "❌ Missing: $opensslLib"
+        }
+
+        # 检查 HP-Socket 预编译库 (ghpsocket 依赖)
+        $abiMap = @{ 'ARM'='armeabi-v7a'; 'ARM64'='arm64-v8a'; 'x86'='x86'; 'x64'='x86_64' }
+        $abi = $abiMap[$platform]
+        $hpDir = "deps/Dependencies/HP-Socket/Linux/dependent/android-ndk/$abi/lib"
+        if (Test-Path $hpDir) {
+          Get-ChildItem $hpDir -Filter "*.a" | ForEach-Object {
+            Write-Host "✅ HP-Socket $($_.Name) ($abi): $([math]::Round($_.Length/1KB, 1)) KB"
+          }
+        } else {
+          Write-Warning "❌ Missing: $hpDir"
+        }
+
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh
       run: |
@@ -87,6 +115,7 @@ jobs:
         msbuild ${{ env.SOLUTION_FILE }} `
           /p:Configuration=${{ matrix.configuration }} `
           /p:Platform=${{ matrix.platform }} `
+          /p:PostBuildEventUseInBuild=false `
           /m /v:minimal
 
     - name: Collect .so artifacts
