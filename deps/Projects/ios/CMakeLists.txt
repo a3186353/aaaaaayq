@@ -830,6 +830,7 @@ target_include_directories(ggelua_fw PRIVATE
     "${LIBHV_DIR}" "${LIBHV_DIR}/base" "${LIBHV_DIR}/event"
     "${LIBHV_DIR}/evpp" "${LIBHV_DIR}/http" "${LIBHV_DIR}/http/client"
     "${LIBHV_DIR}/ssl" "${LIBHV_DIR}/cpputil" "${LIBHV_DIR}/util"
+    "${SOURCES_DIR}/lib/cjson"                # cjson 头文件 (strbuf.h, fpconv.h)
 )
 target_compile_definitions(ggelua_fw PRIVATE
     LUA_USE_IOS LUA_COMPAT_APIINTCASTS

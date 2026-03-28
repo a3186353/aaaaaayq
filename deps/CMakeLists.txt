@@ -251,6 +251,10 @@ set(GGELUA_CORE_SOURCES
     "${GGELUA_SRC_DIR}/nanoid/lua.cpp"
     "${GGELUA_SRC_DIR}/uuid/lua.c"
     "${GGELUA_SRC_DIR}/uuid/uuid4.c"
+    # cjson (JSON 编解码, 静态编入 ggelua)
+    "${SOURCES_DIR}/lib/cjson/lua_cjson.c"
+    "${SOURCES_DIR}/lib/cjson/fpconv.c"
+    "${SOURCES_DIR}/lib/cjson/strbuf.c"
 )
 
 # iOS 独有: Objective-C 网络权限请求
@@ -266,6 +270,7 @@ target_include_directories(ggelua_core PRIVATE
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"    # rijndael.h (AES 实现)
     "${SDL_INCLUDE_DIR}"                        # main.c/script.c 依赖 SDL 头文件
     "${GHV_SRC_DIR}"                            # ghv_common.h (main.c 中 ghv 轮询)
+    "${SOURCES_DIR}/lib/cjson"                  # cjson 头文件 (strbuf.h, fpconv.h)
 )
 target_link_libraries(ggelua_core PUBLIC lua54 zlib ghv)
 
