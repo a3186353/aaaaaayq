@@ -94,7 +94,8 @@
       <AdditionalDependencies>lua54_64.lib;nng_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if exist "$(SolutionDir)..\GGELUA\R64\lib\" (copy /y $(OutDir)$(TargetFileName) $(SolutionDir)..\GGELUA\R64\lib) else (echo PostBuild: skip copy)</Command>
+      <Command>if exist "$(SolutionDir)..\GGELUA\R64\lib\" (copy /y $(OutDir)$(TargetFileName) $(SolutionDir)..\GGELUA\R64\lib) else (echo PostBuild: skip copy)
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

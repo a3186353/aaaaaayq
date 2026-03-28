@@ -13,8 +13,8 @@
     <ClCompile>
       <PreprocessorDefinitions>LUA_LIB;LUA_COMPAT_APIINTCASTS;_FILE_OFFSET_BITS=64;_GNU_SOURCE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- 安全加固: 隐藏内部符号 + 栈保护 + 位置无关代码 -->
-      <!-- NDK r27c 修复: -nostdinc++ 禁用默认 C++ stdlib 搜索，然后通过 -I 重新添加 libc++ 以修复头文件搜索顺序冲突 -->
-      <AdditionalOptions>-nostdinc++ -I "$(VS_NdkRoot)\toolchains\llvm\prebuilt\windows-x86_64\sysroot\usr\include\c++\v1" -fvisibility=hidden -fvisibility-inlines-hidden -fstack-protector-strong -fPIC %(AdditionalOptions)</AdditionalOptions>
+      <!-- 安全加固标志 (已移除 -nostdinc++ — 该 hack 仅适用于 NDK r27c，CI 使用的 Clang_5_0/NDK r23c 不兼容) -->
+      <AdditionalOptions>-fvisibility=hidden -fvisibility-inlines-hidden -fstack-protector-strong -fPIC %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
 

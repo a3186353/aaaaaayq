@@ -65,7 +65,8 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>if exist "$(SolutionDir)..\..\GGELUA\" (copy /y "$(OutDir)$(TargetName).exe" "$(SolutionDir)..\..\GGELUA\$(TargetName).exe") else (echo PostBuild: skip copy, target dir not found)</Command>
+      <Command>if exist "$(SolutionDir)..\..\GGELUA\" (copy /y "$(OutDir)$(TargetName).exe" "$(SolutionDir)..\..\GGELUA\$(TargetName).exe") else (echo PostBuild: skip copy, target dir not found)
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -82,7 +83,8 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <PostBuildEvent>
-      <Command>if exist "$(SolutionDir)..\..\GGELUA\" (copy /y "$(OutDir)$(TargetName).exe" "$(SolutionDir)..\..\GGELUA\$(TargetName).exe") else (echo PostBuild: skip copy, target dir not found)</Command>
+      <Command>if exist "$(SolutionDir)..\..\GGELUA\" (copy /y "$(OutDir)$(TargetName).exe" "$(SolutionDir)..\..\GGELUA\$(TargetName).exe") else (echo PostBuild: skip copy, target dir not found)
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

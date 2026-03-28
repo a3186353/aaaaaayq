@@ -21,8 +21,8 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <!-- Fix: c++17 -> c++1z (the valid MSBuild enum value for C++17 in Android Clang targets) -->
-      <CppLanguageStandard>c++1z</CppLanguageStandard>
+      <!-- NDK r23c 兼容: c++14 避免 math.h 命名空间冲突（c++1z 在 r23c 下触发 ::atan2f 等缺失） -->
+      <CppLanguageStandard>c++14</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
 </Project>

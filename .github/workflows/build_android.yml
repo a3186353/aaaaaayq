@@ -82,12 +82,11 @@ jobs:
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh
       run: |
-        # NDK r23c + C++17 有 math.h 命名空间冲突
-        # 降级到 c++14 避免 ::fabsf 等类型找不到的问题
+        # C++ 标准已通过 Directory.Build.targets 统一设置为 c++14
+        # 安全加固标志已通过 lua.props 统一传递
         msbuild ${{ env.SOLUTION_FILE }} `
           /p:Configuration=${{ matrix.configuration }} `
           /p:Platform=${{ matrix.platform }} `
-          /p:CppLanguageStandard=c++14 `
           /m /v:minimal
 
     - name: Collect .so artifacts
