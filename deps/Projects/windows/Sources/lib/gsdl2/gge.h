@@ -38,7 +38,7 @@ int bind_haptic(lua_State* L);
 int bind_hints(lua_State* L);
 int bind_joystick(lua_State* L);
 int bind_keyboard(lua_State* L);
-int bind_locale(lua_State* L);
+//int bind_locale(lua_State* L); // 已弃用: locale.c 未实现
 int bind_log(lua_State* L);
 int bind_messagebox(lua_State* L);
 //int bind_metal(lua_State* L);

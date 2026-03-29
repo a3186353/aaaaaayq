@@ -31,17 +31,21 @@ int luaopen_cprint(lua_State* L);
 int luaopen_nanoid(lua_State* L);
 int luaopen_aes(lua_State* L);
 
+// cjson (JSON encoder/decoder, 内嵌到引擎核心)
+int luaopen_cjson(lua_State* L);
+int luaopen_cjson_safe(lua_State* L);
+
 // ghv (libhv bindings)
 int luaopen_ghv_TcpClient(lua_State* L);
 int luaopen_ghv_TcpServer(lua_State* L);
 int luaopen_ghv_HttpRequests(lua_State* L);
 int luaopen_ghv_download(lua_State* L);
+int luaopen_ghv_WebSocketServer(lua_State* L);
 
 // gge.core (脚本加解密引擎, 内嵌于 libggelua)
 int luaopen_ggecore(lua_State* L);
 
-// cjson (JSON 编解码)
-int luaopen_cjson(lua_State* L);
-int luaopen_cjson_safe(lua_State* L);
+// physfs (虚拟文件系统, 统一资源访问层)
+int luaopen_physfs(lua_State* L);
 
 GGE_EXPORT int luaopen_ggelua(lua_State* L);
