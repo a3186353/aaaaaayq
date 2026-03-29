@@ -37,6 +37,15 @@
     <ClCompile Include="..\..\..\..\Sources\lib\cjson\lua_cjson.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\cjson\fpconv.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\cjson\strbuf.c" />
+    <!-- PhysFS (虚拟文件系统, 直接编入 ggelua.dll) -->
+    <ClCompile Include="..\..\..\..\Sources\lib\gphysfs\gphysfs.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_byteorder.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_unicode.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_archiver_dir.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_archiver_unpacked.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_archiver_zip.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\physfs\src\physfs_platform_windows.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="$(SolutionDir)..\..\Sources\lib\ggelua\lfs.h" />
@@ -125,9 +134,9 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_DEBUG;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_DEBUG;_WINDOWS;_USRDLL;PHYSFS_SUPPORTS_ZIP=1;PHYSFS_SUPPORTS_7Z=0;PHYSFS_SUPPORTS_GRP=0;PHYSFS_SUPPORTS_WAD=0;PHYSFS_SUPPORTS_HOG=0;PHYSFS_SUPPORTS_MVL=0;PHYSFS_SUPPORTS_QPAK=0;PHYSFS_SUPPORTS_SLB=0;PHYSFS_SUPPORTS_VDF=0;PHYSFS_SUPPORTS_ISO9660=0;PHYSFS_SUPPORTS_CSM=0;PHYSFS_SUPPORTS_LECARCHIVES=0;PHYSFS_SUPPORTS_POD=0;PHYSFS_SUPPORTS_ROFS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\sdl\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Sources\lib\cjson;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\sdl\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Sources\lib\cjson;$(SolutionDir)..\..\Dependencies\physfs\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
@@ -145,8 +154,8 @@
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;MISSING_ISINF;NDEBUG;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\sdl\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Sources\lib\cjson;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;MISSING_ISINF;NDEBUG;_WINDOWS;_USRDLL;PHYSFS_SUPPORTS_ZIP=1;PHYSFS_SUPPORTS_7Z=0;PHYSFS_SUPPORTS_GRP=0;PHYSFS_SUPPORTS_WAD=0;PHYSFS_SUPPORTS_HOG=0;PHYSFS_SUPPORTS_MVL=0;PHYSFS_SUPPORTS_QPAK=0;PHYSFS_SUPPORTS_SLB=0;PHYSFS_SUPPORTS_VDF=0;PHYSFS_SUPPORTS_ISO9660=0;PHYSFS_SUPPORTS_CSM=0;PHYSFS_SUPPORTS_LECARCHIVES=0;PHYSFS_SUPPORTS_POD=0;PHYSFS_SUPPORTS_ROFS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\sdl\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Sources\lib\cjson;$(SolutionDir)..\..\Dependencies\physfs\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp17</LanguageStandard>

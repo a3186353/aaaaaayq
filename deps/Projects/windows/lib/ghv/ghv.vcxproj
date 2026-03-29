@@ -62,7 +62,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_IOCP;_DEBUG;_WINDOWS;_USRDLL;GHV_EXPORTS;LUA_BUILD_AS_DLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Dependencies\openssl\include;$(SolutionDir)..\..\Sources\lib\ghv;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\http\server;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Dependencies\openssl\include;$(SolutionDir)..\..\Sources\lib\ghv;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -85,7 +85,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_IOCP;NDEBUG;_WINDOWS;_USRDLL;GHV_EXPORTS;LUA_BUILD_AS_DLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Dependencies\openssl\include;$(SolutionDir)..\..\Sources\lib\ghv;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\http\server;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Dependencies\openssl\include;$(SolutionDir)..\..\Sources\lib\ghv;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -108,6 +108,7 @@
     <ClCompile Include="..\..\..\..\Sources\lib\ghv\ghv_crypto.cpp" />
     <ClCompile Include="..\..\..\..\Sources\lib\ghv\ghv_http.cpp" />
     <ClCompile Include="..\..\..\..\Sources\lib\ghv\ghv_download.cpp" />
+    <ClCompile Include="..\..\..\..\Sources\lib\ghv\ghv_websocket_server.cpp" />
     <ClCompile Include="..\..\..\..\Sources\lib\ghv\ghv_loop_init.c" />
   </ItemGroup>
 
@@ -134,13 +135,24 @@
     <ClCompile Include="..\..\..\..\Dependencies\libhv\event\wepoll\wepoll.c" />
   </ItemGroup>
 
-  <!-- libhv http sources -->
+  <!-- libhv http sources (client + server + websocket) -->
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\HttpMessage.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\HttpParser.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\Http1Parser.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\WebSocketParser.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\WebSocketChannel.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\websocket_parser.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\wsdef.c" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\client\AsyncHttpClient.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\client\HttpClient.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\HttpServer.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\HttpHandler.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\HttpService.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\HttpMiddleware.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\HttpResponseWriter.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\FileCache.cpp" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\http\server\http_page.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\http_content.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\httpdef.c" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\http_parser.c" />
@@ -159,6 +171,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Dependencies\libhv\util\base64.c" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\util\md5.c" />
+    <ClCompile Include="..\..\..\..\Dependencies\libhv\util\sha1.c" />
   </ItemGroup>
 
   <!-- libhv ssl stub (no SSL) -->

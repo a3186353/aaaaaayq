@@ -60,6 +60,7 @@ jobs:
 
         ./Configure ios64-xcrun no-shared no-tests no-apps \
           no-ssl3 no-comp no-engine no-deprecated \
+          no-sm3 no-sm4 \
           --prefix="${INSTALL_DIR}" \
           --openssldir="${INSTALL_DIR}/ssl"
 
