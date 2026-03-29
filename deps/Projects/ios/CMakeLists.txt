@@ -73,6 +73,7 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/base/hsocket.c"
     "${LIBHV_DIR}/base/htime.c"
     "${LIBHV_DIR}/base/hversion.c"
+    "${LIBHV_DIR}/base/hmain.c"
     # event (kqueue for iOS/macOS)
     "${LIBHV_DIR}/event/hevent.c"
     "${LIBHV_DIR}/event/hloop.c"
@@ -81,12 +82,23 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/event/unpack.c"
     "${LIBHV_DIR}/event/noevent.c"
     "${LIBHV_DIR}/event/select.c"
-    # http
+    # http (client + server + websocket)
     "${LIBHV_DIR}/http/HttpMessage.cpp"
     "${LIBHV_DIR}/http/HttpParser.cpp"
     "${LIBHV_DIR}/http/Http1Parser.cpp"
+    "${LIBHV_DIR}/http/WebSocketParser.cpp"
+    "${LIBHV_DIR}/http/WebSocketChannel.cpp"
+    "${LIBHV_DIR}/http/websocket_parser.c"
+    "${LIBHV_DIR}/http/wsdef.c"
     "${LIBHV_DIR}/http/client/AsyncHttpClient.cpp"
     "${LIBHV_DIR}/http/client/HttpClient.cpp"
+    "${LIBHV_DIR}/http/server/HttpServer.cpp"
+    "${LIBHV_DIR}/http/server/HttpHandler.cpp"
+    "${LIBHV_DIR}/http/server/HttpService.cpp"
+    "${LIBHV_DIR}/http/server/HttpMiddleware.cpp"
+    "${LIBHV_DIR}/http/server/HttpResponseWriter.cpp"
+    "${LIBHV_DIR}/http/server/FileCache.cpp"
+    "${LIBHV_DIR}/http/server/http_page.cpp"
     "${LIBHV_DIR}/http/http_content.cpp"
     "${LIBHV_DIR}/http/httpdef.c"
     "${LIBHV_DIR}/http/http_parser.c"
@@ -96,9 +108,11 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/cpputil/hstring.cpp"
     "${LIBHV_DIR}/cpputil/hurl.cpp"
     "${LIBHV_DIR}/cpputil/hasync.cpp"
+    "${LIBHV_DIR}/cpputil/hdir.cpp"
     # util
     "${LIBHV_DIR}/util/base64.c"
     "${LIBHV_DIR}/util/md5.c"
+    "${LIBHV_DIR}/util/sha1.c"
     # ssl stub
     "${LIBHV_DIR}/ssl/nossl.c"
     "${LIBHV_DIR}/ssl/hssl.c"
@@ -111,6 +125,7 @@ target_include_directories(libhv PUBLIC
     "${LIBHV_DIR}/evpp"
     "${LIBHV_DIR}/http"
     "${LIBHV_DIR}/http/client"
+    "${LIBHV_DIR}/http/server"
     "${LIBHV_DIR}/ssl"
     "${LIBHV_DIR}/cpputil"
     "${LIBHV_DIR}/util"
@@ -131,6 +146,7 @@ set(GHV_SOURCES
     "${GHV_SRC_DIR}/ghv_crypto.cpp"
     "${GHV_SRC_DIR}/ghv_http.cpp"
     "${GHV_SRC_DIR}/ghv_download.cpp"
+    "${GHV_SRC_DIR}/ghv_websocket_server.cpp"
     "${GHV_SRC_DIR}/ghv_loop_init.c"
 )
 
@@ -138,6 +154,16 @@ add_library(ghv STATIC ${GHV_SOURCES})
 target_include_directories(ghv PRIVATE
     "${GHV_SRC_DIR}"
     "${DEPS_DIR}/openssl/include"   # OpenSSL 头文件（平台无关）
+    # libhv 的完整 include 树 (Xcode 不可靠传递 PUBLIC include)
+    "${LIBHV_DIR}"
+    "${LIBHV_DIR}/http"
+    "${LIBHV_DIR}/http/server"
+    "${LIBHV_DIR}/http/client"
+    "${LIBHV_DIR}/evpp"
+    "${LIBHV_DIR}/base"
+    "${LIBHV_DIR}/event"
+    "${LIBHV_DIR}/cpputil"
+    "${LIBHV_DIR}/util"
 )
 target_link_libraries(ghv PUBLIC lua54 libhv)
 
@@ -155,6 +181,45 @@ else()
 endif()
 
 # ============================================================================
+# 4b. PhysFS 静态库 (虚拟文件系统 — 统一资源访问层)
+# ============================================================================
+set(PHYSFS_SRC_DIR "${DEPS_DIR}/physfs/src")
+get_filename_component(PHYSFS_SRC_DIR "${PHYSFS_SRC_DIR}" ABSOLUTE)
+message(STATUS "[physfs] PHYSFS_SRC_DIR = ${PHYSFS_SRC_DIR}")
+if(NOT EXISTS "${PHYSFS_SRC_DIR}/physfs.h")
+    message(FATAL_ERROR "[physfs] physfs.h not found at ${PHYSFS_SRC_DIR}/physfs.h")
+endif()
+set(PHYSFS_SOURCES
+    "${PHYSFS_SRC_DIR}/physfs.c"
+    "${PHYSFS_SRC_DIR}/physfs_byteorder.c"
+    "${PHYSFS_SRC_DIR}/physfs_unicode.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_dir.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_unpacked.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_zip.c"
+    "${PHYSFS_SRC_DIR}/physfs_platform_posix.c"
+    "${PHYSFS_SRC_DIR}/physfs_platform_apple.m"
+    "${PHYSFS_SRC_DIR}/physfs_platform_unix.c"
+)
+add_library(physfs STATIC ${PHYSFS_SOURCES})
+target_include_directories(physfs PUBLIC "${PHYSFS_SRC_DIR}")
+target_compile_definitions(physfs PRIVATE
+    PHYSFS_SUPPORTS_ZIP=1
+    PHYSFS_SUPPORTS_7Z=0
+    PHYSFS_SUPPORTS_GRP=0
+    PHYSFS_SUPPORTS_WAD=0
+    PHYSFS_SUPPORTS_HOG=0
+    PHYSFS_SUPPORTS_MVL=0
+    PHYSFS_SUPPORTS_QPAK=0
+    PHYSFS_SUPPORTS_SLB=0
+    PHYSFS_SUPPORTS_VDF=0
+    PHYSFS_SUPPORTS_ISO9660=0
+    PHYSFS_SUPPORTS_CSM=0
+    PHYSFS_SUPPORTS_LECARCHIVES=0
+    PHYSFS_SUPPORTS_POD=0
+    PHYSFS_SUPPORTS_ROFS=0
+)
+
+# ============================================================================
 # 5. ggelua 静态库 (引擎核心 Lua 绑定)
 # ============================================================================
 set(GGELUA_SRC_DIR "${SOURCES_DIR}/lib/ggelua")
@@ -169,10 +234,6 @@ set(GGELUA_SOURCES
     "${GGELUA_SRC_DIR}/script.c"
     "${GGELUA_SRC_DIR}/lua_aes.c"
     "${GGELUA_SRC_DIR}/core.c"
-    # cjson (JSON 编解码, Windows 上是独立 DLL, iOS/Android 静态链入)
-    "${SOURCES_DIR}/lib/cjson/lua_cjson.c"
-    "${SOURCES_DIR}/lib/cjson/fpconv.c"
-    "${SOURCES_DIR}/lib/cjson/strbuf.c"
     "${GGELUA_SRC_DIR}/ios_network.m"
     "${GGELUA_SRC_DIR}/print/cprint.c"
     "${GGELUA_SRC_DIR}/nanoid/crypto_random.cpp"
@@ -180,17 +241,24 @@ set(GGELUA_SOURCES
     "${GGELUA_SRC_DIR}/nanoid/lua.cpp"
     "${GGELUA_SRC_DIR}/uuid/lua.c"
     "${GGELUA_SRC_DIR}/uuid/uuid4.c"
+    # cjson (内嵌到引擎核心, 避免独立 framework)
+    "${SOURCES_DIR}/lib/cjson/lua_cjson.c"
+    "${SOURCES_DIR}/lib/cjson/fpconv.c"
+    "${SOURCES_DIR}/lib/cjson/strbuf.c"
+    # PhysFS Lua 绑定
+    "${SOURCES_DIR}/lib/gphysfs/gphysfs.c"
 )
 add_library(ggelua STATIC ${GGELUA_SOURCES})
 target_include_directories(ggelua PRIVATE
     "${GGELUA_SRC_DIR}"
     "${GGELUA_SRC_DIR}/uuid"
     "${GGELUA_SRC_DIR}/print"
+    "${SOURCES_DIR}/lib/cjson"                # cjson 头文件 (fpconv.h, strbuf.h)
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"  # rijndael.h (AES)
     "${SDL_INCLUDE_DIR}"                      # main.c/script.c 依赖 SDL 头文件
-    "${SOURCES_DIR}/lib/cjson"                # cjson 头文件 (strbuf.h, fpconv.h)
+    "${PHYSFS_SRC_DIR}"                       # physfs.h (gphysfs.c 依赖)
 )
-target_link_libraries(ggelua PUBLIC lua54 zlib ghv)
+target_link_libraries(ggelua PUBLIC lua54 zlib ghv physfs)
 target_compile_definitions(ggelua PRIVATE
     LUA_USE_POSIX
     HAS_AES_HARDWARE=0  # 禁用 AES-NI/NEON 硬件加速 (lua_aes.c 内联 #include rijndael.c → aes_hardware.c)
@@ -351,13 +419,10 @@ set(GSDL2_SOURCES
     "${GSDL2_SRC_DIR}/hints.c"
     "${GSDL2_SRC_DIR}/joystick.c"
     "${GSDL2_SRC_DIR}/keyboard.c"
-    "${GSDL2_SRC_DIR}/locale.c"
     "${GSDL2_SRC_DIR}/log.c"
     "${GSDL2_SRC_DIR}/messagebox.c"
-    "${GSDL2_SRC_DIR}/metal.c"
     "${GSDL2_SRC_DIR}/misc.c"
     "${GSDL2_SRC_DIR}/mouse.c"
-    "${GSDL2_SRC_DIR}/opengl.c"
     "${GSDL2_SRC_DIR}/pixels.c"
     "${GSDL2_SRC_DIR}/platform.c"
     "${GSDL2_SRC_DIR}/power.c"
@@ -367,7 +432,6 @@ set(GSDL2_SOURCES
     "${GSDL2_SRC_DIR}/sdl.c"
     "${GSDL2_SRC_DIR}/sdl_image.c"
     "${GSDL2_SRC_DIR}/sdl_mixer.c"
-    "${GSDL2_SRC_DIR}/sdl_net.c"
     "${GSDL2_SRC_DIR}/sdl_ttf.c"
     "${GSDL2_SRC_DIR}/sensor.c"
     "${GSDL2_SRC_DIR}/shape.c"
@@ -444,20 +508,61 @@ set(SDL2IMAGE_SAMPLES OFF CACHE BOOL "" FORCE)
 set(SDL2IMAGE_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL2IMAGE_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-# iOS 上使用 ImageIO 原生加载 (支持 JPG/PNG/WEBP 等所有格式)
+# iOS 上使用 ImageIO 原生加载 (支持 JPG/PNG 等常见格式)
 set(SDL2IMAGE_BACKEND_STB ON CACHE BOOL "" FORCE)
 set(SDL2IMAGE_BACKEND_IMAGEIO ON CACHE BOOL "" FORCE)
-set(SDL2IMAGE_VENDORED OFF CACHE BOOL "" FORCE)
-# 不需要外部 libpng/libjpeg (ImageIO + stb 已覆盖)
-set(SDL2IMAGE_JPG OFF CACHE BOOL "" FORCE)
-set(SDL2IMAGE_PNG OFF CACHE BOOL "" FORCE)
+# WEBP 需要 vendored libwebp 才会定义 LOAD_WEBP 宏 (ImageIO 不会声明)
+# 使用 SDL_image 自带的 libwebp-1.3.2 源码静态编译，与 Windows 端对齐
+# SDL_image vendored 检查需要 external/libwebp，但实际目录是 libwebp-1.3.2
+# 创建符号链接以满足 sdl_check_project_in_subfolder 检查
+set(_WEBP_LINK "${DEPS_DIR}/SDL_image/external/libwebp")
+if(NOT EXISTS "${_WEBP_LINK}")
+    file(CREATE_LINK
+        "${DEPS_DIR}/SDL_image/external/libwebp-1.3.2"
+        "${_WEBP_LINK}"
+        SYMBOLIC)
+    message(STATUS "[SDL_image] Created symlink: external/libwebp -> libwebp-1.3.2")
+endif()
+# 关闭 libwebp 的命令行工具和 extras 构建 (避免 install() 冲突)
+set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_CWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_DWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_GIF2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_IMG2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_VWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBP_JS OFF CACHE BOOL "" FORCE)
+set(SDL2IMAGE_VENDORED ON CACHE BOOL "" FORCE)
+set(SDL2IMAGE_WEBP ON CACHE BOOL "" FORCE)
+set(SDL2IMAGE_WEBP_VENDORED ON CACHE BOOL "" FORCE)
+set(SDL2IMAGE_WEBP_SHARED OFF CACHE BOOL "" FORCE)
+# JPG/PNG 格式加载器必须 ON，否则 LOAD_PNG/LOAD_JPG 宏不定义，IMG_Init 报错
+# STB 后端处理实际解码，不需要外部 libpng/libjpeg
+set(SDL2IMAGE_JPG ON CACHE BOOL "" FORCE)
+set(SDL2IMAGE_PNG ON CACHE BOOL "" FORCE)
+set(SDL2IMAGE_PNG_SAVE OFF CACHE BOOL "" FORCE)  # 不需要 PNG 保存功能
+set(SDL2IMAGE_JPG_SAVE OFF CACHE BOOL "" FORCE)  # 不需要 JPG 保存功能
 set(SDL2IMAGE_TIF OFF CACHE BOOL "" FORCE)
-set(SDL2IMAGE_WEBP OFF CACHE BOOL "" FORCE)
 set(SDL2IMAGE_AVIF OFF CACHE BOOL "" FORCE)
 set(SDL2IMAGE_JXL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${DEPS_DIR}/SDL_image" "${CMAKE_BINARY_DIR}/SDL_image" EXCLUDE_FROM_ALL)
 # 覆盖工具链 -fvisibility=hidden，确保 IMG_* 符号在动态 framework 中可见
 target_compile_options(SDL2_image PRIVATE "-fvisibility=default")
+# libwebp CMakeLists.txt 内部设置了 CMAKE_C_VISIBILITY_PRESET=hidden
+# webp 目标由 webpdecode/webpdsp/webpencode/webputils OBJECT 库聚合而成
+# 必须覆盖这些内部 OBJECT 目标的可见性，否则 _WebPDecodeRGBAInto 等符号
+# 在 SDL2_image_fw 中被标记为 hidden，gsdl2_fw dlopen 时 flat namespace 解析失败
+set(_WEBP_INTERNAL_TARGETS webp webpdemux webpdecode webpdspdecode
+    webputilsdecode webpencode webpdsp webputils sharpyuv)
+foreach(_t IN LISTS _WEBP_INTERNAL_TARGETS)
+    if(TARGET ${_t})
+        set_target_properties(${_t} PROPERTIES C_VISIBILITY_PRESET default)
+        target_compile_options(${_t} PRIVATE "-fvisibility=default")
+    endif()
+endforeach()
 
 # ============================================================================
 # 14. SDL_ttf 静态库 (字体渲染 — VENDORED 模式自动构建 freetype + harfbuzz)
@@ -757,9 +862,9 @@ target_link_libraries(SDL2_mixer_ext_Static PRIVATE SDL2-static modplug vorbisid
 # ============================================================================
 # 安装规则 — 收集所有 .a 到统一输出目录
 # ============================================================================
-install(TARGETS lua54 zlib libhv ghv ggelua mygxy
+install(TARGETS lua54 zlib libhv ghv physfs ggelua mygxy
                 hiredis sqlite3 lsqlite3 gastar gsdl2
-                SDL2-static SDL2_image SDL2_ttf
+                SDL2-static SDL2_image SDL2_ttf webp webpdemux
                 freetype harfbuzz
                 sndfile ogg vorbisidec modplug mpg123
                 SDL2_mixer_ext_Static
@@ -814,29 +919,38 @@ add_library(ggelua_fw SHARED
     ${ZLIB_SOURCES}
     ${GHV_SOURCES}
     ${LIBHV_SOURCES}
+    ${PHYSFS_SOURCES}
 )
 add_ios_framework(ggelua_fw "libggelua")
 target_include_directories(ggelua_fw PRIVATE
     "${GGELUA_SRC_DIR}"
     "${GGELUA_SRC_DIR}/uuid"
     "${GGELUA_SRC_DIR}/print"
+    "${SOURCES_DIR}/lib/cjson"         # cjson 头文件
     "${LUA_SRC_DIR}"
     "${ZLIB_SRC_DIR}"
     "${GHV_SRC_DIR}"
     "${DEPS_DIR}/openssl/include"
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"
     "${SDL_INCLUDE_DIR}"
+    "${PHYSFS_SRC_DIR}"               # physfs.h (gphysfs.c 依赖)
     # libhv include dirs (hconfig.h 已统一至 LIBHV_DIR 根目录)
     "${LIBHV_DIR}" "${LIBHV_DIR}/base" "${LIBHV_DIR}/event"
     "${LIBHV_DIR}/evpp" "${LIBHV_DIR}/http" "${LIBHV_DIR}/http/client"
     "${LIBHV_DIR}/ssl" "${LIBHV_DIR}/cpputil" "${LIBHV_DIR}/util"
-    "${SOURCES_DIR}/lib/cjson"                # cjson 头文件 (strbuf.h, fpconv.h)
 )
 target_compile_definitions(ggelua_fw PRIVATE
     LUA_USE_IOS LUA_COMPAT_APIINTCASTS
     LUA_USE_POSIX
     HAS_AES_HARDWARE=0
     HV_STATICLIB HV_WITHOUT_SSL EVENT_KQUEUE
+    # PhysFS archiver 控制宏 (仅启用 ZIP + 目录)
+    PHYSFS_SUPPORTS_ZIP=1
+    PHYSFS_SUPPORTS_7Z=0 PHYSFS_SUPPORTS_GRP=0 PHYSFS_SUPPORTS_WAD=0
+    PHYSFS_SUPPORTS_HOG=0 PHYSFS_SUPPORTS_MVL=0 PHYSFS_SUPPORTS_QPAK=0
+    PHYSFS_SUPPORTS_SLB=0 PHYSFS_SUPPORTS_VDF=0 PHYSFS_SUPPORTS_ISO9660=0
+    PHYSFS_SUPPORTS_CSM=0 PHYSFS_SUPPORTS_LECARCHIVES=0
+    PHYSFS_SUPPORTS_POD=0 PHYSFS_SUPPORTS_ROFS=0
 )
 # 工具链全局 -fvisibility=hidden 会隐藏所有符号。
 # luaconf.h 的 LUAMOD_API/LUA_API 仅在 __ELF__ 平台添加 visibility("default")，
@@ -1031,8 +1145,16 @@ target_link_libraries(SDL2_fw PRIVATE
 add_library(SDL2_image_fw SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/compat/fw_stub.c"
     $<TARGET_OBJECTS:SDL2_image>
+    # webp 是纯聚合 STATIC 库 (由 webpdecode/webpdsp/webpencode/webputils 组合)
+    # $<TARGET_OBJECTS:webp> 在 Xcode 下不会递归提取底层 OBJECT 库的 .o
+    # 直接使用 OBJECT 子库，SDL_image 仅需解码功能
+    $<TARGET_OBJECTS:webpdecode>
+    $<TARGET_OBJECTS:webpdspdecode>
+    $<TARGET_OBJECTS:webputilsdecode>
+    $<TARGET_OBJECTS:webpdemux>
 )
-add_dependencies(SDL2_image_fw SDL2_image SDL2_fw)
+add_dependencies(SDL2_image_fw SDL2_image webpdecode webpdspdecode
+    webputilsdecode webpdemux SDL2_fw)
 add_ios_framework(SDL2_image_fw "SDL2_image")
 target_link_libraries(SDL2_image_fw PRIVATE
     "-Wl,-undefined,dynamic_lookup"
