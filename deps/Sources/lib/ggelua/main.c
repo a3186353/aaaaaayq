@@ -52,7 +52,9 @@ static int LUA_GBK2UTF8(lua_State *L)
         return 1;
     }
 #endif
-    return 0;
+    /* iconv 不可用（如 iOS 无 GBK 支持）：原样返回输入 */
+    lua_pushlstring(L, str, inlen);
+    return 1;
 }
 
 static int LUA_UTF82GBK(lua_State *L)
@@ -92,7 +94,9 @@ static int LUA_UTF82GBK(lua_State *L)
         return 1;
     }
 #endif
-    return 0;
+    /* iconv 不可用（如 iOS 无 GBK 支持）：原样返回输入 */
+    lua_pushlstring(L, str, inlen);
+    return 1;
 }
 #ifdef __WIN32__
 static int LUA_GetRunPath(lua_State *L)
@@ -410,11 +414,15 @@ static const luaL_Reg lib_list[] = {
     {"uuid", luaopen_uuid},
     {"nanoid", luaopen_nanoid},
     {"aes", luaopen_aes},
+    {"cjson", luaopen_cjson},
+    {"cjson.safe", luaopen_cjson_safe},
     {"ghv.TcpClient", luaopen_ghv_TcpClient},
     {"ghv.TcpServer", luaopen_ghv_TcpServer},
     {"ghv.HttpRequests", luaopen_ghv_HttpRequests},
     {"ghv.download", luaopen_ghv_download},
+    {"ghv.WebSocketServer", luaopen_ghv_WebSocketServer},
     {"gge.core", luaopen_ggecore},  /* 脚本加解密, preload 保证引导阶段可用 */
+    {"physfs", luaopen_physfs},      /* 虚拟文件系统, 统一资源访问 */
     
     {NULL, NULL},
 };

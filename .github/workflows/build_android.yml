@@ -22,174 +22,189 @@ on:
           - Release
 
 env:
-  SOLUTION_FILE: deps/Projects/android-vs/Android.sln
+  ANDROID_PROJECT_DIR: deps/Projects/android
+  BUILD_CONFIG: ${{ github.event_name == 'workflow_dispatch' && inputs.configuration || 'Release' }}
+  OPENSSL_VER: "3.6.1"
 
 jobs:
   build-android:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        configuration: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.configuration)) || fromJSON('["Release"]') }}
-        platform: [ARM, ARM64, x86, x64]
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+      fail-fast: false
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
 
-    - name: Install VS Android C++ workload
-      shell: pwsh
+    - name: Setup NDK r26d
+      uses: nttld/setup-ndk@v1
+      id: setup-ndk
+      with:
+        ndk-version: r26d
+        add-to-path: false
+
+    # ── OpenSSL 交叉编译 (per ABI, 带缓存) ──
+    - name: Cache OpenSSL (${{ matrix.abi }})
+      uses: actions/cache@v4
+      id: openssl-cache
+      with:
+        path: openssl-android-${{ matrix.abi }}
+        key: openssl-${{ env.OPENSSL_VER }}-android-${{ matrix.abi }}-v1
+
+    - name: Build OpenSSL ${{ env.OPENSSL_VER }} for Android (${{ matrix.abi }})
+      if: steps.openssl-cache.outputs.cache-hit != 'true'
       run: |
-        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        $vsPath = & $vsWhere -latest -property installationPath
-        Write-Host "VS Path: $vsPath"
+        INSTALL_DIR="${{ github.workspace }}/openssl-android-${{ matrix.abi }}"
+        OPENSSL_DIR="${{ github.workspace }}/openssl-src"
+        NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+        ABI="${{ matrix.abi }}"
 
-        # 安装 VS Android 移动开发工作负载
-        & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
-          --installPath "$vsPath" `
-          --add Microsoft.VisualStudio.Workload.NativeMobile `
-          --add Component.MDD.Android `
-          --quiet --norestart --wait
+        curl -sL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz" \
+          -o /tmp/openssl.tar.gz
+        mkdir -p "${OPENSSL_DIR}"
+        tar xzf /tmp/openssl.tar.gz -C "${OPENSSL_DIR}" --strip-components=1
 
-        Write-Host "Android C++ 移动开发工作负载已安装"
+        case "${ABI}" in
+          arm64-v8a)   TARGET="android-arm64"  ;;
+          armeabi-v7a) TARGET="android-arm"    ;;
+          x86_64)      TARGET="android-x86_64" ;;
+          x86)         TARGET="android-x86"    ;;
+        esac
 
-    - name: Diagnose NDK environment
-      shell: pwsh
+        export ANDROID_NDK_ROOT="${NDK}"
+        export PATH="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+
+        cd "${OPENSSL_DIR}"
+        ./Configure ${TARGET} -D__ANDROID_API__=24 \
+          no-shared no-tests no-apps no-docs \
+          no-ssl3 no-comp no-engine no-deprecated \
+          --prefix="${INSTALL_DIR}" \
+          --openssldir="${INSTALL_DIR}/ssl"
+
+        make -j$(nproc) build_libs
+        make install_dev DESTDIR=""
+
+        echo "=== OpenSSL ${OPENSSL_VER} for ${ABI} ==="
+        ls -la "${INSTALL_DIR}/lib/libcrypto.a" 2>/dev/null || \
+        ls -la "${INSTALL_DIR}/lib64/libcrypto.a" 2>/dev/null || \
+        echo "⚠️ libcrypto.a 路径需要检查"
+
+    # ── CMake 配置 ──
+    - name: Configure CMake (${{ matrix.abi }})
       run: |
-        # 列出所有可用的 NDK 版本
-        Write-Host "=== NDK 环境诊断 ==="
-        $ndkPaths = @(
-          "$env:ANDROID_NDK_HOME",
-          "$env:ANDROID_NDK_ROOT",
-          "C:\Microsoft\AndroidNDK\android-ndk-r23c",
-          "C:\Microsoft\AndroidNDK64\android-ndk-r23c",
-          "C:\Program Files (x86)\Android\AndroidNDK\android-ndk-r23c"
-        )
-        foreach ($p in $ndkPaths) {
-          if ($p -and (Test-Path $p)) {
-            Write-Host "  Found NDK: $p"
-            if (Test-Path "$p\source.properties") {
-              Get-Content "$p\source.properties" | Select-Object -First 3
-            }
-          }
-        }
-        # 搜索所有 NDK 安装
-        Get-ChildItem "C:\Program Files (x86)\Android\AndroidNDK" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  NDK dir: $($_.FullName)" }
-        Get-ChildItem "C:\Microsoft\AndroidNDK*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  NDK dir: $($_.FullName)" }
+        OPENSSL_INSTALL="${{ github.workspace }}/openssl-android-${{ matrix.abi }}"
 
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
+        if [ -f "${OPENSSL_INSTALL}/lib/libcrypto.a" ]; then
+          CRYPTO_LIB="${OPENSSL_INSTALL}/lib/libcrypto.a"
+        elif [ -f "${OPENSSL_INSTALL}/lib64/libcrypto.a" ]; then
+          CRYPTO_LIB="${OPENSSL_INSTALL}/lib64/libcrypto.a"
+        else
+          echo "::error::libcrypto.a not found in ${OPENSSL_INSTALL}"
+          exit 1
+        fi
+        echo "Using libcrypto.a: ${CRYPTO_LIB}"
 
-    - name: Verify prebuilt libraries
-      shell: pwsh
+        cmake -B build-android \
+          -S ${{ env.ANDROID_PROJECT_DIR }} \
+          -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=${{ matrix.abi }} \
+          -DANDROID_PLATFORM=android-24 \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} \
+          -DOPENSSL_CRYPTO_LIB="${CRYPTO_LIB}" \
+          -DCMAKE_INSTALL_PREFIX=install-android \
+          -G Ninja
+
+    - name: Build ${{ matrix.abi }} (${{ env.BUILD_CONFIG }})
+      run: cmake --build build-android -j$(nproc)
+
+    - name: Install & validate
       run: |
-        # ggelua.so 链接 libcrypto.a, ghpsocket.so 链接 libbrotli.a + libcrypto.a
-        # 这些预编译的 .a 文件已提交到仓库中
-        $platform = '${{ matrix.platform }}'
+        cmake --install build-android --config ${{ env.BUILD_CONFIG }}
 
-        # 检查 openssl libcrypto.a (ggelua 依赖)
-        $opensslLib = "deps/Dependencies/openssl/android/$platform/lib/libcrypto.a"
-        if (Test-Path $opensslLib) {
-          $size = [math]::Round((Get-Item $opensslLib).Length/1KB, 1)
-          Write-Host "✅ OpenSSL libcrypto.a ($platform): $size KB"
-        } else {
-          Write-Warning "❌ Missing: $opensslLib"
-        }
+        echo "=== 产物列表 (${{ matrix.abi }}) ==="
+        ls -la install-android/${{ matrix.abi }}/
 
-        # 检查 HP-Socket 预编译库 (ghpsocket 依赖)
-        $abiMap = @{ 'ARM'='armeabi-v7a'; 'ARM64'='arm64-v8a'; 'x86'='x86'; 'x64'='x86_64' }
-        $abi = $abiMap[$platform]
-        $hpDir = "deps/Dependencies/HP-Socket/Linux/dependent/android-ndk/$abi/lib"
-        if (Test-Path $hpDir) {
-          Get-ChildItem $hpDir -Filter "*.a" | ForEach-Object {
-            Write-Host "✅ HP-Socket $($_.Name) ($abi): $([math]::Round($_.Length/1KB, 1)) KB"
-          }
-        } else {
-          Write-Warning "❌ Missing: $hpDir"
-        }
+        GGELUA_SO="install-android/${{ matrix.abi }}/libggelua.so"
+        if [ ! -f "$GGELUA_SO" ]; then
+          echo "::error::FATAL: libggelua.so 未生成!"
+          exit 1
+        fi
+        echo "✅ libggelua.so 已生成"
 
-    - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
-      shell: pwsh
-      run: |
-        # C++ 标准已通过 Directory.Build.targets 统一设置为 c++14
-        # 安全加固标志已通过 lua.props 统一传递
-        msbuild ${{ env.SOLUTION_FILE }} `
-          /p:Configuration=${{ matrix.configuration }} `
-          /p:Platform=${{ matrix.platform }} `
-          /p:PostBuildEventUseInBuild=false `
-          /m /v:minimal
-
-    - name: Collect .so artifacts (jniLibs 结构)
-      shell: pwsh
-      run: |
-        # VS Android 输出: $(SolutionDir).$(Platform)\$(Configuration)\
-        $buildDir = "deps/Projects/android-vs/.${{ matrix.platform }}/${{ matrix.configuration }}"
-
-        # 映射 VS Platform -> APK ABI 目录名
-        $abiMap = @{
-          'ARM64' = 'arm64-v8a'
-          'ARM'   = 'armeabi-v7a'
-          'x64'   = 'x86_64'
-          'x86'   = 'x86'
-        }
-        $abi = $abiMap['${{ matrix.platform }}']
-        # 输出结构: jniLibs/{abi}/*.so — 与预编译模版目录一致
-        $outDir = "jniLibs/$abi"
-        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-
-        if (Test-Path $buildDir) {
-          Get-ChildItem -Path $buildDir -Filter "*.so" -Recurse | ForEach-Object {
-            Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)"
-            Copy-Item $_.FullName -Destination $outDir -Force
-          }
-        } else {
-          Write-Warning "Build output directory not found: $buildDir"
-          Get-ChildItem -Path "deps/Projects/android-vs" -Filter ".*" -Directory | ForEach-Object {
-            Write-Host "Found dir: $($_.Name)"
-          }
-        }
-
-        Write-Host "`n=== $abi SO 文件清单 ==="
-        Get-ChildItem $outDir -Filter "*.so" | ForEach-Object {
-          Write-Host "  $($_.Name)  $([math]::Round($_.Length/1KB, 1)) KB"
-        }
-
-    - name: Upload per-ABI artifact
+    - name: Upload per-ABI .so
       uses: actions/upload-artifact@v4
       with:
-        name: jniLibs-${{ matrix.platform }}-${{ matrix.configuration }}
-        path: jniLibs/
-        if-no-files-found: warn
-        retention-days: 30
+        name: android-${{ matrix.abi }}
+        path: install-android/
+        retention-days: 1
 
-  # ===== 合并全 ABI 为一键替换包 =====
-  merge-jniLibs:
+  # ====================================================================
+  # 合并所有 ABI .so 为一个压缩包
+  # ====================================================================
+  package:
     runs-on: ubuntu-latest
     needs: build-android
-    if: success()
     steps:
     - name: Download all ABI artifacts
       uses: actions/download-artifact@v4
       with:
-        pattern: jniLibs-*
-        path: merged/
+        pattern: android-*
+        path: jniLibs-all-abis/
         merge-multiple: true
 
-    - name: Verify merged jniLibs structure
-      shell: bash
+    - name: Validate & assemble android-libs.zip
       run: |
-        echo "=== 合并后的 jniLibs 目录结构 ==="
-        find merged/ -name "*.so" | sort
+        echo "=== 产物目录结构 ==="
+        find jniLibs-all-abis/ -type f | sort
+
         echo ""
-        echo "=== 各 ABI SO 文件数量 ==="
-        for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-          count=$(find merged/ -path "*/$abi/*.so" 2>/dev/null | wc -l)
-          echo "  $abi: $count 个 .so 文件"
+        REQUIRED_SO=(liblua54.so libggelua.so libgsdl2.so libmygxy.so libgastar.so liblsqlite3.so)
+        ABIS=(arm64-v8a armeabi-v7a x86_64 x86)
+        MISSING=()
+
+        for abi in "${ABIS[@]}"; do
+          for so in "${REQUIRED_SO[@]}"; do
+            path="jniLibs-all-abis/${abi}/${so}"
+            if [ -f "$path" ]; then
+              SIZE=$(stat -c%s "$path")
+              SIZE_KB=$((SIZE / 1024))
+              echo "  ✅ ${abi}/${so} (${SIZE_KB} KB)"
+            else
+              echo "  ❌ ${abi}/${so} MISSING"
+              MISSING+=("${abi}/${so}")
+            fi
+          done
         done
 
-    - name: Upload merged jniLibs (一键替换包)
+        echo ""
+        if [ ${#MISSING[@]} -gt 0 ]; then
+          echo "::error::缺失 ${#MISSING[@]} 个 .so: ${MISSING[*]}"
+          exit 1
+        fi
+
+        echo "=== 打包 android-libs.zip ==="
+        cd jniLibs-all-abis
+        zip -r "${{ github.workspace }}/android-libs.zip" .
+        cd "${{ github.workspace }}"
+        ls -la android-libs.zip
+
+    - name: Upload android-libs.zip
       uses: actions/upload-artifact@v4
       with:
-        name: jniLibs-all-abis
-        path: merged/
+        name: android-libs
+        path: android-libs.zip
         if-no-files-found: error
         retention-days: 30
+
+    - name: Cleanup per-ABI artifacts
+      uses: geekyeggo/delete-artifact@v5
+      with:
+        name: |
+          android-arm64-v8a
+          android-armeabi-v7a
+          android-x86_64
+          android-x86
