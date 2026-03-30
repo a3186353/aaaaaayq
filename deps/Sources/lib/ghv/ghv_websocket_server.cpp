@@ -559,4 +559,3 @@ GHV_EXPORT int luaopen_ghv_WebSocketServer(lua_State* L)
     lua_pushcfunction(L, l_ws_server_new);
     return 1;
 }
-

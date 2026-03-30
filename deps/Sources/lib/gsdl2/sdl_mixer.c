@@ -23,6 +23,7 @@ static void mix_chunk_apply_fade(Mix_Chunk* mc)
         case 32: sample_size = 4; break;
         default: return;
     }
+    int is_float = (format & (1 << 8)) != 0; /* SDL_AUDIO_MASK_DATATYPE */
 
     int frame_size = sample_size * channels;
     if (frame_size <= 0)
@@ -49,13 +50,24 @@ static void mix_chunk_apply_fade(Mix_Chunk* mc)
                 s[f * channels + c] = (Sint16)(s[f * channels + c] * t);
         }
     } else if (sample_size == 4) {
-        float* s = (float*)mc->abuf;
-        /* Fade-out only */
-        for (int f = total_frames - fade_frames; f < total_frames; f++) {
-            double t = (double)(total_frames - 1 - f) / (double)fade_frames;
-            t = t * t * (3.0 - 2.0 * t);
-            for (int c = 0; c < channels; c++)
-                s[f * channels + c] = (float)(s[f * channels + c] * t);
+        if (is_float) {
+            float* s = (float*)mc->abuf;
+            /* Fade-out only */
+            for (int f = total_frames - fade_frames; f < total_frames; f++) {
+                double t = (double)(total_frames - 1 - f) / (double)fade_frames;
+                t = t * t * (3.0 - 2.0 * t);
+                for (int c = 0; c < channels; c++)
+                    s[f * channels + c] = (float)(s[f * channels + c] * t);
+            }
+        } else {
+            Sint32* s = (Sint32*)mc->abuf;
+            /* Fade-out only (S32 integer path) */
+            for (int f = total_frames - fade_frames; f < total_frames; f++) {
+                double t = (double)(total_frames - 1 - f) / (double)fade_frames;
+                t = t * t * (3.0 - 2.0 * t);
+                for (int c = 0; c < channels; c++)
+                    s[f * channels + c] = (Sint32)(s[f * channels + c] * t);
+            }
         }
     }
 }
@@ -108,8 +120,10 @@ static Mix_Chunk* LoadWAV_RW_sndfile(SDL_RWops* rw)
 
     /* Calculate RWops size for libsndfile */
     Sint64 cur = SDL_RWtell(rw);
-    SDL_RWseek(rw, 0, RW_SEEK_END);
+    if (cur < 0) return NULL;
+    if (SDL_RWseek(rw, 0, RW_SEEK_END) < 0) { SDL_RWseek(rw, cur, RW_SEEK_SET); return NULL; }
     vdata.size = SDL_RWtell(rw);
+    if (vdata.size <= 0) { SDL_RWseek(rw, cur, RW_SEEK_SET); return NULL; }
     SDL_RWseek(rw, cur, RW_SEEK_SET);
     vdata.rw = rw;
 
@@ -235,9 +249,10 @@ static int LUA_Mix_AllocateChannels(lua_State* L)
 
 static int LUA_Mix_QuerySpec(lua_State* L)
 {
-    int frequency, channels;
-    Uint16 format;
-    Mix_QuerySpec(&frequency, &format, &channels);
+    int frequency = 0, channels = 0;
+    Uint16 format = 0;
+    if (!Mix_QuerySpec(&frequency, &format, &channels))
+        return 0;
     lua_pushinteger(L, frequency);
     lua_pushinteger(L, format);
     lua_pushinteger(L, channels);
@@ -486,7 +501,7 @@ static int LUA_Mix_GroupChannels(lua_State* L) //通道分组
 {
     int from = (int)luaL_checkinteger(L, 1);
     int to = (int)luaL_checkinteger(L, 2);
-    int tag = (int)luaL_checkinteger(L, 2);
+    int tag = (int)luaL_checkinteger(L, 3);
     lua_pushinteger(L, Mix_GroupChannels(from, to, tag));
     return 1;
 }

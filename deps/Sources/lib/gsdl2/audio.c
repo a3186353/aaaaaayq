@@ -69,7 +69,7 @@ static int LUA_OpenAudioDevice(lua_State *L)
     //int allowed_changes;
     //SDL_OpenAudioDevice();
 
-    return 1;
+    return 0;
 }
 
 static int LUA_GetAudioStatus(lua_State *L)
@@ -110,7 +110,7 @@ static int LUA_LoadWAV_RW(lua_State *L)
 
     //SDL_LoadWAV_RW(src, SDL_FALSE, &spec, &buffer, &length)
 
-    return 1;
+    return 0;
 }
 
 static int LUA_LoadWAV(lua_State *L)
@@ -122,7 +122,7 @@ static int LUA_LoadWAV(lua_State *L)
 
     //SDL_LoadWAV(path, &spec, &buffer, &length)
 
-    return 1;
+    return 0;
 }
 
 static int LUA_FreeWAV(lua_State *L)
@@ -182,7 +182,7 @@ static int LUA_MixAudio(lua_State *L)
     //
 
     //SDL_MixAudio((Uint8 *)data, (const Uint8 *)src, len, volume);
-    return 1;
+    return 0;
 }
 
 static int LUA_MixAudioFormat(lua_State *L)
@@ -198,7 +198,7 @@ static int LUA_MixAudioFormat(lua_State *L)
     //SDL_MixAudioFormat((Uint8 *)data, (const Uint8 *)src, format, len, volume);
 
     //lua_pushlstring(L, data, len);
-    return 1;
+    return 0;
 }
 
 static int LUA_QueueAudio(lua_State *L)
@@ -220,7 +220,7 @@ static int LUA_DequeueAudio(lua_State *L)
     //
     //  lua_pushlstring(L, (const char *)data, len);
 
-    return 1;
+    return 0;
 }
 
 static int LUA_GetQueuedAudioSize(lua_State *L)

@@ -118,9 +118,6 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/ssl/hssl.c"
 )
 add_library(libhv STATIC ${LIBHV_SOURCES})
-# Xcode 的 USE_HEADERMAP 默认启用，会干扰 #include "sha1.h" 等相对路径搜索
-# 禁用后让 -I 路径生效，确保 wsdef.c 能正确找到 util/sha1.h
-set_target_properties(libhv PROPERTIES XCODE_ATTRIBUTE_USE_HEADERMAP "NO")
 target_include_directories(libhv PUBLIC
     "${LIBHV_DIR}"            # hconfig.h (跨平台统一版本, 含 __APPLE__ 分支)
     "${LIBHV_DIR}/base"

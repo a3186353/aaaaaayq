@@ -422,7 +422,7 @@ add_library(main SHARED
 target_include_directories(main PRIVATE
     "${GGELUA_SRC_DIR}" "${SDL_INCLUDE_DIR}"
 )
-target_link_libraries(main PUBLIC lua54 PRIVATE ggelua log)
+target_link_libraries(main PUBLIC lua54 PRIVATE ggelua)
 # SDL 符号链接 + 未解析符号容忍
 target_link_options(main PRIVATE "-Wl,--unresolved-symbols=ignore-all")
 if(HAS_PREBUILT_SDL)
@@ -440,3 +440,4 @@ endforeach()
 message(STATUS "=== GGELUA3 Android ${ANDROID_ABI} (${CMAKE_BUILD_TYPE}) ===")
 message(STATUS "  Shared: ${SHARED_TARGETS}")
 message(STATUS "  Static: zlib libhv ghv hiredis sqlite3 physfs")
+

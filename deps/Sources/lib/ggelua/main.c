@@ -400,6 +400,7 @@ static const luaL_Reg fun_list[] = {
     {"hash", luaopen_tohash},
     {"log", LUA_Log},
     {"warn", LUA_Warn},
+    {"ggepack", luaopen_ggescript}, /* Lua层可通过 gge.ggepack(data) 解析GGEP脚本包 */
 
     {NULL, NULL}};
 
