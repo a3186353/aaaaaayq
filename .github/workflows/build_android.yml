@@ -186,12 +186,29 @@ jobs:
         ENGINE_SO=(liblua54.so libggelua.so libgsdl2.so libmygxy.so libgastar.so liblsqlite3.so libmain.so)
 
         echo "=== 合并引擎 SO 到 jniLibs ==="
+        # 预编译 SDL .so 白名单 (仅这4个来自 git, 其余必须全部由 CI 新编译)
+        SDL_KEEP=(libSDL2.so libSDL_image.so libSDL_mixer.so libSDL_ttf.so)
+
         for abi in "${ABIS[@]}"; do
           echo ""
           echo "--- ${abi} ---"
 
           # 确保目录存在
           mkdir -p "${JNILIBS}/${abi}"
+
+          # 安全网: 清除所有非 SDL 的 .so 和 .a, 确保不打包旧库
+          for f in "${JNILIBS}/${abi}"/*.so "${JNILIBS}/${abi}"/*.a; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            is_sdl=false
+            for keep in "${SDL_KEEP[@]}"; do
+              [ "$fname" = "$keep" ] && is_sdl=true && break
+            done
+            if [ "$is_sdl" = false ]; then
+              echo "  清除旧文件: $fname"
+              rm -f "$f"
+            fi
+          done
 
           # 复制 CMake 编译产物
           if [ -d "compiled-libs/${abi}" ]; then

@@ -256,7 +256,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -265,7 +265,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -274,7 +274,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>OPT_GENERIC;REAL_IS_FLOAT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -283,7 +283,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>OPT_GENERIC;REAL_IS_FLOAT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -292,7 +292,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -301,7 +301,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -310,7 +310,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -319,7 +319,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\android;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\compat;$(SolutionDir)..\..\Dependencies\audio_codecs\mpg123-$(libmpg_ver)\src\libmpg123;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

@@ -67,6 +67,8 @@ build
 build-*
 config.mk
 hconfig.h
+# [羽裳西游] 保留手动维护的跨平台 hconfig.h (非 cmake 生成)
+!hconfig.h
 html/uploads
 
 # msvc

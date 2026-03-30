@@ -1,11 +1,13 @@
-# jniLibs: 忽略所有内容, 但允许 SDL 预编译 .so (CI 链接需要)
-/jniLibs/*
-!/jniLibs/*/
-/jniLibs/*/*
-!/jniLibs/*/libSDL2.so
-!/jniLibs/*/libSDL_image.so
-!/jniLibs/*/libSDL_mixer.so
-!/jniLibs/*/libSDL_ttf.so
-# assets: 仅跟踪 ggelua.com 脚本包 (APK 模板构建需要)
-/assets/*
-!/assets/ggelua.com
+# jniLibs: 忽略 CI 编译产物, 仅保留 SDL 预编译 .so (由 git 跟踪)
+/jniLibs/**/*.a
+/jniLibs/**/libggelua.so
+/jniLibs/**/libmygxy.so
+/jniLibs/**/libgsdl2.so
+/jniLibs/**/libgastar.so
+/jniLibs/**/liblsqlite3.so
+/jniLibs/**/liblua54.so
+/jniLibs/**/libmain.so
+/jniLibs/**/libcjson.so
+
+# assets: CI/本地打包时动态注入
+/assets

@@ -214,7 +214,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -224,7 +224,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -234,7 +234,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -244,7 +244,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -254,7 +254,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -264,7 +264,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -274,7 +274,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
@@ -284,7 +284,7 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\external\vgmstream\src;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>ZSTD_DISABLE_ASM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>

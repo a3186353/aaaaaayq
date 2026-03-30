@@ -39,27 +39,30 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Restore Junction (Dependencies)
+    - name: Restore Junctions (Dependencies + Sources)
       shell: pwsh
       run: |
         # CI checkout 不保留 junction，需要重新创建
         # cmd /c mklink 必须使用反斜杠路径
-        $winDeps = "deps\Projects\windows\Dependencies"
-        if (Test-Path $winDeps) {
-          $item = Get-Item $winDeps -Force
-          if ($item.LinkType -ne 'Junction') {
-            Remove-Item $winDeps -Recurse -Force
-            cmd /c mklink /J "$winDeps" "..\..\Dependencies"
-            Write-Host "✅ Junction 已重建"
+        foreach ($name in @("Dependencies", "Sources")) {
+          $winPath = "deps\Projects\windows\$name"
+          if (Test-Path $winPath) {
+            $item = Get-Item $winPath -Force
+            if ($item.LinkType -ne 'Junction') {
+              Remove-Item $winPath -Recurse -Force
+              cmd /c mklink /J "$winPath" "..\..\$name"
+              Write-Host "✅ $name Junction 已重建"
+            } else {
+              Write-Host "✅ $name Junction 已存在"
+            }
           } else {
-            Write-Host "✅ Junction 已存在"
+            cmd /c mklink /J "$winPath" "..\..\$name"
+            Write-Host "✅ $name Junction 已创建"
           }
-        } else {
-          cmd /c mklink /J "$winDeps" "..\..\Dependencies"
-          Write-Host "✅ Junction 已创建"
         }
         # 验证
-        Test-Path "$winDeps\libhv\hconfig.h"
+        Test-Path "deps\Projects\windows\Dependencies\libhv\hconfig.h"
+        Test-Path "deps\Projects\windows\Sources\lib\ggelua\main.c"
 
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh
@@ -73,6 +76,47 @@ jobs:
           /p:PlatformToolset=v143 `
           /p:PostBuildEventUseInBuild=false `
           /m /v:minimal
+
+    - name: Validate build output
+      shell: pwsh
+      run: |
+        $buildRoot = "deps/Projects/windows"
+        # 必须存在的关键 DLL/EXE (从各子项目 .x64 输出目录搜索)
+        $required = @(
+          "ggelua.dll",      # 引擎核心
+          "lua54.dll",       # Lua 运行时
+          "SDL2.dll",        # 渲染/事件
+          "SDL_image.dll",   # 图片加载
+          "SDL_mixer.dll",   # 混音器
+          "SDL_ttf.dll",     # 字体渲染
+          "GGELUA.exe"       # 主程序
+        )
+
+        $found = @{}
+        Get-ChildItem -Path $buildRoot -Directory -Filter ".x64" -Recurse -ErrorAction SilentlyContinue |
+          ForEach-Object {
+            Get-ChildItem -Path $_.FullName -Include "*.dll","*.exe" -Recurse -ErrorAction SilentlyContinue
+          } |
+          ForEach-Object { $found[$_.Name] = $_ }
+
+        $missing = @()
+        foreach ($name in $required) {
+          if ($found.ContainsKey($name)) {
+            $f = $found[$name]
+            $sizeKB = [math]::Round($f.Length / 1KB, 1)
+            Write-Host "  ✅ $name ($sizeKB KB)"
+          } else {
+            Write-Host "  ❌ $name MISSING"
+            $missing += $name
+          }
+        }
+
+        Write-Host ""
+        Write-Host "总计: $($found.Count) 个产物, $($missing.Count) 个缺失"
+        if ($missing.Count -gt 0) {
+          Write-Error "Build validation failed: missing $($missing -join ', ')"
+          exit 1
+        }
 
     - name: Collect DLL artifacts
       shell: pwsh
@@ -96,5 +140,5 @@ jobs:
       with:
         name: windows-dlls-${{ matrix.platform }}-${{ matrix.configuration }}
         path: artifacts/
-        if-no-files-found: warn
+        if-no-files-found: error
         retention-days: 30

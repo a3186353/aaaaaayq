@@ -157,7 +157,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -165,7 +165,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -173,7 +173,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
@@ -181,7 +181,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -189,7 +189,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -197,7 +197,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
@@ -205,7 +205,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_STDBOOL_H=1;HAVE_STDINT_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
@@ -213,7 +213,7 @@
       <PreprocessorDefinitions>HV_STATICLIB;HV_WITHOUT_SSL;EVENT_EPOLL;_GNU_SOURCE;HAVE_PTHREAD_H=1;HAVE_SYS_TIME_H=1;HAVE_SYS_STAT_H=1;HAVE_SYS_TYPES_H=1;HAVE_FCNTL_H=1;HAVE_CLOCK_GETTIME=1;HAVE_GETTIMEOFDAY=1;HAVE_PIPE=1;HAVE_SOCKETPAIR=1;HAVE_EVENTFD=1;HAVE_STDATOMIC_H=1;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\event;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Dependencies\libhv\http;$(SolutionDir)..\..\Dependencies\libhv\http\client;$(SolutionDir)..\..\Dependencies\libhv\ssl;$(SolutionDir)..\..\Dependencies\libhv\cpputil;$(SolutionDir)..\..\Dependencies\libhv\util;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
   </ItemDefinitionGroup>
   <!-- ghv binding source files -->

@@ -137,12 +137,23 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/event/unpack.c"
     "${LIBHV_DIR}/event/noevent.c"
     "${LIBHV_DIR}/event/select.c"
-    # http
+    # http (client + server + websocket)
     "${LIBHV_DIR}/http/HttpMessage.cpp"
     "${LIBHV_DIR}/http/HttpParser.cpp"
     "${LIBHV_DIR}/http/Http1Parser.cpp"
+    "${LIBHV_DIR}/http/WebSocketParser.cpp"
+    "${LIBHV_DIR}/http/WebSocketChannel.cpp"
+    "${LIBHV_DIR}/http/websocket_parser.c"
+    "${LIBHV_DIR}/http/wsdef.c"
     "${LIBHV_DIR}/http/client/AsyncHttpClient.cpp"
     "${LIBHV_DIR}/http/client/HttpClient.cpp"
+    "${LIBHV_DIR}/http/server/HttpServer.cpp"
+    "${LIBHV_DIR}/http/server/HttpHandler.cpp"
+    "${LIBHV_DIR}/http/server/HttpService.cpp"
+    "${LIBHV_DIR}/http/server/HttpMiddleware.cpp"
+    "${LIBHV_DIR}/http/server/HttpResponseWriter.cpp"
+    "${LIBHV_DIR}/http/server/FileCache.cpp"
+    "${LIBHV_DIR}/http/server/http_page.cpp"
     "${LIBHV_DIR}/http/http_content.cpp"
     "${LIBHV_DIR}/http/httpdef.c"
     "${LIBHV_DIR}/http/http_parser.c"
@@ -181,6 +192,7 @@ target_include_directories(libhv PUBLIC
     "${LIBHV_DIR}/evpp"
     "${LIBHV_DIR}/http"
     "${LIBHV_DIR}/http/client"
+    "${LIBHV_DIR}/http/server"
     "${LIBHV_DIR}/ssl"
     "${LIBHV_DIR}/cpputil"
     "${LIBHV_DIR}/util"
@@ -207,6 +219,7 @@ set(GHV_SOURCES
     "${GHV_SRC_DIR}/ghv_crypto.cpp"
     "${GHV_SRC_DIR}/ghv_http.cpp"
     "${GHV_SRC_DIR}/ghv_download.cpp"
+    "${GHV_SRC_DIR}/ghv_websocket_server.cpp"
     "${GHV_SRC_DIR}/ghv_loop_init.c"
 )
 
@@ -231,7 +244,58 @@ else()
 endif()
 
 # ============================================================================
-# 5. ggelua_core 静态库 (引擎核心 Lua 绑定)
+# 5. PhysFS 静态库 (虚拟文件系统 — 统一资源访问层)
+# ============================================================================
+set(PHYSFS_SRC_DIR "${DEPS_DIR}/physfs/src")
+set(PHYSFS_SOURCES
+    "${PHYSFS_SRC_DIR}/physfs.c"
+    "${PHYSFS_SRC_DIR}/physfs_byteorder.c"
+    "${PHYSFS_SRC_DIR}/physfs_unicode.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_dir.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_unpacked.c"
+    "${PHYSFS_SRC_DIR}/physfs_archiver_zip.c"
+)
+# 平台特有源文件
+if(WIN32)
+    list(APPEND PHYSFS_SOURCES "${PHYSFS_SRC_DIR}/physfs_platform_windows.c")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR IOS)
+    list(APPEND PHYSFS_SOURCES
+        "${PHYSFS_SRC_DIR}/physfs_platform_posix.c"
+        "${PHYSFS_SRC_DIR}/physfs_platform_apple.m"
+        "${PHYSFS_SRC_DIR}/physfs_platform_unix.c"
+    )
+else()
+    list(APPEND PHYSFS_SOURCES
+        "${PHYSFS_SRC_DIR}/physfs_platform_posix.c"
+        "${PHYSFS_SRC_DIR}/physfs_platform_unix.c"
+    )
+endif()
+
+add_library(physfs STATIC ${PHYSFS_SOURCES})
+target_include_directories(physfs PUBLIC "${PHYSFS_SRC_DIR}")
+target_compile_definitions(physfs PRIVATE
+    PHYSFS_SUPPORTS_ZIP=1
+    PHYSFS_SUPPORTS_7Z=0
+    PHYSFS_SUPPORTS_GRP=0
+    PHYSFS_SUPPORTS_WAD=0
+    PHYSFS_SUPPORTS_HOG=0
+    PHYSFS_SUPPORTS_MVL=0
+    PHYSFS_SUPPORTS_QPAK=0
+    PHYSFS_SUPPORTS_SLB=0
+    PHYSFS_SUPPORTS_VDF=0
+    PHYSFS_SUPPORTS_ISO9660=0
+    PHYSFS_SUPPORTS_CSM=0
+    PHYSFS_SUPPORTS_LEC3D=0
+    PHYSFS_SUPPORTS_POD=0
+    PHYSFS_SUPPORTS_ROFS=0
+)
+if(WIN32)
+    target_compile_definitions(physfs PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+message(STATUS "[physfs] 虚拟文件系统静态库已添加")
+
+# ============================================================================
+# 6. ggelua_core 静态库 (引擎核心 Lua 绑定)
 # ============================================================================
 set(GGELUA_SRC_DIR "${SOURCES_DIR}/lib/ggelua")
 set(GGELUA_CORE_SOURCES
@@ -251,10 +315,8 @@ set(GGELUA_CORE_SOURCES
     "${GGELUA_SRC_DIR}/nanoid/lua.cpp"
     "${GGELUA_SRC_DIR}/uuid/lua.c"
     "${GGELUA_SRC_DIR}/uuid/uuid4.c"
-    # cjson (JSON 编解码, 静态编入 ggelua)
-    "${SOURCES_DIR}/lib/cjson/lua_cjson.c"
-    "${SOURCES_DIR}/lib/cjson/fpconv.c"
-    "${SOURCES_DIR}/lib/cjson/strbuf.c"
+    # PhysFS Lua 绑定
+    "${SOURCES_DIR}/lib/gphysfs/gphysfs.c"
 )
 
 # iOS 独有: Objective-C 网络权限请求
@@ -270,9 +332,9 @@ target_include_directories(ggelua_core PRIVATE
     "${DEPS_DIR}/SQLite3MultipleCiphers/src"    # rijndael.h (AES 实现)
     "${SDL_INCLUDE_DIR}"                        # main.c/script.c 依赖 SDL 头文件
     "${GHV_SRC_DIR}"                            # ghv_common.h (main.c 中 ghv 轮询)
-    "${SOURCES_DIR}/lib/cjson"                  # cjson 头文件 (strbuf.h, fpconv.h)
+    "${PHYSFS_SRC_DIR}"                         # physfs.h (gphysfs.c 依赖)
 )
-target_link_libraries(ggelua_core PUBLIC lua54 zlib ghv)
+target_link_libraries(ggelua_core PUBLIC lua54 zlib ghv physfs)
 
 if(WIN32)
     target_compile_definitions(ggelua_core PRIVATE
@@ -306,7 +368,7 @@ message(STATUS "==============================================")
 message(STATUS " GGELUA3 Cross-Platform Build (Stage 2)")
 message(STATUS " Platform:    ${GGELUA_PLATFORM}")
 message(STATUS " Event:       ${GGELUA_EVENT_BACKEND}")
-message(STATUS " Targets:     lua54 zlib libhv ghv ggelua_core")
+message(STATUS " Targets:     lua54 zlib libhv ghv physfs ggelua_core")
 message(STATUS " OpenSSL:     ${OPENSSL_CRYPTO_LIB}")
 message(STATUS " Build Type:  ${CMAKE_BUILD_TYPE}")
 message(STATUS "==============================================")

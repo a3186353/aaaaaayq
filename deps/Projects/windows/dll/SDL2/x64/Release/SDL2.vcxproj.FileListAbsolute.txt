@@ -1,1 +1,0 @@
-d:\项目源码\GGELUA3\Projects\windows\dll\SDL2\x64\Release\SDL2.lib

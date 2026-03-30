@@ -185,11 +185,11 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -200,11 +200,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -214,11 +214,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -229,11 +229,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -243,11 +243,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -258,11 +258,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -272,11 +272,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -287,11 +287,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <PreprocessorDefinitions>_SSL_DISABLED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <ExceptionHandling>Enabled</ExceptionHandling>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <AdditionalIncludeDirectories>$(StlIncludeDirectories);$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\HP-Socket\Linux\dependent\android-ndk\$(TargetArchAbi)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

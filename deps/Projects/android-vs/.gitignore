@@ -8,10 +8,6 @@
 build_output/
 output/
 *.so
-!**/libSDL2.so
-!**/libSDL_image.so
-!**/libSDL_mixer.so
-!**/libSDL_ttf.so
 *.a
 *.recipe
 
@@ -20,14 +16,8 @@ app/GGELUA/.gradle/
 app/GGELUA/build/
 app/GGELUA/app/build/
 
-# ── jniLibs: 忽略编译产物但保留 SDL 预编译 .so (CI DT_NEEDED) ──
-app/GGELUA/app/src/main/jniLibs/*
-!app/GGELUA/app/src/main/jniLibs/*/
-app/GGELUA/app/src/main/jniLibs/*/*
-!app/GGELUA/app/src/main/jniLibs/*/libSDL2.so
-!app/GGELUA/app/src/main/jniLibs/*/libSDL_image.so
-!app/GGELUA/app/src/main/jniLibs/*/libSDL_mixer.so
-!app/GGELUA/app/src/main/jniLibs/*/libSDL_ttf.so
+# ── jniLibs (编译时自动生成) ──
+app/GGELUA/app/src/main/jniLibs/
 
 # ── 子项目 MSBuild 中间产物 ──
 app/GGELUA/.ARM*/

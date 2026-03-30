@@ -27,7 +27,34 @@ static int GGE_LoadScript(lua_State* L)
     const char* path = lua_tolstring(L, 1, &len);
     PACKINFO info = { 0, 0, 0 };
 
-    SDL_RWops* rw = SDL_RWFromFile(path, "rb");
+    SDL_RWops* rw = NULL;
+
+#ifdef __ANDROID__
+    // Android 热更覆盖：优先从内部存储加载 adb push 推送的脚本包
+    // 路径: /data/data/com.GGELUA.game/files/ggelua.com
+    const char* internalPath = SDL_AndroidGetInternalStoragePath();
+    if (internalPath)
+    {
+        char overridePath[512];
+        SDL_snprintf(overridePath, sizeof(overridePath), "%s/%s", internalPath, path);
+        SDL_Log("[GGELUA] Android override: trying '%s'", overridePath);
+        rw = SDL_RWFromFile(overridePath, "rb");
+        if (rw)
+        {
+            SDL_Log("[GGELUA] Loaded override script from internal storage");
+        }
+        else
+        {
+            SDL_Log("[GGELUA] Override not found, falling back to APK assets");
+        }
+    }
+#endif
+
+    // 回退到默认路径 (Android 上从 APK assets 读取)
+    if (!rw)
+    {
+        rw = SDL_RWFromFile(path, "rb");
+    }
 
     if (rw)
     {

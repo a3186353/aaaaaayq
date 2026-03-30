@@ -21,8 +21,20 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <!-- NDK r23c 兼容: c++14 避免 math.h 命名空间冲突（c++1z 在 r23c 下触发 ::atan2f 等缺失） -->
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <!-- Fix: c++17 -> c++1z (the valid MSBuild enum value for C++17 in Android Clang targets) -->
+      <CppLanguageStandard>c++1z</CppLanguageStandard>
+      <!-- Fix: 显式设置 C 标准为 c11 -->
+      <CLanguageStandard>c11</CLanguageStandard>
+      <!--
+        Fix: NDK r23c + Clang_5_0 工具集兼容性修复
+        Clang_5_0 工具集未正确设置 sysroot 包含顺序，导致 NDK 系统头文件
+        (pthread_types.h, sys/types.h, libc++ cstddef/type_traits) 中
+        uint32_t/int32_t/size_t/ptrdiff_t 等基础类型未定义。
+        通过 AdditionalOptions 的 -include 标志强制在每个编译单元之前注入。
+        注意：ForcedIncludeFiles 在 .targets 中会被项目级 ClCompile 合并覆盖，
+        所以必须使用 AdditionalOptions 追加方式。
+      -->
+      <AdditionalOptions>-include stdint.h -include stddef.h -include stdlib.h %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
 </Project>

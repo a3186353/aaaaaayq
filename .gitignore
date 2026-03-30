@@ -1,49 +1,89 @@
-# Build outputs
-deps/Projects/ios/build-*/
-deps/Projects/ios/install-*/
-deps/Projects/ios/xcframeworks/
-deps/Projects/android-vs/build/
-deps/Projects/android-vs/.vs/
+# ==============================================================================
+# GGELUA3 引擎 CI 仓库 .gitignore
+# ==============================================================================
 
-# MSBuild 编译缓存 (.obj 中间产物)
-deps/Projects/android-vs/.obj/
-deps/Projects/android-vs/.ARM/
-deps/Projects/android-vs/.ARM64/
-deps/Projects/android-vs/.x86/
-deps/Projects/android-vs/.x64/
-deps/Projects/windows/.x64/
-
-# Windows junction (CI 重建, 指向 ../../Dependencies)
-deps/Projects/windows/Dependencies/
-
-# Gradle 缓存
-.gradle/
-
-# IDE
-.vscode/
-.vs/
-*.user
-
-# OS
-.DS_Store
-Thumbs.db
-
-# 二进制编译产物
+# ── 编译中间产物 (全局) ──
+*.obj
+*.o
 *.so
 *.dll
 *.exe
 *.pdb
 *.ilk
-*.recipe
-*.o
 *.a
+*.lib
+*.exp
+*.res
+*.recipe
+*.log
+*.lastbuildstate
 
-# 例外: Android 预编译第三方静态库 (无法在 CI 交叉编译)
+# MSBuild / Xcode 日志
+*.tlog
+*.Build.CppClean.log
+*.FileListAbsolute.txt
+
+# ── IDE 和编辑器 ──
+.vscode/
+.vs/
+*.user
+*.aps
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Gradle 缓存 ──
+.gradle/
+**/build/
+
+# ── iOS 构建产物 ──
+deps/Projects/ios/build-*/
+deps/Projects/ios/install-*/
+deps/Projects/ios/xcframeworks/
+
+# ── Android MSBuild 编译缓存 ──
+deps/Projects/android-vs/.obj/
+deps/Projects/android-vs/.out/
+deps/Projects/android-vs/.ARM/
+deps/Projects/android-vs/.ARM64/
+deps/Projects/android-vs/.x86/
+deps/Projects/android-vs/.x64/
+deps/Projects/android-vs/app/GGELUA/.ARM/
+deps/Projects/android-vs/app/GGELUA/.ARM64/
+deps/Projects/android-vs/app/GGELUA/.x64/
+
+# ── Windows ──
+# Dependencies 和 Sources 由 CI 通过 junction 指向 deps/ 级别
+# 本地开发也应建 junction, 不要真实拷贝
+deps/Projects/windows/Dependencies/
+deps/Projects/windows/Sources/
+deps/Projects/windows/.x64/
+deps/Projects/windows/x64/
+
+# ── 预编译 exe 产物 (CI 编译输出, 不提交) ──
+deps/Projects/GGELUA/
+
+# ==============================================================================
+# 例外规则 (允许跟踪的二进制文件)
+# ==============================================================================
+
+# Android 预编译第三方静态库 (无法在 CI 交叉编译)
 !deps/Dependencies/HP-Socket/Linux/dependent/**/*.a
 !deps/Dependencies/openssl/android/**/*.a
 
-# 例外: Android 预编译 SDL .so (CI 链接需要 DT_NEEDED)
-!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/*.so
+# Android 预编译 SDL .so (CI 链接需要 DT_NEEDED, 仅这4个由git跟踪)
+!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL2.so
+!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_image.so
+!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_mixer.so
+!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_ttf.so
 
-# 例外: Android APK 模板的 assets (ggelua.com 脚本包)
+# Android APK 模板的 assets (ggelua.com 脚本包)
 !deps/Projects/android-vs/app/GGELUA/app/src/main/assets/ggelua.com
+
+# Windows 链接所需的导入库和定义文件 (预生成, 非编译中间产物)
+!deps/Projects/windows/ggelua_all.def
+!deps/Projects/windows/ggelua_all.lib
+!deps/Projects/windows/ggelua_all.exp
+!deps/Projects/windows/dll/SDL2/ggelua_sdl.lib
+!deps/Projects/windows/dll/SDL2/ggelua_lua.lib

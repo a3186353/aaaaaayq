@@ -70,10 +70,10 @@
       <ObjectFileName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(IntDir)uuid\%(filename).o</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\..\..\..\Sources\lib\ggelua\uuid\uuid4.c" />
-    <!-- cjson (JSON 编解码, 静态编入 ggelua.so) -->
-    <ClCompile Include="..\..\..\..\Sources\lib\cjson\lua_cjson.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\cjson\fpconv.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\cjson\strbuf.c" />
+    <!-- cjson (内嵌到引擎核心) -->
+    <ClCompile Include="$(SolutionDir)..\..\Sources\lib\cjson\lua_cjson.c" />
+    <ClCompile Include="$(SolutionDir)..\..\Sources\lib\cjson\fpconv.c" />
+    <ClCompile Include="$(SolutionDir)..\..\Sources\lib\cjson\strbuf.c" />
   </ItemGroup>
   <!-- Project references -->
   <ItemGroup>
@@ -218,9 +218,9 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Sources\lib\cjson;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\Sources\lib\ggelua;$(SolutionDir)..\..\Sources\lib\ggelua\uuid;$(SolutionDir)..\..\Sources\lib\ggelua\print;$(SolutionDir)..\..\Sources\lib\cjson;$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\SQLite3MultipleCiphers\src;$(SolutionDir)..\..\Dependencies\libhv;$(SolutionDir)..\..\Dependencies\libhv\base;$(SolutionDir)..\..\Dependencies\libhv\evpp;$(SolutionDir)..\..\Sources\lib\ghv;$(SolutionDir)..\..\Dependencies\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Enabled</ExceptionHandling>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <Link>
       <LibraryDependencies>m;crypto;%(LibraryDependencies)</LibraryDependencies>

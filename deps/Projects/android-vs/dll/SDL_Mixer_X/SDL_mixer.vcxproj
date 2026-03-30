@@ -187,7 +187,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -199,7 +199,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -211,7 +211,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -223,7 +223,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -235,7 +235,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -247,7 +247,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -259,7 +259,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -271,7 +271,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
-      <CppLanguageStandard>c++14</CppLanguageStandard>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
     </ClCompile>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\include;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\timidity;$(SolutionDir)..\..\Dependencies\SDL_Mixer_X\src\codecs\dr_libs;$(SolutionDir)..\..\Dependencies\audio_codecs\include;$(SolutionDir)..\..\Dependencies\audio_codecs\libvorbisidec-1.2.1;$(SolutionDir)..\..\Dependencies\audio_codecs\libmodplug-0.8.9.0\src;$(SolutionDir)..\..\Projects\android-vs\dep\libsndfile;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
