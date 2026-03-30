@@ -1,4 +1,9 @@
 # build_android.ps1 - Android .so 全平台编译 + 部署脚本
+#
+# ⚠️ 已废弃: 此脚本使用本地 VS Android MSBuild (android-vs/) 方案。
+# CI 已迁移到 CMake + Ninja (NDK r26d)，见 .github/workflows/build_android.yml
+# 本脚本仅保留用于本地 VS 调试，不推荐用于生产构建。
+#
 # Usage:
 #   .\build_android.ps1                              # 编译全部 4 平台 Release
 #   .\build_android.ps1 -Platform ARM64              # 只编译 ARM64

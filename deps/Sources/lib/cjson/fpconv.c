@@ -33,11 +33,6 @@
 #include <assert.h>
 #include <string.h>
 
-/* MSVC: 第三方 cjson 代码的类型转换警告 — 逻辑正确 */
-#ifdef _MSC_VER
-#pragma warning(disable: 4244) /* conversion: possible loss of data */
-#endif
-
 #include "fpconv.h"
 
 /* Lua CJSON assumes the locale is the same for all threads within a

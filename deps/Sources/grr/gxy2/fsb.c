@@ -222,19 +222,19 @@ static int FSB_Get(lua_State* L)
 
             if (MP3_CHANS_DOWNMIX) {
                 luaL_addlstring(&b, data, 3);
-                data += 3;
             }
+            data += 3;
 
             if (t > 0) {
                 len -= t;
                 
                 if (MP3_CHANS_DOWNMIX) {
                     luaL_addlstring(&b, data, t);
-                    data += t;
                 }
+                data += t;
             }
 
-            if (mode & FSOUND_MULTICHANNEL) {//£¿
+            if (mode & FSOUND_MULTICHANNEL) {//ï¿½ï¿½
                 //for (n = myftell(fd); n & 0xf; n++) {
                 //    myfgetc(fd);
                 //}

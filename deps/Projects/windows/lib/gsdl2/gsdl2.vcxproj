@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -24,16 +24,13 @@
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\gge.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\haptic.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\hints.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\locale.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\messagebox.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\metal.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\misc.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\platform.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\power.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\sdl_image.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\joystick.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\sdl_mixer.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\opengl.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\sensor.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\shape.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\stdinc.c" />
@@ -43,7 +40,6 @@
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\keyboard.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\log.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\mouse.c" />
-    <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\sdl_net.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\pixels.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\rect.c" />
     <ClCompile Include="..\..\..\..\Sources\lib\gsdl2\render.c" />

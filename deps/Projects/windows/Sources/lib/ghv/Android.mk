@@ -13,6 +13,7 @@ LOCAL_C_INCLUDES := \
     $(DEPS_PATH)/libhv/evpp \
     $(DEPS_PATH)/libhv/http \
     $(DEPS_PATH)/libhv/http/client \
+    $(DEPS_PATH)/libhv/http/server \
     $(LOCAL_PATH)/../../../dep/lua/include
 
 LOCAL_SRC_FILES := \
@@ -21,6 +22,7 @@ LOCAL_SRC_FILES := \
     $(SOURCES_PATH)/ghv_crypto.cpp \
     $(SOURCES_PATH)/ghv_http.cpp \
     $(SOURCES_PATH)/ghv_download.cpp \
+    $(SOURCES_PATH)/ghv_websocket_server.cpp \
     $(SOURCES_PATH)/ghv_loop_init.c
 
 LOCAL_CPPFLAGS := -std=c++17 -fexceptions

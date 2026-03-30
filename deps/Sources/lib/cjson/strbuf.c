@@ -27,11 +27,6 @@
 #include <stdarg.h>
 #include <string.h>
 
-/* MSVC: 第三方 cjson 代码的指针截断调试输出警告 — 仅用于 debug_stats */
-#ifdef _MSC_VER
-#pragma warning(disable: 4311) /* pointer truncation from 'type' to 'type' */
-#endif
-
 #include "strbuf.h"
 
 static void die(const char *fmt, ...)

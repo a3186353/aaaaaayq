@@ -136,7 +136,7 @@
     <ClCompile Include="..\..\..\..\Dependencies\libhv\event\wepoll\wepoll.c" />
   </ItemGroup>
 
-  <!-- libhv http sources (client + server + websocket) -->
+  <!-- libhv http sources -->
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\HttpMessage.cpp" />
     <ClCompile Include="..\..\..\..\Dependencies\libhv\http\HttpParser.cpp" />

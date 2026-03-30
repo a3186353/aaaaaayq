@@ -63,12 +63,53 @@ static int GGE_LoadScript(lua_State* L)
         GLOG("GGE_LoadScript: file open FAILED");
     }
 
+#ifdef __ANDROID__
+    /* Android 回退: APK assets 中的 ggelua.com 不存在或无效时,
+     * 尝试从内部存储加载 adb push 推送的版本 */
+    if (info.signal != 0x20454747)
+    {
+        if (rw) { SDL_FreeRW(rw); rw = NULL; }
+        char* prefPath = SDL_GetPrefPath("GGELUA", "game");
+        if (prefPath)
+        {
+            char fallback[512];
+            SDL_snprintf(fallback, sizeof(fallback), "%sggelua.com", prefPath);
+            SDL_free(prefPath);
+            SDL_Log("[GGELUA] Android fallback: trying '%s'", fallback);
+
+            rw = SDL_RWFromFile(fallback, "rb");
+            if (rw)
+            {
+                PACKINFO info2 = { 0, 0, 0 };
+                if (SDL_RWseek(rw, -(int)sizeof(PACKINFO), RW_SEEK_END) != -1 &&
+                    SDL_RWread(rw, &info2, sizeof(PACKINFO), 1) != 0)
+                {
+                    SDL_Log("[GGELUA] Fallback PACKINFO: signal=0x%08X core=%u pack=%u",
+                            info2.signal, info2.coresize, info2.packsize);
+                    info = info2;
+                }
+                else
+                {
+                    GLOG("Fallback: read PACKINFO FAILED");
+                    SDL_FreeRW(rw);
+                    rw = NULL;
+                }
+            }
+            else
+            {
+                SDL_Log("[GGELUA] Fallback also FAILED: %s", SDL_GetError());
+            }
+        }
+    }
+#endif
+
     if (info.signal == 0x20454747)
     { //GGE\x20
         if (SDL_RWseek(rw, -(int)(sizeof(PACKINFO) + info.coresize + info.packsize), RW_SEEK_END) == -1)
         {
-            SDL_FreeRW(rw);
-            return 0;
+            if (rw) SDL_FreeRW(rw);
+            lua_pushboolean(L, 1);
+            return 1;
         }
         void* ggecore = SDL_malloc(info.coresize);
         SDL_RWread(rw, ggecore, info.coresize, 1);
