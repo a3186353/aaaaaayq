@@ -305,6 +305,7 @@ target_include_directories(mygxy PRIVATE
     "${DEPS_DIR}/zstd/common"
     "${DEPS_DIR}/lz4"
     "${DEPS_DIR}/zlib"
+    "${PHYSFS_SRC_DIR}"             # physfs.h (wpk.c 条件编译 WPK_USE_PHYSFS)
     "${ENGINE_ROOT}/external/vgmstream/src"   # libvgmstream.h (FSB 解码)
 )
 # 链接 zlib 静态库（不再内联 zlib 源文件，避免重复符号）
@@ -994,6 +995,7 @@ target_link_libraries(gsdl2_fw PRIVATE
     SDL2_image_fw
     SDL2_ttf_fw
     SDL_Mixer_X_fw
+    sndfile                        # sf_open_virtual (sdl_mixer.c 高质量 WAV 加载)
     ${IOS_SYSTEM_FRAMEWORKS}
 )
 
@@ -1008,6 +1010,7 @@ target_include_directories(mygxy_fw PRIVATE
     "${DEPS_DIR}/SDL_image"
     "${DEPS_DIR}/zstd" "${DEPS_DIR}/zstd/common"
     "${DEPS_DIR}/lz4" "${DEPS_DIR}/zlib"
+    "${PHYSFS_SRC_DIR}"             # physfs.h (wpk.c 条件编译 WPK_USE_PHYSFS)
     "${LUA_SRC_DIR}"
     "${ENGINE_ROOT}/external/vgmstream/src"
 )

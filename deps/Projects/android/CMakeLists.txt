@@ -62,9 +62,8 @@ if(PREBUILT_SDL_DIR AND EXISTS "${PREBUILT_SDL_DIR}/libSDL2.so")
 
     set(HAS_PREBUILT_SDL TRUE)
 else()
-    message(WARNING "[SDL] 预编译 .so 未找到 (PREBUILT_SDL_DIR='${PREBUILT_SDL_DIR}'), "
-                    "将回退到 --unresolved-symbols=ignore-all")
-    set(HAS_PREBUILT_SDL FALSE)
+    message(FATAL_ERROR "[SDL] 预编译 .so 未找到 (PREBUILT_SDL_DIR='${PREBUILT_SDL_DIR}'), "
+                        "必须提供预编译的 SDL 库以确保依赖完整！")
 endif()
 
 # ============================================================================
@@ -289,11 +288,7 @@ target_link_libraries(ggelua PRIVATE ghv hiredis zlib physfs log)
 target_link_libraries(ggelua PUBLIC lua54)
 target_compile_definitions(ggelua PRIVATE LUA_USE_POSIX HAS_AES_HARDWARE=0)
 target_compile_options(ggelua PRIVATE -Wno-format-security)
-# main.c/script.c 引用 SDL 符号 + 其他未解析符号(libsndfile等)需容忍
-target_link_options(ggelua PRIVATE "-Wl,--unresolved-symbols=ignore-all")
-if(HAS_PREBUILT_SDL)
-    target_link_libraries(ggelua PRIVATE SDL2_prebuilt)
-endif()
+target_link_libraries(ggelua PRIVATE SDL2_prebuilt)
 
 # ============================================================================
 # 7. libmygxy.so — SHARED (基于旧 android-vs/grr/mygxy 精确文件列表)
@@ -339,14 +334,11 @@ target_include_directories(mygxy PRIVATE
     "${MYGXY_SRC_DIR}" "${SDL_INCLUDE_DIR}" "${DEPS_DIR}/SDL_image"
     "${DEPS_DIR}/zstd" "${DEPS_DIR}/zstd/common"
     "${DEPS_DIR}/lz4" "${DEPS_DIR}/zlib"
+    "${PHYSFS_SRC_DIR}"                       # physfs.h (wpk.c 条件编译 WPK_USE_PHYSFS)
     "${ENGINE_ROOT}/external/vgmstream/src"
 )
 target_link_libraries(mygxy PUBLIC lua54 PRIVATE log)
-# SDL 符号链接 + 其他未解析符号需容忍
-target_link_options(mygxy PRIVATE "-Wl,--unresolved-symbols=ignore-all")
-if(HAS_PREBUILT_SDL)
-    target_link_libraries(mygxy PRIVATE SDL2_prebuilt SDL_image_prebuilt)
-endif()
+target_link_libraries(mygxy PRIVATE SDL2_prebuilt SDL_image_prebuilt)
 target_compile_definitions(mygxy PRIVATE ZSTD_DISABLE_ASM=1)
 set_source_files_properties(
     "${DEPS_DIR}/lz4/xxhash.c" "${DEPS_DIR}/lz4/lz4hc.c" "${DEPS_DIR}/lz4/lz4frame.c"
@@ -388,6 +380,21 @@ target_include_directories(gastar PRIVATE "${GASTAR_SRC_DIR}")
 target_link_libraries(gastar PUBLIC lua54)
 
 # ============================================================================
+# 9b. libsndfile — STATIC (高质量音频文件 I/O, 被 gsdl2 静态链入)
+# ============================================================================
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # 强制 STATIC, 防止 sndfile 被编为 .so
+set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_REGTEST OFF CACHE BOOL "" FORCE)
+set(ENABLE_EXTERNAL_LIBS OFF CACHE BOOL "" FORCE)
+set(ENABLE_MPEG OFF CACHE BOOL "" FORCE)
+set(INSTALL_MANPAGES OFF CACHE BOOL "" FORCE)
+set(INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "" FORCE)
+add_subdirectory("${DEPS_DIR}/libsndfile" "${CMAKE_BINARY_DIR}/libsndfile" EXCLUDE_FROM_ALL)
+set_target_properties(sndfile PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ============================================================================
 # 10. libgsdl2.so — SHARED (SDL2 Lua 绑定)
 # ============================================================================
 set(GSDL2_SRC_DIR "${SOURCES_DIR}/lib/gsdl2")
@@ -402,12 +409,8 @@ target_include_directories(gsdl2 PRIVATE
     "${DEPS_DIR}/SDL_ttf" "${DEPS_DIR}/SDL_FontCache"
     "${DEPS_DIR}/libsndfile/include"
 )
-target_link_libraries(gsdl2 PUBLIC lua54)
-# SDL 全家桶链接 + 其他未解析符号(libsndfile等)需容忍
-target_link_options(gsdl2 PRIVATE "-Wl,--unresolved-symbols=ignore-all")
-if(HAS_PREBUILT_SDL)
-    target_link_libraries(gsdl2 PRIVATE SDL2_prebuilt SDL_image_prebuilt SDL_mixer_prebuilt SDL_ttf_prebuilt)
-endif()
+target_link_libraries(gsdl2 PUBLIC lua54 PRIVATE sndfile)
+target_link_libraries(gsdl2 PRIVATE SDL2_prebuilt SDL_image_prebuilt SDL_mixer_prebuilt SDL_ttf_prebuilt)
 
 # ============================================================================
 # 11. libmain.so — SHARED (SDL_main 入口 + GGE_LoadScript 脚本包加载)
@@ -423,11 +426,7 @@ target_include_directories(main PRIVATE
     "${GGELUA_SRC_DIR}" "${SDL_INCLUDE_DIR}"
 )
 target_link_libraries(main PUBLIC lua54 PRIVATE ggelua)
-# SDL 符号链接 + 未解析符号容忍
-target_link_options(main PRIVATE "-Wl,--unresolved-symbols=ignore-all")
-if(HAS_PREBUILT_SDL)
-    target_link_libraries(main PRIVATE SDL2_prebuilt)
-endif()
+target_link_libraries(main PRIVATE SDL2_prebuilt)
 
 # ============================================================================
 # 安装: 收集 .so 到 {ABI}/ 目录
