@@ -391,6 +391,12 @@ static const luaL_Reg lib_list[] = {
     {"nanoid", luaopen_nanoid},
     {"aes", luaopen_aes},
     {"physfs", luaopen_physfs},
+    {"ghv.TcpClient", luaopen_ghv_TcpClient},
+    {"ghv.TcpServer", luaopen_ghv_TcpServer},
+    {"ghv.HttpRequests", luaopen_ghv_HttpRequests},
+    {"ghv.download", luaopen_ghv_download},
+    {"ghv.WebSocketServer", luaopen_ghv_WebSocketServer},
+    {"gge.core", luaopen_ggecore},
     {NULL, NULL},
 };
 
