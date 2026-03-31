@@ -2,12 +2,12 @@ name: Build Android APK Template
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, trae ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_android.yml'
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, trae ]
     paths:
       - 'deps/**'
   workflow_dispatch:

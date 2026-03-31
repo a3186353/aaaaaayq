@@ -2,12 +2,12 @@ name: Build iOS Dynamic Frameworks
 
 on:
   push:
-    branches: [ main, master, 引擎升级 ]
+    branches: [ main, master, trae, 引擎升级 ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_ios.yml'
   pull_request:
-    branches: [ main, master, 引擎升级 ]
+    branches: [ main, master, trae, 引擎升级 ]
     paths:
       - 'deps/**'
   workflow_dispatch:

@@ -2,12 +2,12 @@ name: Build Windows DLLs
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, trae ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_windows.yml'
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, trae ]
     paths:
       - 'deps/**'
   workflow_dispatch:
@@ -178,4 +178,3 @@ jobs:
         path: artifacts/
         if-no-files-found: error
         retention-days: 30
-
