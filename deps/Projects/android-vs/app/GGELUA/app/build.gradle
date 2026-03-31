@@ -41,7 +41,7 @@ android {
             signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            debuggable false
+            debuggable true // 开发阶段强制允许 run-as 推送脚本
         }
     }
 

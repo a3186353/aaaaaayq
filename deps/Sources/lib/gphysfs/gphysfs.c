@@ -513,11 +513,12 @@ int luaopen_physfs(lua_State *L)
 #endif
     lua_pop(L, 1); /* pop metatable */
 
-    /* Auto-initialize PhysFS */
-    if (!PHYSFS_isInit())
-    {
-        PHYSFS_init(NULL);
-    }
+    /* Auto-initialize defered: removed to prevent Android native crash.
+       Call physfs.init() from Lua explicitly when needed. */
+    // if (!PHYSFS_isInit())
+    // {
+    //     PHYSFS_init(NULL);
+    // }
 
     /* Create module table */
     luaL_newlib(L, physfs_funcs);
