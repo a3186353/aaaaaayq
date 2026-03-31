@@ -38,8 +38,6 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\fsb.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\hash.c" />
-    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\lua_proxy.c" />
-    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\sdl_proxy.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\map.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\SDL_list.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\tcp.c" />
@@ -290,6 +288,17 @@
       <LibraryDependencies>m;log;%(LibraryDependencies)</LibraryDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\dll\lua\lua.vcxproj">
+      <Project>{8481f772-bc91-4032-8682-09809ef70942}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\dll\SDL2\SDL2.vcxproj">
+      <Project>{b7be417c-b6c5-4a69-a056-e0cb0c6a344c}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\dll\SDL_image\SDL_image.vcxproj">
+      <Project>{3049f98e-d787-40b6-935e-4139e2b58f6f}</Project>
+    </ProjectReference>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

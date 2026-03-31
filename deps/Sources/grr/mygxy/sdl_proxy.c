@@ -1,5 +1,5 @@
 #include "sdl_proxy.h"
-#if defined(__ANDROID__)
+#if defined(MYGXY_USE_DYNAMIC_PROXY)
 #include <dlfcn.h>
 #include <stdio.h>
 #if defined(__ANDROID__)
@@ -163,4 +163,4 @@ void init_sdl_proxy(void) {
     if (!proxy_IMG_Load_RW) LOGE("Failed to resolve SDL symbol: IMG_Load_RW\n");
 }
 
-#endif // Android Proxy Guards
+#endif

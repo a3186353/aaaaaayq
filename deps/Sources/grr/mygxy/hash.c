@@ -302,15 +302,6 @@ MYGXY_API int luaopen_mygxy(lua_State* L)
     init_lua_proxy();
     init_sdl_proxy();
 
-    // Safety check: if proxy failed to resolve core Lua symbols, return error
-    // instead of crashing on NULL function pointer call.
-    // pcall in ggelua.lua will catch this and disable mygxy gracefully.
-#if defined(__ANDROID__)
-    if (!proxy_lua_createtable || !proxy_lua_pushcclosure || !proxy_lua_setfield) {
-        return 0;  // return nil to Lua, pcall will handle it
-    }
-#endif
-
     lua_createtable(L, 0, 6);
 
     lua_pushcfunction(L, luaopen_mygxy_tcp);

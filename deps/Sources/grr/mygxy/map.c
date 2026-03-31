@@ -1887,6 +1887,8 @@ static int LUA_SetMode(lua_State* L)
 
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
+    init_lua_proxy();
+    init_sdl_proxy();
     const luaL_Reg funcs[] = {
         {"__gc", LUA_GC},
         {"__close", LUA_GC},

@@ -1,7 +1,7 @@
 #ifndef SDL_PROXY_H
 #define SDL_PROXY_H
 
-#if defined(__ANDROID__)
+#if defined(MYGXY_USE_DYNAMIC_PROXY)
 
 #include "SDL.h"
 #include "SDL_image.h"
@@ -147,6 +147,6 @@ void init_sdl_proxy(void);
 #include "SDL_image.h"
 #define init_sdl_proxy() 
 
-#endif // Android Proxy Guards
+#endif
 
 #endif // SDL_PROXY_H

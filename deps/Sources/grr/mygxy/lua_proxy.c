@@ -1,5 +1,5 @@
 #include "lua_proxy.h"
-#if defined(__ANDROID__)
+#if defined(MYGXY_USE_DYNAMIC_PROXY)
 #include <dlfcn.h>
 #include <stdio.h>
 #if defined(__ANDROID__)
@@ -750,4 +750,4 @@ void init_lua_proxy(void) {
     if (!proxy_luaL_buffinitsize) LOGE("Failed to resolve Lua symbol: luaL_buffinitsize\n");
 }
 
-#endif // Android Proxy Guards
+#endif

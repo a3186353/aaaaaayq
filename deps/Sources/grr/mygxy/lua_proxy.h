@@ -1,7 +1,7 @@
 #ifndef LUA_PROXY_H
 #define LUA_PROXY_H
 
-#if defined(__ANDROID__)
+#if defined(MYGXY_USE_DYNAMIC_PROXY)
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -724,6 +724,6 @@ void init_lua_proxy(void);
 #include "lauxlib.h"
 #define init_lua_proxy() 
 
-#endif // Android Proxy Guards
+#endif
 
 #endif // LUA_PROXY_H

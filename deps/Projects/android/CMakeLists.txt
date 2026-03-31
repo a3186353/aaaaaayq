@@ -28,15 +28,38 @@ set(LIBHV_DIR   "${DEPS_DIR}/libhv")
 # PREBUILT_SDL_DIR 由 CI 传入, 本地构建时指向 jniLibs-all-abis/${ANDROID_ABI}
 # ============================================================================
 set(PREBUILT_SDL_DIR "" CACHE PATH "Directory containing prebuilt SDL .so files for current ABI")
-if(NOT PREBUILT_SDL_DIR OR NOT EXISTS "${PREBUILT_SDL_DIR}/libSDL2.so")
+set(REQUIRED_SDL_LIBS
+    libSDL2.so
+    libSDL_image.so
+    libSDL_mixer.so
+    libSDL_ttf.so
+)
+set(HAS_COMPLETE_PREBUILT_SDL FALSE)
+if(PREBUILT_SDL_DIR)
+    set(HAS_COMPLETE_PREBUILT_SDL TRUE)
+    foreach(SDL_LIB ${REQUIRED_SDL_LIBS})
+        if(NOT EXISTS "${PREBUILT_SDL_DIR}/${SDL_LIB}")
+            set(HAS_COMPLETE_PREBUILT_SDL FALSE)
+            break()
+        endif()
+    endforeach()
+endif()
+if(NOT HAS_COMPLETE_PREBUILT_SDL)
     # 回退: 尝试旧 VS 项目输出目录
     set(_FALLBACK_DIR "${ENGINE_ROOT}/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/${ANDROID_ABI}")
-    if(EXISTS "${_FALLBACK_DIR}/libSDL2.so")
+    set(HAS_COMPLETE_PREBUILT_SDL TRUE)
+    foreach(SDL_LIB ${REQUIRED_SDL_LIBS})
+        if(NOT EXISTS "${_FALLBACK_DIR}/${SDL_LIB}")
+            set(HAS_COMPLETE_PREBUILT_SDL FALSE)
+            break()
+        endif()
+    endforeach()
+    if(HAS_COMPLETE_PREBUILT_SDL)
         set(PREBUILT_SDL_DIR "${_FALLBACK_DIR}")
     endif()
 endif()
 
-if(PREBUILT_SDL_DIR AND EXISTS "${PREBUILT_SDL_DIR}/libSDL2.so")
+if(HAS_COMPLETE_PREBUILT_SDL)
     message(STATUS "[SDL] 使用预编译 .so: ${PREBUILT_SDL_DIR}")
 
     add_library(SDL2_prebuilt SHARED IMPORTED)
@@ -62,7 +85,7 @@ if(PREBUILT_SDL_DIR AND EXISTS "${PREBUILT_SDL_DIR}/libSDL2.so")
 
     set(HAS_PREBUILT_SDL TRUE)
 else()
-    message(FATAL_ERROR "[SDL] 预编译 .so 未找到 (PREBUILT_SDL_DIR='${PREBUILT_SDL_DIR}'), "
+    message(FATAL_ERROR "[SDL] 预编译 .so 不完整或未找到 (PREBUILT_SDL_DIR='${PREBUILT_SDL_DIR}'), "
                         "必须提供预编译的 SDL 库以确保依赖完整！")
 endif()
 
@@ -299,8 +322,6 @@ add_library(mygxy SHARED
     # 核心源文件
     "${MYGXY_SRC_DIR}/fsb.c"
     "${MYGXY_SRC_DIR}/hash.c"
-    "${MYGXY_SRC_DIR}/lua_proxy.c"
-    "${MYGXY_SRC_DIR}/sdl_proxy.c"
     "${MYGXY_SRC_DIR}/map.c"
     "${MYGXY_SRC_DIR}/SDL_list.c"
     "${MYGXY_SRC_DIR}/tcp.c"
