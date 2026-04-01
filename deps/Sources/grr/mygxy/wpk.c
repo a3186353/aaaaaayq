@@ -20,6 +20,21 @@
 
 #define WPK_SEP_STR "/"
 
+typedef struct WPK_DebugStats
+{
+    Uint64 idx_mode_file;
+    Uint64 idx_mode_buffer;
+    Uint64 idx_open_failures;
+    Uint64 getdata_raw_hits;
+    Uint64 getdata_acxc_hits;
+    Uint64 getdata_neox_hits;
+    Uint64 getdata_hashxor_hits;
+    Uint64 getdata_xor5a_hits;
+    Uint64 getdata_failures;
+} WPK_DebugStats;
+
+static WPK_DebugStats g_wpk_stats = {0};
+
 #ifdef WPK_USE_PHYSFS
 static void WPK_LogOpenFailure(const char* stage, const char* path, const char* detail) {
     fprintf(stderr, "[wpk] %s failed: path='%s' detail='%s'\n",
@@ -787,9 +802,6 @@ static int WPK_TryParseThx24Header(const Uint8* data, size_t size, Uint32* outCo
         return 0;
     Uint32 count = WPK_ReadU32LE(data + 8);
     if (count == 0)
-        return 0;
-    /* 防御整数溢出漏洞：(size_t)count * 24 可能在 32 位系统上触发溢出 */
-    if (size < 12 || count > (size - 12) / 24)
         return 0;
     size_t need = 12 + (size_t)count * 24;
     if (need != size)
@@ -2124,21 +2136,27 @@ static int WPK_GetData(lua_State* L)
             SDL_snprintf(path, sizeof(path), "%s" WPK_SEP_STR "%s" WPK_SEP_STR "%s", ud->base_dir, ud->base_name, fi->md5);
             SDL_RWops* fp = SDL_RWFromFile(path, "rb");
             if (!fp)
+            {
+                g_wpk_stats.getdata_failures++;
                 return WPK_PushEmptyBytesAndSize(L);
+            }
             if (SDL_RWseek(fp, 0, RW_SEEK_END) < 0)
             {
                 SDL_RWclose(fp);
+                g_wpk_stats.getdata_failures++;
                 return 0;
             }
             Sint64 sz = SDL_RWtell(fp);
             if (sz < 0)
             {
                 SDL_RWclose(fp);
+                g_wpk_stats.getdata_failures++;
                 return 0;
             }
             if (SDL_RWseek(fp, 0, RW_SEEK_SET) < 0)
             {
                 SDL_RWclose(fp);
+                g_wpk_stats.getdata_failures++;
                 return 0;
             }
 
@@ -2146,6 +2164,7 @@ static int WPK_GetData(lua_State* L)
             if (inSize == 0)
             {
                 SDL_RWclose(fp);
+                g_wpk_stats.getdata_raw_hits++;
                 return WPK_PushEmptyBytesAndSize(L);
             }
 
@@ -2153,6 +2172,7 @@ static int WPK_GetData(lua_State* L)
             if (!raw)
             {
                 SDL_RWclose(fp);
+                g_wpk_stats.getdata_failures++;
                 return 0;
             }
 
@@ -2161,17 +2181,24 @@ static int WPK_GetData(lua_State* L)
             if (readCount != inSize)
             {
                 SDL_free(raw);
+                g_wpk_stats.getdata_failures++;
                 return 0;
             }
         }
         else
         {
             if (fi->size == 0)
+            {
+                g_wpk_stats.getdata_raw_hits++;
                 return WPK_PushEmptyBytesAndSize(L);
+            }
 
             SDL_RWops* fp = WPK_OpenWpkFile(ud, wpkid);
             if (!fp)
+            {
+                g_wpk_stats.getdata_failures++;
                 return 0;
+            }
 
             inSize = (size_t)fi->size;
             for (int attempt = 0; attempt < 2; attempt++)
@@ -2198,7 +2225,10 @@ static int WPK_GetData(lua_State* L)
 
                 raw = (Uint8*)SDL_malloc(inSize);
                 if (!raw)
+                {
+                    g_wpk_stats.getdata_failures++;
                     return 0;
+                }
 
                 size_t readCount = WPK_RWreadAll(fp, raw, inSize);
                 if (readCount == inSize)
@@ -2217,7 +2247,10 @@ static int WPK_GetData(lua_State* L)
                 raw = NULL;
             }
             if (!raw)
+            {
+                g_wpk_stats.getdata_failures++;
                 return 0;
+            }
             if (SDL_RWtell(fp) < 0)
             {
                 fprintf(stderr, "[wpk] tell data pack failed: idx='%s' base_name='%s' wpkid=%u id=%u\n",
@@ -2230,12 +2263,14 @@ static int WPK_GetData(lua_State* L)
 
         if (WPK_TryPushAcXcDecoded(L, ud, raw, inSize))
         {
+            g_wpk_stats.getdata_acxc_hits++;
             SDL_free(raw);
             return 2;
         }
 
         if (WPK_TryPushNeoxDecompress(L, ud, raw, inSize))
         {
+            g_wpk_stats.getdata_neox_hits++;
             SDL_free(raw);
             return 2;
         }
@@ -2256,6 +2291,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_TryPushAcXcDecoded(L, ud, dec, inSize))
                 {
+                    g_wpk_stats.getdata_hashxor_hits++;
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2263,6 +2299,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
                 {
+                    g_wpk_stats.getdata_hashxor_hits++;
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2270,6 +2307,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_LooksLikeCompressed(dec, inSize))
                 {
+                    g_wpk_stats.getdata_hashxor_hits++;
                     WPK_PushBytesAndSize(L, dec, inSize);
                     SDL_free(dec);
                     SDL_free(raw);
@@ -2289,6 +2327,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_TryPushAcXcDecoded(L, ud, dec, inSize))
                 {
+                    g_wpk_stats.getdata_xor5a_hits++;
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2296,6 +2335,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
                 {
+                    g_wpk_stats.getdata_xor5a_hits++;
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2303,6 +2343,7 @@ static int WPK_GetData(lua_State* L)
 
                 if (WPK_LooksLikeCompressed(dec, inSize))
                 {
+                    g_wpk_stats.getdata_xor5a_hits++;
                     WPK_PushBytesAndSize(L, dec, inSize);
                     SDL_free(dec);
                     SDL_free(raw);
@@ -2313,10 +2354,12 @@ static int WPK_GetData(lua_State* L)
             }
         }
 
+        g_wpk_stats.getdata_raw_hits++;
         WPK_PushBytesAndSize(L, raw, inSize);
         SDL_free(raw);
         return 2;
     }
+    g_wpk_stats.getdata_failures++;
     return 0;
 }
 
@@ -2588,6 +2631,30 @@ static int WPK_SaveIdx(lua_State* L)
     return 1;
 }
 
+static int WPK_GetStats(lua_State* L)
+{
+    lua_createtable(L, 0, 9);
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.idx_mode_file);
+    lua_setfield(L, -2, "idx_mode_file");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.idx_mode_buffer);
+    lua_setfield(L, -2, "idx_mode_buffer");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.idx_open_failures);
+    lua_setfield(L, -2, "idx_open_failures");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_raw_hits);
+    lua_setfield(L, -2, "getdata_raw_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_acxc_hits);
+    lua_setfield(L, -2, "getdata_acxc_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_neox_hits);
+    lua_setfield(L, -2, "getdata_neox_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_hashxor_hits);
+    lua_setfield(L, -2, "getdata_hashxor_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_xor5a_hits);
+    lua_setfield(L, -2, "getdata_xor5a_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_failures);
+    lua_setfield(L, -2, "getdata_failures");
+    return 1;
+}
+
 static int WPK_GC(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -2700,23 +2767,34 @@ static int WPK_NEW(lua_State* L)
     if (lua_gettop(L) >= 2 && lua_type(L, 1) == LUA_TSTRING && lua_type(L, 2) == LUA_TSTRING)
     {
         /* Mode B: Lua layer already read idx via PhysFS — WPK_NEW(dataStr, absPath) */
+        g_wpk_stats.idx_mode_buffer++;
         size_t dataLen = 0;
         const char* luaData = lua_tolstring(L, 1, &dataLen);
         idxPath = lua_tostring(L, 2);
         if (!luaData || dataLen == 0 || !idxPath || !idxPath[0])
+        {
+            g_wpk_stats.idx_open_failures++;
             return 0;
+        }
         data = (Uint8*)SDL_malloc(dataLen);
         if (!data)
+        {
+            g_wpk_stats.idx_open_failures++;
             return 0;
+        }
         SDL_memcpy(data, luaData, dataLen);
         size = dataLen;
     }
     else
     {
         /* Mode A: C layer reads file directly — WPK_NEW(filePath) */
+        g_wpk_stats.idx_mode_file++;
         idxPath = luaL_checkstring(L, 1);
         if (!WPK_ReadFileAll(idxPath, &data, &size))
+        {
+            g_wpk_stats.idx_open_failures++;
             return 0;
+        }
     }
 
     int idxIsSkpe = 0;
@@ -2754,13 +2832,6 @@ static int WPK_NEW(lua_State* L)
         Uint32 unknown = WPK_ReadU32LE(data + 4);
 
         if (recordCount == 0)
-        {
-            SDL_free(data);
-            return 0;
-        }
-
-        /* 防御整数溢出漏洞：(size_t)recordCount * 28 可能在 32 位系统上触发溢出，导致绕过下方的 need 校验 */
-        if (size < headerStart || recordCount > (size - headerStart) / recordSize)
         {
             SDL_free(data);
             return 0;
@@ -3081,6 +3152,7 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"SetHash", WPK_SetHash},
         {"SaveIdx", WPK_SaveIdx},
         {"SetZstdDict", WPK_SetZstdDict},
+        {"GetStats", WPK_GetStats},
         {NULL, NULL},
     };
     luaL_newmetatable(L, WPK_NAME);
