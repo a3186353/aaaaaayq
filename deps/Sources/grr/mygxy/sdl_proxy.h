@@ -1,7 +1,7 @@
 #ifndef SDL_PROXY_H
 #define SDL_PROXY_H
 
-#if defined(MYGXY_USE_DYNAMIC_PROXY)
+#if defined(__ANDROID__)
 
 #include "SDL.h"
 #include "SDL_image.h"
@@ -58,6 +58,22 @@ extern PFN_SDL_UnlockMutex proxy_SDL_UnlockMutex;
 typedef void (*PFN_SDL_DestroyMutex)(SDL_mutex * mutex);
 extern PFN_SDL_DestroyMutex proxy_SDL_DestroyMutex;
 #define SDL_DestroyMutex proxy_SDL_DestroyMutex
+
+typedef SDL_cond * (*PFN_SDL_CreateCond)(void);
+extern PFN_SDL_CreateCond proxy_SDL_CreateCond;
+#define SDL_CreateCond proxy_SDL_CreateCond
+
+typedef void (*PFN_SDL_DestroyCond)(SDL_cond * cond);
+extern PFN_SDL_DestroyCond proxy_SDL_DestroyCond;
+#define SDL_DestroyCond proxy_SDL_DestroyCond
+
+typedef int (*PFN_SDL_CondSignal)(SDL_cond * cond);
+extern PFN_SDL_CondSignal proxy_SDL_CondSignal;
+#define SDL_CondSignal proxy_SDL_CondSignal
+
+typedef int (*PFN_SDL_CondWait)(SDL_cond * cond, SDL_mutex * mutex);
+extern PFN_SDL_CondWait proxy_SDL_CondWait;
+#define SDL_CondWait proxy_SDL_CondWait
 
 typedef SDL_RWops * (*PFN_SDL_RWFromFile)(const char *file, const char *mode);
 extern PFN_SDL_RWFromFile proxy_SDL_RWFromFile;
@@ -147,6 +163,6 @@ void init_sdl_proxy(void);
 #include "SDL_image.h"
 #define init_sdl_proxy() 
 
-#endif
+#endif // Android Proxy Guards
 
 #endif // SDL_PROXY_H

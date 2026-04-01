@@ -79,6 +79,7 @@ typedef struct
     MAP_Mem jpeh; //MAPX
     SDL_ListNode* list;
     SDL_mutex* mutex;
+    SDL_cond* cond;
 
     int closing;
     int active_tasks;

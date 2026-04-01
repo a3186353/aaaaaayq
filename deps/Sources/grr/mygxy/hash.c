@@ -299,8 +299,6 @@ int luaopen_mygxy_fsb(lua_State* L);
 int luaopen_mygxy_wpk(lua_State* L);
 MYGXY_API int luaopen_mygxy(lua_State* L)
 {
-    init_lua_proxy();
-    init_sdl_proxy();
 
     lua_createtable(L, 0, 6);
 

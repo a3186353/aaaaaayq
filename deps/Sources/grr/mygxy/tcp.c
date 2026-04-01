@@ -1830,7 +1830,5 @@ static int TCP_Open(lua_State* L)
 
 MYGXY_API int luaopen_mygxy_tcp(lua_State* L)
 {
-    init_lua_proxy();
-    init_sdl_proxy();
     return TCP_Open(L);
 }

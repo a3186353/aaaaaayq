@@ -890,6 +890,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
             map->loading = 0;
         }
         ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
         SDL_ListAdd(&ud->list, param);
         SDL_UnlockMutex(ud->mutex);
         return 0;
@@ -913,6 +914,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
 
     SDL_ListAdd(&ud->list, param);
     ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
     SDL_UnlockMutex(ud->mutex);
     return 0;
 }
@@ -1314,6 +1316,7 @@ static int LUA_GetMask(lua_State* L)
         {
             SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
             SDL_UnlockMutex(ud->mutex);
             return 0;
         }
@@ -1326,6 +1329,7 @@ static int LUA_GetMask(lua_State* L)
             SDL_free(mask);
             SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
             SDL_UnlockMutex(ud->mutex);
             return 0;
         }
@@ -1621,6 +1625,8 @@ static int MAP_NEW(lua_State* L)
     ud->colnum = (Uint32)SDL_ceil(head.width / 320.0);  //列数
     ud->mapnum = ud->rownum * ud->colnum;
     ud->mutex = SDL_CreateMutex();
+    ud->cond = SDL_CreateCond();
+    ud->cond = SDL_CreateCond();
     if (!ud->mutex)
         goto openerr;
     //地图部分
@@ -1699,7 +1705,10 @@ openerr:
     if (ud->mutex)
     {
         SDL_DestroyMutex(ud->mutex);
-        ud->mutex = NULL;
+    ud->mutex = NULL;
+    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
+        SDL_DestroyCond(ud->cond);
+        ud->cond = NULL;
     }
     if (ud->map)
     {
@@ -1800,17 +1809,11 @@ static int LUA_GC(lua_State* L)
         rw->close(rw);
 
     {
-        for (;;)
-        {
-            int active = 0;
-            SDL_LockMutex(ud->mutex);
-            active = ud->active_tasks;
-            SDL_UnlockMutex(ud->mutex);
-
-            if (active <= 0)
-                break;
-            SDL_Delay(1);
+        SDL_LockMutex(ud->mutex);
+        while (ud->active_tasks > 0) {
+            SDL_CondWait(ud->cond, ud->mutex);
         }
+        SDL_UnlockMutex(ud->mutex);
     }
 
     MAP_DrainPendingNoCallback(L, ud);
@@ -1875,6 +1878,9 @@ static int LUA_GC(lua_State* L)
 
     SDL_DestroyMutex(ud->mutex);
     ud->mutex = NULL;
+    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
+    SDL_DestroyCond(ud->cond);
+    ud->cond = NULL;
     return 0;
 }
 
@@ -1887,8 +1893,6 @@ static int LUA_SetMode(lua_State* L)
 
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
-    init_lua_proxy();
-    init_sdl_proxy();
     const luaL_Reg funcs[] = {
         {"__gc", LUA_GC},
         {"__close", LUA_GC},
