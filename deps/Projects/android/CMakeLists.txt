@@ -363,7 +363,10 @@ target_include_directories(mygxy PRIVATE
 )
 target_link_libraries(mygxy PUBLIC lua54 PRIVATE log physfs)
 target_link_libraries(mygxy PRIVATE SDL2_prebuilt SDL_image_prebuilt)
-target_compile_definitions(mygxy PRIVATE ZSTD_DISABLE_ASM=1)
+target_compile_definitions(mygxy PRIVATE
+    MYGXY_USE_DYNAMIC_PROXY=1
+    ZSTD_DISABLE_ASM=1
+)
 set_source_files_properties(
     "${DEPS_DIR}/lz4/xxhash.c" "${DEPS_DIR}/lz4/lz4hc.c" "${DEPS_DIR}/lz4/lz4frame.c"
     PROPERTIES COMPILE_DEFINITIONS "XXH_NAMESPACE=LZ4_"
