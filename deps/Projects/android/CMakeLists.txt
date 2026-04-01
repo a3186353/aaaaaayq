@@ -322,6 +322,8 @@ add_library(mygxy SHARED
     # 核心源文件
     "${MYGXY_SRC_DIR}/fsb.c"
     "${MYGXY_SRC_DIR}/hash.c"
+    "${MYGXY_SRC_DIR}/lua_proxy.c"
+    "${MYGXY_SRC_DIR}/sdl_proxy.c"
     "${MYGXY_SRC_DIR}/map.c"
     "${MYGXY_SRC_DIR}/SDL_list.c"
     "${MYGXY_SRC_DIR}/tcp.c"
