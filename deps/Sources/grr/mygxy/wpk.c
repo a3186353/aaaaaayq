@@ -1182,6 +1182,23 @@ static int WPK_ZstdFrameGetDictID(const Uint8* src, size_t srcSize, Uint32* outI
     return 1;
 }
 
+static size_t WPK_RWreadAll(SDL_RWops* fp, void* dst, size_t size)
+{
+    if (!fp || !dst || size == 0)
+        return 0;
+
+    size_t total = 0;
+    Uint8* out = (Uint8*)dst;
+    while (total < size)
+    {
+        size_t chunk = SDL_RWread(fp, out + total, 1, size - total);
+        if (chunk == 0)
+            break;
+        total += chunk;
+    }
+    return total;
+}
+
 static int WPK_ReadFileAll(const char* path, Uint8** outData, size_t* outSize)
 {
     if (!outData || !outSize)
@@ -1219,7 +1236,7 @@ static int WPK_ReadFileAll(const char* path, Uint8** outData, size_t* outSize)
         SDL_RWclose(fp);
         return 0;
     }
-    size_t readCount = SDL_RWread(fp, data, 1, size);
+    size_t readCount = WPK_RWreadAll(fp, data, size);
     SDL_RWclose(fp);
     if (readCount != size)
     {
@@ -1996,7 +2013,7 @@ static int WPK_GetData(lua_State* L)
                 return 0;
             }
 
-            size_t readCount = SDL_RWread(fp, raw, 1, inSize);
+            size_t readCount = WPK_RWreadAll(fp, raw, inSize);
             SDL_RWclose(fp);
             if (readCount != inSize)
             {
@@ -2040,7 +2057,7 @@ static int WPK_GetData(lua_State* L)
                 if (!raw)
                     return 0;
 
-                size_t readCount = SDL_RWread(fp, raw, 1, inSize);
+                size_t readCount = WPK_RWreadAll(fp, raw, inSize);
                 if (readCount == inSize)
                     break;
 
