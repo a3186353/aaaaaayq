@@ -2363,6 +2363,79 @@ static int WPK_GetData(lua_State* L)
     return 0;
 }
 
+static int WPK_GetInfoByMd5(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    const char* md5 = luaL_checkstring(L, 2);
+
+    char md5Lower[33];
+    if (!WPK_NormalizeMd5Hex32(md5Lower, md5))
+        return 0;
+
+    int idx = WPK_FindByMd5(ud, md5Lower);
+    if (idx < 0)
+        return 0;
+
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, (lua_Integer)(idx + 1));
+    lua_setfield(L, -2, "id");
+    lua_pushlstring(L, ud->list[idx].md5, 32);
+    lua_setfield(L, -2, "md5");
+    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(ud->list[idx].wpkid));
+    lua_setfield(L, -2, "wpkid");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].offset);
+    lua_setfield(L, -2, "offset");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].size);
+    lua_setfield(L, -2, "size");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].file_index);
+    lua_setfield(L, -2, "fileindex");
+    lua_pushvalue(L, 1);
+    lua_setfield(L, -2, "wpk");
+    lua_pushstring(L, ud->idx_path);
+    lua_setfield(L, -2, "path");
+
+    return 1;
+}
+
+static int WPK_GetInfoByHash(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    Uint32 hash = (Uint32)luaL_checkinteger(L, 2);
+
+    int idx = -1;
+    for (Uint32 i = 0; i < ud->number; i++)
+    {
+        if (ud->list[i].hash == hash)
+        {
+            idx = (int)i;
+            break;
+        }
+    }
+
+    if (idx < 0)
+        return 0;
+
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, (lua_Integer)(idx + 1));
+    lua_setfield(L, -2, "id");
+    lua_pushlstring(L, ud->list[idx].md5, 32);
+    lua_setfield(L, -2, "md5");
+    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(ud->list[idx].wpkid));
+    lua_setfield(L, -2, "wpkid");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].offset);
+    lua_setfield(L, -2, "offset");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].size);
+    lua_setfield(L, -2, "size");
+    lua_pushinteger(L, (lua_Integer)ud->list[idx].file_index);
+    lua_setfield(L, -2, "fileindex");
+    lua_pushvalue(L, 1);
+    lua_setfield(L, -2, "wpk");
+    lua_pushstring(L, ud->idx_path);
+    lua_setfield(L, -2, "path");
+
+    return 1;
+}
+
 static int WPK_GetList(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -3148,6 +3221,8 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"__close", WPK_GC},
         {"GetData", WPK_GetData},
         {"GetList", WPK_GetList},
+        {"GetInfoByMd5", WPK_GetInfoByMd5},
+        {"GetInfoByHash", WPK_GetInfoByHash},
         {"Upsert", WPK_Upsert},
         {"SetHash", WPK_SetHash},
         {"SaveIdx", WPK_SaveIdx},
