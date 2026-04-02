@@ -1055,7 +1055,14 @@ static int LUA_Run(lua_State* L)
             {
                 {
                     SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                    if (ud->mode == 0x9527)
+                    
+            if (map->sf) {
+                if (ud->mode != 0x9527) {
+                    _lru_push(ud, task->id);
+                    _lru_evict(L, ud);
+                }
+            }
+            if (ud->mode == 0x9527)
                     {
                         *sf = map->sf;
                         map->sf = NULL;
@@ -1144,6 +1151,93 @@ static int LUA_GetResult(lua_State* L)
     return LUA_Run(L);
 }
 
+
+static void _lru_remove(MAP_UserData* ud, Uint32 id) {
+    MAP_Data* map = &ud->map[id];
+    if (!map->in_lru) return;
+    
+    if (map->lru_prev != 0xFFFFFFFF)
+        ud->map[map->lru_prev].lru_next = map->lru_next;
+    else
+        ud->lru_head = map->lru_next;
+        
+    if (map->lru_next != 0xFFFFFFFF)
+        ud->map[map->lru_next].lru_prev = map->lru_prev;
+    else
+        ud->lru_tail = map->lru_prev;
+        
+    map->in_lru = 0;
+    ud->lru_size--;
+}
+
+static void _lru_push(MAP_UserData* ud, Uint32 id) {
+    MAP_Data* map = &ud->map[id];
+    if (map->in_lru) _lru_remove(ud, id);
+    
+    map->lru_prev = 0xFFFFFFFF;
+    map->lru_next = ud->lru_head;
+    
+    if (ud->lru_head != 0xFFFFFFFF)
+        ud->map[ud->lru_head].lru_prev = id;
+    else
+        ud->lru_tail = id;
+        
+    ud->lru_head = id;
+    map->in_lru = 1;
+    ud->lru_size++;
+}
+
+static void _lru_evict(lua_State* L, MAP_UserData* ud) {
+    while (ud->lru_size > ud->lru_limit) {
+        Uint32 evict_id = ud->lru_tail;
+        if (evict_id == 0xFFFFFFFF) break;
+        MAP_Data* evict_map = &ud->map[evict_id];
+        
+        _lru_remove(ud, evict_id);
+        
+        if (evict_map->sf) {
+            SDL_FreeSurface(evict_map->sf);
+            evict_map->sf = NULL;
+        }
+        if (evict_map->mask) {
+            SDL_free(evict_map->mask);
+            evict_map->mask = NULL;
+            evict_map->masknum = 0;
+        }
+    }
+}
+
+
+static int LUA_SetTile(lua_State* L) {
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2);
+    if (id >= ud->mapnum) return 0;
+    
+    if (ud->map[id].lua_ref != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ud->map[id].lua_ref);
+    }
+    
+    if (lua_isnil(L, 3)) {
+        ud->map[id].lua_ref = LUA_REFNIL;
+    } else {
+        lua_pushvalue(L, 3);
+        ud->map[id].lua_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    return 0;
+}
+
+static int LUA_GetTile(lua_State* L) {
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2);
+    if (id >= ud->mapnum) return 0;
+    
+    if (ud->map[id].lua_ref != LUA_REFNIL) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, ud->map[id].lua_ref);
+        return 1;
+    }
+    return 0;
+}
+
 static int LUA_GetMap(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
@@ -1192,8 +1286,13 @@ static int LUA_GetMap(lua_State* L)
             if (!map->sf)
                 map->sf = _getmapsf(ud, id);
 
+            
             if (map->sf)
             {
+                if (ud->mode != 0x9527) {
+                    _lru_push(ud, id);
+                    _lru_evict(L, ud);
+                }
                 if (ud->mode == 0x9527)
                 {
                     out_sf = map->sf;
@@ -1272,8 +1371,13 @@ static int LUA_GetMapInfo(lua_State* L)
             if (!map->sf)
                 map->sf = _getmapsf(ud, id);
 
+        
         if (map->sf)
         {
+            if (ud->mode != 0x9527) {
+                _lru_push(ud, id);
+                _lru_evict(L, ud);
+            }
             if (ud->mode == 0x9527)
             {
                 out_sf = map->sf;
@@ -1706,6 +1810,12 @@ static int MAP_NEW(lua_State* L)
     if (ud->rownum > 0 && ud->colnum > (0xFFFFFFFFu / ud->rownum))
         goto openerr;
     ud->mapnum = ud->rownum * ud->colnum;
+    
+    ud->lru_head = 0xFFFFFFFF;
+    ud->lru_tail = 0xFFFFFFFF;
+    ud->lru_size = 0;
+    ud->lru_limit = 200; // max tiles in memory
+
     ud->req_mutex = SDL_CreateMutex();
     ud->req_cond = SDL_CreateCond();
     ud->res_mutex = SDL_CreateMutex();
@@ -1879,6 +1989,10 @@ static int LUA_Clear(lua_State* L)
     SDL_LockMutex(ud->req_mutex);
 
     for (Uint32 n = 0; n < ud->mapnum; n++) {
+        if (ud->map[n].lua_ref != LUA_REFNIL) {
+            luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
+            ud->map[n].lua_ref = LUA_REFNIL;
+        }
 
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
@@ -1891,6 +2005,14 @@ static int LUA_Clear(lua_State* L)
 
     }
     SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
+    for (Uint32 n = 0; n < ud->mapnum; n++) {
+        ud->map[n].lua_ref = LUA_REFNIL;
+    }
+
+    ud->lru_head = 0xFFFFFFFF;
+    ud->lru_tail = 0xFFFFFFFF;
+    ud->lru_size = 0;
+
 
     if (ud->mem[0].mem) {
         SDL_free(ud->mem[0].mem);
@@ -1946,6 +2068,10 @@ static int LUA_GC(lua_State* L)
     {
         for (Uint32 n = 0; n < ud->mapnum; n++)
         {
+            if (ud->map[n].lua_ref != LUA_REFNIL) {
+                luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
+                ud->map[n].lua_ref = LUA_REFNIL;
+            }
             if (ud->map[n].sf)
                 SDL_FreeSurface(ud->map[n].sf);
 
@@ -2025,6 +2151,8 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
         {"GetCell", LUA_GetCell},
         {"GetBlock", LUA_GetBlock},
         {"Clear", LUA_Clear},
+        {"SetTile", LUA_SetTile},
+        {"GetTile", LUA_GetTile},
         {"SetMode", LUA_SetMode},
         {"Run", LUA_Run},
         {NULL, NULL},
