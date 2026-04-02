@@ -1842,6 +1842,10 @@ static int MAP_NEW(lua_State* L)
     if (!ud->maplist || !ud->map)
         goto openerr;
 
+    for (Uint32 n = 0; n < ud->mapnum; n++) {
+        ud->map[n].lua_ref = LUA_REFNIL;
+    }
+
     if (SDL_RWread(rw, ud->maplist, sizeof(Uint32), ud->mapnum) != ud->mapnum)
         goto openerr;
 
