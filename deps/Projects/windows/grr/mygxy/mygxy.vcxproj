@@ -153,15 +153,14 @@
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <!-- Generate ggelua.lib import library via .def file (same approach as CI build) -->
+  <!-- Generate ggelua.lib import library from the shared export definition -->
   <Target Name="GenerateGgeluaLib" BeforeTargets="Link">
     <PropertyGroup>
-      <GgeluaDefPath>$(IntDir)ggelua.def</GgeluaDefPath>
+      <GgeluaDefPath>$(SolutionDir)ggelua_all.def</GgeluaDefPath>
       <GgeluaLibPath>$(IntDir)ggelua.lib</GgeluaLibPath>
       <LibMachine Condition="'$(Platform)'=='Win32'">X86</LibMachine>
       <LibMachine Condition="'$(Platform)'=='x64'">X64</LibMachine>
     </PropertyGroup>
-      <WriteLinesToFile File="$(GgeluaDefPath)" Overwrite="true" Lines="EXPORTS;lua_call;lua_callk;lua_createtable;lua_getfield;lua_getmetatable;lua_gettop;lua_isfunction;lua_isnil;lua_isnoneornil;lua_istable;lua_newtable;lua_newuserdata;lua_newuserdatauv;lua_pop;lua_pushboolean;lua_pushcclosure;lua_pushcfunction;lua_pushinteger;lua_pushlstring;lua_pushnil;lua_pushstring;lua_pushvalue;lua_rawequal;lua_rawgeti;lua_rawseti;lua_setfield;lua_seti;lua_setmetatable;lua_settable;lua_settop;lua_toboolean;lua_tointeger;lua_tointegerx;lua_tolstring;lua_tostring;lua_touserdata;lua_type;luaL_addlstring;luaL_addsize;luaL_buffinit;luaL_buffinitsize;luaL_checkinteger;luaL_checklstring;luaL_checkstring;luaL_checkudata;luaL_error;luaL_getmetatable;luaL_newmetatable;luaL_optinteger;luaL_prepbuffsize;luaL_pushresult;luaL_pushresultsize;luaL_ref;luaL_setfuncs;luaL_setmetatable;luaL_unref;IMG_Load_RW;SDL_AddTimer;SDL_AllocRW;SDL_BlitSurface;SDL_calloc;SDL_ceil;SDL_CondSignal;SDL_CondWait;SDL_ConvertSurfaceFormat;SDL_CreateCond;SDL_CreateMutex;SDL_CreateRGBSurfaceWithFormat;SDL_Delay;SDL_DestroyCond;SDL_DestroyMutex;SDL_DuplicateSurface;SDL_Error;SDL_FillRect;SDL_free;SDL_FreeRW;SDL_FreeSurface;SDL_GetError;SDL_LockMutex;SDL_LockSurface;SDL_malloc;SDL_memcmp;SDL_memcpy;SDL_memset;SDL_PremultiplyAlpha;SDL_realloc;SDL_RWclose;SDL_RWFromFile;SDL_RWFromMem;SDL_RWread;SDL_RWseek;SDL_RWsize;SDL_RWtell;SDL_RWwrite;SDL_SetSurfaceBlendMode;SDL_snprintf;SDL_strcasecmp;SDL_strchr;SDL_strlcpy;SDL_strlen;SDL_UnlockMutex;SDL_UnlockSurface;SDL_tolower;SDL_UpperBlit;PHYSFS_getErrorByCode;PHYSFS_getLastErrorCode;PHYSFS_isInit;PHYSFS_openRead;PHYSFS_openWrite;PHYSFS_openAppend;PHYSFS_close;PHYSFS_readBytes;PHYSFS_writeBytes;PHYSFS_fileLength;PHYSFS_tell;PHYSFS_seek" />
     <Exec Command="lib.exe /nologo /def:&quot;$(GgeluaDefPath)&quot; /out:&quot;$(GgeluaLibPath)&quot; /MACHINE:$(LibMachine)" />
     <ItemGroup>
       <Link>
