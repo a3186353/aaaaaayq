@@ -9,7 +9,7 @@
 #define MYGXY_API LUAMOD_API
 #endif
 
-//申请内存
+/*申请内存*/
 static void* _getmem(MAP_Mem* mem, size_t size)
 {
     if (mem->size >= size)
@@ -114,20 +114,20 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     m->rw.close = MAP_MemRW_Close;
     return &m->rw;
 }
-//恢复普通jpg
+/*恢复普通jpg*/
 static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbuf)
 {
-    // JPEG数据处理原理
-    // 1、复制D8到D9的数据到缓冲区中
-    // 2、删除第3、4个字节 FFA0
-    // 3、修改FFDA的长度00 09 为 00 0C
-    // 4、在FFDA数据的最后添加00 3F 00
-    // 5、替换FFDA到FF D9之间的FF数据为FF 00
-    Uint32 TempNum = 0;   // 临时变量，表示已读取的长度
-    Uint16 TempTimes = 0; // 临时变量，表示循环的次数
+    /* JPEG数据处理原理*/
+    /* 1、复制D8到D9的数据到缓冲区中*/
+    /* 2、删除第3、4个字节 FFA0*/
+    /* 3、修改FFDA的长度00 09 为 00 0C*/
+    /* 4、在FFDA数据的最后添加00 3F 00*/
+    /* 5、替换FFDA到FF D9之间的FF数据为FF 00*/
+    Uint32 TempNum = 0;   /* 临时变量，表示已读取的长度*/
+    Uint16 TempTimes = 0; /* 临时变量，表示循环的次数*/
     Uint32 outsize = 0;
     int i = 0;
-    // 当已读取数据的长度小于总长度时继续
+    /* 当已读取数据的长度小于总长度时继续*/
     while (TempNum < insize && *inbuf++ == 0xFF)
     {
         *outbuf++ = 0xFF;
@@ -149,7 +149,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             inbuf++;
             TempNum++;
 
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); /* 将长度转换为Intel顺序*/
 
             for (i = 0; i < TempTimes; i++)
             {
@@ -163,7 +163,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             inbuf++;
             TempNum++;
 
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); /* 将长度转换为Intel顺序*/
 
             for (i = 0; i < TempTimes; i++)
             {
@@ -176,7 +176,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             inbuf++;
             TempNum++;
 
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); /* 将长度转换为Intel顺序*/
 
             for (i = 0; i < TempTimes; i++)
             {
@@ -191,7 +191,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             inbuf++;
             TempNum++;
 
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); /* 将长度转换为Intel顺序*/
             inbuf++;
             TempNum++;
             inbuf++;
@@ -204,9 +204,9 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             *outbuf++ = 0x00;
             *outbuf++ = 0x3F;
             *outbuf++ = 0x00;
-            outsize += 1; // 这里应该是+3的，因为前面的0xFFA0没有-2，所以这里只+1。
+            outsize += 1; /* 这里应该是+3的，因为前面的0xFFA0没有-2，所以这里只+1。*/
 
-            // 循环处理0xFFDA到0xFFD9之间所有的0xFF替换为0xFF00
+            /* 循环处理0xFFDA到0xFFD9之间所有的0xFF替换为0xFF00*/
             for (; TempNum < insize - 2;)
             {
                 if (*inbuf == 0xFF)
@@ -223,14 +223,14 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
                     TempNum++;
                 }
             }
-            // 直接在这里写上了0xFFD9结束Jpeg图片.
-            outsize--; // 这里多了一个字节，所以减去。
+            /* 直接在这里写上了0xFFD9结束Jpeg图片.*/
+            outsize--; /* 这里多了一个字节，所以减去。*/
             outbuf--;
             *outbuf-- = 0xD9;
 
             break;
         case 0xD9:
-            // 算法问题，这里不会被执行，但结果一样。
+            /* 算法问题，这里不会被执行，但结果一样。*/
             *outbuf++ = 0xD9;
             TempNum++;
             break;
@@ -242,7 +242,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
 
     return outsize;
 }
-//解压遮罩数据
+/*解压遮罩数据*/
 static int _lzodecompress(void* in, void* out)
 {
     register unsigned char* op;
@@ -423,10 +423,10 @@ static int _lzodecompress(void* in, void* out)
     }
 
 eof_found:
-    //   if (ip != ip_end) return -1;
+    /*   if (ip != ip_end) return -1;*/
     return (int)(op - (Uint8*)out);
 }
-//取地表
+/*取地表*/
 static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
 {
     if (id >= ud->mapnum)
@@ -435,11 +435,11 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
     if (ud->map[id].sf)
         return ud->map[id].sf;
 
-    Uint32 masknum;//遮罩数量
+    Uint32 masknum;/*遮罩数量*/
     SDL_Surface* sf = NULL;
 
     if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
-        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩数量
+        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)/*附近遮罩数量*/
         return 0;
 
     if (masknum > 65535)
@@ -460,10 +460,10 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
 
         switch (info.flag)
         {
-        case MAP_BLOCK_JPG2: //梦幻普通JPG
-        case MAP_BLOCK_PNG1: //梦幻
-        case MAP_BLOCK_WEBP: //梦幻
-        case MAP_BLOCK_0PNG: //大话
+        case MAP_BLOCK_JPG2: /*梦幻普通JPG*/
+        case MAP_BLOCK_PNG1: /*梦幻*/
+        case MAP_BLOCK_WEBP: /*梦幻*/
+        case MAP_BLOCK_0PNG: /*大话*/
         {
             if (!(mem0 = _getmem(&ud->mem[0], info.size)))
                 return 0;
@@ -481,15 +481,15 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
                 if (SDL_RWread(ud->file, mem0, sizeof(Uint8), info.size) != info.size)
                     return 0;
 
-                if (((Uint16*)mem0)[1] == 0xA0FF) { //云风格式
-                    if (!(mem1 = _getmem(&ud->mem[1], 153600))) { //320*240*2
+                if (((Uint16*)mem0)[1] == 0xA0FF) { /*云风格式*/
+                    if (!(mem1 = _getmem(&ud->mem[1], 153600))) { /*320*240*2*/
                         return 0;
                     }
                     info.size = _fixjpeg(mem0, info.size, mem1);
                     mem0 = mem1;
-                }//大话普通
+                }/*大话普通*/
             }
-            else {//MAPX 
+            else {/*MAPX */
                 if (!(mem0 = _getmem(&ud->mem[0], ud->jpeh.size + info.size)))
                     return 0;
 
@@ -499,12 +499,12 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
                 SDL_memcpy(mem0, ud->jpeh.mem, ud->jpeh.size);
 
                 ujImage img = ujCreate();
-                //ujSetChromaMode(img, UJ_CHROMA_MODE_FAST);
+                /*ujSetChromaMode(img, UJ_CHROMA_MODE_FAST);*/
                 ujDecode(img, mem0, (int)ud->jpeh.size + info.size, 1);
                 if (ujIsValid(img)) {
                     info.size = ujGetImageSize(img);
                     if ((mem1 = _getmem(&ud->mem[1], info.size)) && ujGetImage(img, mem1)) {
-                        //!ujIsColor(img)  P5灰度？
+                        /*!ujIsColor(img)  P5灰度？*/
                         sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 24, SDL_PIXELFORMAT_RGB24);
                         SDL_memcpy(sf->pixels, mem1, info.size);
                     }
@@ -516,7 +516,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
             break;
 
         }
-        case 0://结束
+        case 0:/*结束*/
         {
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
                 return 0;
@@ -524,7 +524,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
             loop = 0;
             break;
         }
-        default: //跳过
+        default: /*跳过*/
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
                 return 0;
             break;
@@ -600,7 +600,7 @@ end:
     SDL_RWseek(ud->file, cur, RW_SEEK_SET);
     return ok;
 }
-//取遮罩信息
+/*取遮罩信息*/
 static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num)
 {
     if (!mask || !num)
@@ -611,11 +611,11 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
     if (id >= ud->mapnum)
         return 0;
 
-    Uint32 masknum;//遮罩数量
+    Uint32 masknum;/*遮罩数量*/
     MAP_MaskInfo* masklist = NULL;
 
     if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
-        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩ID
+        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)/*附近遮罩ID*/
         return 0;
 
     if (masknum == 0 || masknum > 65535)
@@ -638,7 +638,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
         }
         Uint32 valid = 0;
         Uint32 i;
-        for (i = 0; i < masknum; i++)
+    for(i = 0; i < masknum; i++)
         {
             if (maskid[i] < ud->masknum)
             {
@@ -671,7 +671,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
         }
         switch (info.flag)
         {
-        case MAP_BLOCK_MASK://MAPX 
+        case MAP_BLOCK_MASK:/*MAPX */
         {
             if (i < masknum) {
                 masklist[i].offset = (Uint32)SDL_RWtell(ud->file) - sizeof(Uint32);
@@ -685,7 +685,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
             }
             break;
         }
-        case 0://结束
+        case 0:/*结束*/
         {
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1) {
                 SDL_free(masklist);
@@ -695,7 +695,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
             loop = 0;
             break;
         }
-        default: //跳过
+        default: /*跳过*/
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1) {
                 SDL_free(masklist);
                 return 0;
@@ -708,7 +708,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
     *num = masknum;
     return 1;
 }
-//取遮罩透明数据
+/*取遮罩透明数据*/
 static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
     Uint32 width, height, size;
@@ -720,7 +720,7 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     size = mask->info.size;
 
     void* mem0, * mem1;
-    int len = ((width + 3) >> 2) * height;// 4对齐>>2等于除以4
+    int len = ((width + 3) >> 2) * height;/* 4对齐>>2等于除以4*/
     if (!(mem1 = _getmem(&ud->mem[1], len)))
         return 0;
 
@@ -732,7 +732,7 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     Uint32 size_try[3] = { size, size, size > 4 ? (size - 4) : 0 };
 
     int i;
-    for (i = 0; i < 3 && !ok; i++)
+    for(i = 0; i < 3 && !ok; i++)
     {
         Uint32 h = head_try[i];
         Uint32 s = size_try[i];
@@ -755,18 +755,18 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     int  bitidx = 0;
 
     Uint32 y;
-    for (y = 0; y < height; y++) {
+    for(y = 0; y < height; y++) {
         Uint32 x;
-        for (x = 0; x < width; x++) {
-            *alpha++ = (*data >> bitidx) & 3; //取当前字节中值，2bit
+    for(x = 0; x < width; x++) {
+            *alpha++ = (*data >> bitidx) & 3; /*取当前字节中值，2bit*/
 
-            bitidx += 2; //每两位代表一像素
+            bitidx += 2; /*每两位代表一像素*/
             if (bitidx == 8) {
                 bitidx = 0;
                 data++;
             }
         }
-        if (bitidx != 0) { //数据4对齐，有剩余就跳过。
+        if (bitidx != 0) { /*数据4对齐，有剩余就跳过。*/
             bitidx = 0;
             data++;
         }
@@ -774,7 +774,7 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 
     return dedata;
 }
-//取遮罩
+/*取遮罩*/
 static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
     Uint8* alpha = _getmaskdata(ud, id, mask);
@@ -783,44 +783,44 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     if (!alpha)
         return 0;
 
-    //if (rect->y < 0) { //负数(暂时不存在)
-    //    rect->height += rect->y;
-    //    rect->y = 0;
-    //}
-    //if (rect->x < 0) { //负数(1114:39,1217:158,1218:91)
-    //    rect->width += rect->x;
-    //    rect->x = 0;
-    //}
+    /*if (rect->y < 0) { //负数(暂时不存在)*/
+    /*    rect->height += rect->y;*/
+    /*    rect->y = 0;*/
+    /*}*/
+    /*if (rect->x < 0) { //负数(1114:39,1217:158,1218:91)*/
+    /*    rect->width += rect->x;*/
+    /*    rect->x = 0;*/
+    /*}*/
 
     SDL_Surface* msf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, rect->w, rect->h, 32, SDL_PIXELFORMAT_ARGB8888);
-    //SDL_SetSurfaceBlendMode(msf, SDL_BLENDMODE_BLEND);
+    /*SDL_SetSurfaceBlendMode(msf, SDL_BLENDMODE_BLEND);*/
 
-    //从地表扣图
+    /*从地表扣图*/
     Uint32 mapid = (rect->x / 320) + (rect->y / 240) * ud->colnum;
     int sfx = -(rect->x % 320);
     int sfy = -(rect->y % 240);
     Uint32 curid = mapid;
 
     int y;
-    for (y = sfy; y < msf->h; y += 240) {
+    for(y = sfy; y < msf->h; y += 240) {
         int x;
-        for (x = sfx; x < msf->w; x += 320) {
+    for(x = sfx; x < msf->w; x += 320) {
             SDL_Surface* sf = _getmapsf(ud, curid++);
             SDL_Rect xy = { x,y,0,0 };
             if (sf)
-                SDL_BlitSurface(sf, NULL, msf, &xy); //Blit后rect会清零
+                SDL_BlitSurface(sf, NULL, msf, &xy); /*Blit后rect会清零*/
         }
         mapid += ud->colnum;
         curid = mapid;
     }
 
-    //填充透明通道
+    /*填充透明通道*/
     Uint8* pixels = (Uint8*)msf->pixels;
     Uint8* palpha = alpha;
-    for (y = 0; y < msf->h; y++) {
+    for(y = 0; y < msf->h; y++) {
         Uint32* row = (Uint32*)pixels;
         int x;
-        for (x = 0; x < msf->w; x++) {
+    for(x = 0; x < msf->w; x++) {
             Uint8 code = *palpha++;
             Uint8 out_a = code;
             if (code == 2)
@@ -840,7 +840,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     mask->sf = msf;
     return 1;
 }
-//取遮罩
+/*取遮罩*/
 static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
     Uint8* alpha = _getmaskdata(ud, id, mask);
@@ -874,7 +874,7 @@ static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     Uint8* pixels = msf->pixels;
     Uint8* palpha = alpha;
     int h;
-    for (h = 0; h < rect->h; h++)
+    for(h = 0; h < rect->h; h++)
     {
         SDL_memcpy(pixels, palpha, rect->w);
         pixels += msf->pitch;
@@ -886,7 +886,7 @@ static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     return 1;
 }
 
-//载入线程
+/*载入线程*/
 static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
 {
     TIME_Data* time = (TIME_Data*)param;
@@ -1025,7 +1025,7 @@ static int LUA_Run(lua_State* L)
 
                 lua_createtable(L, map->masknum, 0);
                 Uint32 i;
-                for (i = 0; i < map->masknum; i++)
+    for(i = 0; i < map->masknum; i++)
                 {
                     MAP_MaskInfo* info = &map->mask[i];
                     lua_createtable(L, 0, 7);
@@ -1094,7 +1094,7 @@ static int LUA_GetResult(lua_State* L)
 static int LUA_GetMap(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2); /*从0开始*/
     int has_cb = lua_isfunction(L, 3);
 
     if (id >= ud->mapnum)
@@ -1164,7 +1164,7 @@ static int LUA_GetMap(lua_State* L)
 static int LUA_GetMapInfo(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2); /*从0开始*/
     int has_cb = lua_isfunction(L, 3);
 
     if (id >= ud->mapnum)
@@ -1237,7 +1237,7 @@ static int LUA_GetMapInfo(lua_State* L)
 
     lua_createtable(L, num, 0);
     Uint32 i;
-    for (i = 0; i < num; i++)
+    for(i = 0; i < num; i++)
     {
         MAP_MaskInfo* info = &mask[i];
         lua_createtable(L, 0, 7);
@@ -1266,7 +1266,7 @@ static int LUA_GetMapInfo(lua_State* L)
 static int LUA_GetMaskInfo(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2); /*从0开始*/
 
     Uint32 num = 0;
     MAP_MaskInfo* mask = NULL;
@@ -1278,7 +1278,7 @@ static int LUA_GetMaskInfo(lua_State* L)
 
     lua_createtable(L, num, 0);
     Uint32 i;
-    for (i = 0; i < num; i++)
+    for(i = 0; i < num; i++)
     {
         MAP_MaskInfo* info = &mask[i];
         lua_createtable(L, 0, 7);
@@ -1381,7 +1381,7 @@ static int LUA_GetMask(lua_State* L)
     return 0;
 }
 
-//读障碍
+/*读障碍*/
 static int LUA_GetCell(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
@@ -1393,8 +1393,8 @@ static int LUA_GetCell(lua_State* L)
         return luaL_error(L, "cell read error!");
     }
 
-    int line_width = (ud->colnum - 1) * 16; //一行格子  (列-1)*16
-    int line_size = ud->colnum * 176;       //一行块大小(320/20)*(240/20)=192
+    int line_width = (ud->colnum - 1) * 16; /*一行格子  (列-1)*16*/
+    int line_size = ud->colnum * 176;       /*一行块大小(320/20)*(240/20)=192*/
     Uint32 masknum;
 
     MAP_BlockInfo info;
@@ -1415,7 +1415,7 @@ static int LUA_GetCell(lua_State* L)
         for (l = 0; l < ud->colnum; l++)
         {
             if (SDL_RWseek(ud->file, ud->maplist[n++], RW_SEEK_SET) == -1 ||
-                SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩
+                SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)/*附近遮罩*/
                 goto readerr;
 
             if (ud->flag == MAP_FLAG_M10 && masknum > 0 &&
@@ -1454,9 +1454,9 @@ static int LUA_GetCell(lua_State* L)
                     break;
                 }
             }
-            cell += 16; //下一列
+            cell += 16; /*下一列*/
         }
-        cell += line_size; //下一行
+        cell += line_size; /*下一行*/
     }
     lua_pushlstring(L, mem, celllen);
     SDL_UnlockMutex(ud->mutex);
@@ -1466,11 +1466,11 @@ readerr:
     return luaL_error(L, "cell read error!");
 }
 
-//读二进制
+/*读二进制*/
 static int LUA_GetBlock(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
+    Uint32 id = (Uint32)luaL_checkinteger(L, 2); /*从0开始*/
 
     SDL_LockMutex(ud->mutex);
     if (ud->closing || !ud->file)
@@ -1488,7 +1488,7 @@ static int LUA_GetBlock(lua_State* L)
     Uint32 masknum;
 
     if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
-        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩ID
+        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)/*附近遮罩ID*/
     {
         SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "read error!");
@@ -1514,7 +1514,7 @@ static int LUA_GetBlock(lua_State* L)
         }
 
         Uint32 i;
-        for (i = 0; i < masknum; i++)
+    for(i = 0; i < masknum; i++)
         {
             lua_pushinteger(L, maskid[i]);
             lua_seti(L, masktab, i + 1);
@@ -1537,7 +1537,7 @@ static int LUA_GetBlock(lua_State* L)
         switch (info.flag)
         {
         case 0:
-        { //结束
+        { /*结束*/
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
             {
                 SDL_UnlockMutex(ud->mutex);
@@ -1636,25 +1636,25 @@ static int MAP_NEW(lua_State* L)
     ud->filebuf = buf;
     ud->filebuf_size = (size_t)want;
     ud->flag = head.flag;
-    ud->rownum = (Uint32)SDL_ceil(head.height / 240.0); //行数
-    ud->colnum = (Uint32)SDL_ceil(head.width / 320.0);  //列数
+    ud->rownum = (Uint32)SDL_ceil(head.height / 240.0); /*行数*/
+    ud->colnum = (Uint32)SDL_ceil(head.width / 320.0);  /*列数*/
     ud->mapnum = ud->rownum * ud->colnum;
     ud->mutex = SDL_CreateMutex();
     ud->cond = SDL_CreateCond();
     ud->cond = SDL_CreateCond();
     if (!ud->mutex)
         goto openerr;
-    //地图部分
-    ud->maplist = (Uint32*)SDL_malloc(ud->mapnum * sizeof(Uint32)); //地表偏移
-    ud->map = (MAP_Data*)SDL_calloc(ud->mapnum, sizeof(MAP_Data));  //缓存
+    /*地图部分*/
+    ud->maplist = (Uint32*)SDL_malloc(ud->mapnum * sizeof(Uint32)); /*地表偏移*/
+    ud->map = (MAP_Data*)SDL_calloc(ud->mapnum, sizeof(MAP_Data));  /*缓存*/
     if (!ud->maplist || !ud->map)
         goto openerr;
 
     if (SDL_RWread(rw, ud->maplist, sizeof(Uint32), ud->mapnum) != ud->mapnum)
         goto openerr;
 
-    //遮罩部分
-    if (head.flag == 0x302E314D) { // 'M1.0' in little endian (0x4D, 0x31, 0x2E, 0x30)
+    /*遮罩部分*/
+    if (head.flag == 0x302E314D) { /* 'M1.0' */
         Uint32 maskoffset;
         if (SDL_RWread(rw, &maskoffset, sizeof(Uint32), 1) != 1)
             goto openerr;
@@ -1663,7 +1663,7 @@ static int MAP_NEW(lua_State* L)
             goto openerr;
 
         if (ud->masknum > 0) {
-            ud->masklist = (Uint32*)SDL_malloc(ud->masknum * sizeof(Uint32));  //遮罩偏移
+            ud->masklist = (Uint32*)SDL_malloc(ud->masknum * sizeof(Uint32));  /*遮罩偏移*/
             if (SDL_RWread(rw, ud->masklist, sizeof(Uint32), ud->masknum) != ud->masknum)
                 goto openerr;
         }
@@ -1684,10 +1684,10 @@ static int MAP_NEW(lua_State* L)
         lua_pushinteger(L, ud->masknum);
         lua_setfield(L, -2, "masknum");
 
-        return 2; //ud,table
+        return 2; /*ud,table*/
     }
     else {
-        SDL_RWseek(rw, sizeof(Uint32), RW_SEEK_CUR);//文件大小
+        SDL_RWseek(rw, sizeof(Uint32), RW_SEEK_CUR);/*文件大小*/
         MAP_BlockInfo info;
         void* mem = NULL;
         if (SDL_RWread(ud->file, &info, sizeof(MAP_BlockInfo), 1) != 1)
@@ -1705,15 +1705,15 @@ static int MAP_NEW(lua_State* L)
         lua_pushinteger(L, head.height);
         lua_setfield(L, -2, "height");
         lua_pushinteger(L, ud->colnum);
-        lua_setfield(L, -2, "colnum");//列数
+        lua_setfield(L, -2, "colnum");/*列数*/
         lua_pushinteger(L, ud->rownum);
-        lua_setfield(L, -2, "rownum");//行数
+        lua_setfield(L, -2, "rownum");/*行数*/
         lua_pushinteger(L, ud->mapnum);
         lua_setfield(L, -2, "mapnum");
         lua_pushinteger(L, ud->masknum);
         lua_setfield(L, -2, "masknum");
 
-        return 2; //ud,table
+        return 2; /*ud,table*/
     }
 
 openerr:
@@ -1781,7 +1781,7 @@ static int LUA_Clear(lua_State* L)
     SDL_LockMutex(ud->mutex);
 
     Uint32 n;
-    for (n = 0; n < ud->mapnum; n++) {
+    for(n = 0; n < ud->mapnum; n++) {
 
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
@@ -1838,7 +1838,7 @@ static int LUA_GC(lua_State* L)
     if (ud->map)
     {
         Uint32 n;
-        for (n = 0; n < ud->mapnum; n++)
+    for(n = 0; n < ud->mapnum; n++)
         {
             if (ud->map[n].sf)
                 SDL_FreeSurface(ud->map[n].sf);
@@ -1926,7 +1926,7 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
     };
 #ifdef _DEBUG
     setvbuf(stdout, NULL, _IONBF, 0);
-#endif // DEBUG
+#endif /* DEBUG*/
     luaL_newmetatable(L, MAP_NAME);
     luaL_setfuncs(L, funcs, 0);
     lua_pushvalue(L, -1);
