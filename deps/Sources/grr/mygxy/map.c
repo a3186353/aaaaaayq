@@ -17,6 +17,10 @@ typedef struct {
     SDL_RWops* rw;
 } MAP_DecodeContext;
 
+static void _lru_remove(MAP_UserData* ud, Uint32 id);
+static void _lru_push(MAP_UserData* ud, Uint32 id);
+static void _lru_evict(lua_State* L, MAP_UserData* ud);
+
 //申请内存
 static void* _getmem_ctx(void** mem_ptr, size_t* mem_size, size_t size)
 {
@@ -1058,7 +1062,7 @@ static int LUA_Run(lua_State* L)
                     
             if (map->sf) {
                 if (ud->mode != 0x9527) {
-                    _lru_push(ud, task->id);
+                    _lru_push(ud, id);
                     _lru_evict(L, ud);
                 }
             }
