@@ -938,6 +938,19 @@ static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
     return _getmasksf2_ctx(ud, id, mask, NULL);
 }
 
+static int MAP_LoadMaskSurface(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_DecodeContext* ctx)
+{
+    if (ud->mode == 0x9527) {
+        if (ctx)
+            return _getmasksf2_ctx(ud, id, mask, ctx);
+        return _getmasksf2(ud, id, mask);
+    }
+
+    if (ctx)
+        return _getmasksf_ctx(ud, id, mask, ctx);
+    return _getmasksf(ud, id, mask);
+}
+
 static void PushReqQueue(MAP_UserData* ud, MAP_Task* task) {
     SDL_LockMutex(ud->req_mutex);
     task->next = NULL;
@@ -970,6 +983,327 @@ static void PushResQueue(MAP_UserData* ud, MAP_Task* task) {
     }
     ud->res_queue_tail = task;
     SDL_UnlockMutex(ud->res_mutex);
+}
+
+static SDL_Surface* MAP_MoveOrDuplicateSurface(MAP_UserData* ud, SDL_Surface** psf)
+{
+    SDL_Surface* out_sf = NULL;
+    if (!psf || !*psf)
+        return NULL;
+
+    if (ud->mode == 0x9527) {
+        out_sf = *psf;
+        *psf = NULL;
+    }
+    else {
+        out_sf = SDL_DuplicateSurface(*psf);
+    }
+    return out_sf;
+}
+
+static SDL_Surface* MAP_AcquireOutputSurface(lua_State* L, MAP_UserData* ud, Uint32 id, MAP_Data* map)
+{
+    if (!map || !map->sf)
+        return NULL;
+
+    if (ud->mode != 0x9527) {
+        _lru_push(ud, id);
+        _lru_evict(L, ud);
+    }
+    return MAP_MoveOrDuplicateSurface(ud, &map->sf);
+}
+
+static void MAP_FreeSurfaceRef(SDL_Surface** psf)
+{
+    if (!psf || !*psf)
+        return;
+
+    SDL_FreeSurface(*psf);
+    *psf = NULL;
+}
+
+static void MAP_ClearMaskCache(MAP_Data* map)
+{
+    if (!map)
+        return;
+
+    if (map->mask_sfs) {
+        for (Uint32 i = 0; i < map->masknum; i++) {
+            MAP_FreeSurfaceRef(&map->mask_sfs[i]);
+        }
+        SDL_free(map->mask_sfs);
+        map->mask_sfs = NULL;
+    }
+    if (map->mask) {
+        SDL_free(map->mask);
+        map->mask = NULL;
+    }
+    map->masknum = 0;
+}
+
+static void MAP_ClearMapCache(MAP_Data* map)
+{
+    if (!map)
+        return;
+
+    MAP_FreeSurfaceRef(&map->sf);
+    MAP_ClearMaskCache(map);
+}
+
+static void MAP_ClearAllMapCaches(lua_State* L, MAP_UserData* ud, int release_storage)
+{
+    if (!ud || !ud->map)
+        return;
+
+    for (Uint32 n = 0; n < ud->mapnum; n++) {
+        MAP_UnrefRegistryRef(L, &ud->map[n].lua_ref);
+        ud->map[n].loading = 0;
+        MAP_ClearMapCache(&ud->map[n]);
+    }
+
+    ud->lru_head = 0xFFFFFFFF;
+    ud->lru_tail = 0xFFFFFFFF;
+    ud->lru_size = 0;
+
+    if (release_storage) {
+        SDL_free(ud->map);
+        ud->map = NULL;
+        return;
+    }
+
+    SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
+    for (Uint32 n = 0; n < ud->mapnum; n++) {
+        ud->map[n].lua_ref = LUA_REFNIL;
+    }
+}
+
+static void MAP_FreeMaskTaskData(MASK_Data* mask)
+{
+    if (!mask)
+        return;
+
+    MAP_FreeSurfaceRef(&mask->sf);
+    SDL_free(mask);
+}
+
+static void MAP_FreeMemBuffer(MAP_Mem* mem)
+{
+    if (!mem || !mem->mem)
+        return;
+
+    SDL_free(mem->mem);
+    mem->mem = NULL;
+    mem->size = 0;
+}
+
+static void MAP_FreeIndexTables(MAP_UserData* ud)
+{
+    if (!ud)
+        return;
+
+    if (ud->maplist) {
+        SDL_free(ud->maplist);
+        ud->maplist = NULL;
+    }
+    if (ud->masklist) {
+        SDL_free(ud->masklist);
+        ud->masklist = NULL;
+    }
+}
+
+static void MAP_FreeJpegHeader(MAP_UserData* ud)
+{
+    if (!ud || !ud->jpeh.mem)
+        return;
+
+    SDL_free(ud->jpeh.mem);
+    ud->jpeh.mem = NULL;
+    ud->jpeh.size = 0;
+}
+
+static void MAP_FreeFileBuffer(MAP_UserData* ud)
+{
+    if (!ud || !ud->filebuf)
+        return;
+
+    SDL_free(ud->filebuf);
+    ud->filebuf = NULL;
+    ud->filebuf_size = 0;
+}
+
+static void MAP_CleanupWorkers(MAP_UserData* ud)
+{
+    if (!ud || !ud->workers)
+        return;
+
+    for (int i = 0; i < ud->num_workers; i++) {
+        if (ud->workers[i].thread)
+            SDL_WaitThread(ud->workers[i].thread, NULL);
+        if (ud->workers[i].rw)
+            ud->workers[i].rw->close(ud->workers[i].rw);
+        if (ud->workers[i].mem0)
+            SDL_free(ud->workers[i].mem0);
+        if (ud->workers[i].mem1)
+            SDL_free(ud->workers[i].mem1);
+    }
+
+    SDL_free(ud->workers);
+    ud->workers = NULL;
+}
+
+static void MAP_DestroySyncObjects(MAP_UserData* ud)
+{
+    if (!ud)
+        return;
+
+    if (ud->req_mutex) {
+        SDL_DestroyMutex(ud->req_mutex);
+        ud->req_mutex = NULL;
+    }
+    if (ud->res_mutex) {
+        SDL_DestroyMutex(ud->res_mutex);
+        ud->res_mutex = NULL;
+    }
+    if (ud->req_cond) {
+        SDL_DestroyCond(ud->req_cond);
+        ud->req_cond = NULL;
+    }
+    if (ud->clear_cond) {
+        SDL_DestroyCond(ud->clear_cond);
+        ud->clear_cond = NULL;
+    }
+}
+
+static void MAP_UnrefRegistryRef(lua_State* L, int* ref)
+{
+    if (!ref)
+        return;
+
+    if (*ref != LUA_NOREF && *ref != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, *ref);
+        *ref = LUA_NOREF;
+    }
+}
+
+static void MAP_AbortPendingTask(MAP_Task* task)
+{
+    if (!task)
+        return;
+
+    if (task->type == TIME_TYPE_MAP) {
+        MAP_Data* map = (MAP_Data*)task->data;
+        if (map)
+            map->loading = 0;
+    }
+    else if (task->type == TIME_TYPE_MASK) {
+        MAP_FreeMaskTaskData((MASK_Data*)task->data);
+    }
+}
+
+static void MAP_DiscardTaskWithoutCallback(MAP_Task* task)
+{
+    if (!task)
+        return;
+
+    if (task->type == TIME_TYPE_MAP) {
+        MAP_Data* map = (MAP_Data*)task->data;
+        if (map) {
+            map->loading = 0;
+            MAP_ClearMaskCache(map);
+        }
+    }
+    else if (task->type == TIME_TYPE_MASK) {
+        MAP_FreeMaskTaskData((MASK_Data*)task->data);
+    }
+}
+
+static void MAP_PopCallbackFunction(lua_State* L, MAP_Task* task)
+{
+    if (!task || task->cb_ref == LUA_NOREF || task->cb_ref == LUA_REFNIL) {
+        lua_pushnil(L);
+        return;
+    }
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, task->cb_ref);
+    MAP_UnrefRegistryRef(L, &task->cb_ref);
+}
+
+static void MAP_PushMaskResultTable(lua_State* L, MAP_UserData* ud, Uint32 id, MAP_Data* map)
+{
+    lua_createtable(L, map->masknum, 0);
+    for (Uint32 i = 0; i < map->masknum; i++)
+    {
+        MAP_MaskInfo* info = &map->mask[i];
+        lua_createtable(L, 0, 7);
+        lua_pushinteger(L, id);
+        lua_setfield(L, -2, "id");
+        lua_pushinteger(L, info->offset);
+        lua_setfield(L, -2, "offset");
+        lua_pushinteger(L, info->mode);
+        lua_setfield(L, -2, "mode");
+        lua_pushinteger(L, info->rect.x);
+        lua_setfield(L, -2, "x");
+        lua_pushinteger(L, info->rect.y);
+        lua_setfield(L, -2, "y");
+        lua_pushinteger(L, info->rect.w);
+        lua_setfield(L, -2, "w");
+        lua_pushinteger(L, info->rect.h);
+        lua_setfield(L, -2, "h");
+
+        if (map->mask_sfs && map->mask_sfs[i]) {
+            SDL_Surface* mask_sf = MAP_MoveOrDuplicateSurface(ud, &map->mask_sfs[i]);
+            if (mask_sf) {
+                MAP_PushSurfaceUserdata(L, mask_sf);
+                lua_setfield(L, -2, "sf");
+            }
+        }
+
+        lua_seti(L, -2, i + 1);
+    }
+}
+
+static void MAP_RunMapCallback(lua_State* L, MAP_UserData* ud, MAP_Task* task)
+{
+    MAP_Data* map = (MAP_Data*)task->data;
+    Uint32 id = task->id;
+
+    if (!map || !map->sf) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    SDL_Surface* out_sf = MAP_AcquireOutputSurface(L, ud, id, map);
+    if (!out_sf) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    MAP_PushSurfaceUserdata(L, out_sf);
+    MAP_PushMaskResultTable(L, ud, id, map);
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        lua_pop(L, 1);
+    }
+}
+
+static void MAP_RunMaskCallback(lua_State* L, MAP_Task* task)
+{
+    MASK_Data* mask = (MASK_Data*)task->data;
+    if (!mask || !mask->sf) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    MAP_PushSurfaceUserdata(L, mask->sf);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        lua_pop(L, 1);
+    }
+}
+
+static void MAP_PushSurfaceUserdata(lua_State* L, SDL_Surface* sf)
+{
+    SDL_Surface** p = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
+    *p = sf;
+    luaL_setmetatable(L, "SDL_Surface");
 }
 
 static int SDLCALL WorkerThreadMain(void* data) {
@@ -1008,20 +1342,15 @@ static int SDLCALL WorkerThreadMain(void* data) {
                             SDL_memset(&temp_mask, 0, sizeof(MASK_Data));
                             temp_mask.id = task->id;
                             temp_mask.info = map->mask[i];
-                            
-                            if (ud->mode == 0x9527)
-                                _getmasksf2_ctx(ud, task->id, &temp_mask, &ctx);
-                            else
-                                _getmasksf_ctx(ud, task->id, &temp_mask, &ctx);
-                                
+
+                            MAP_LoadMaskSurface(ud, task->id, &temp_mask, &ctx);
                             map->mask_sfs[i] = temp_mask.sf;
                         }
                     }
                 }
             } else if (task->type == TIME_TYPE_MASK) {
                 MASK_Data* mask = (MASK_Data*)task->data;
-                if (ud->mode == 0x9527) _getmasksf2_ctx(ud, mask->id, mask, &ctx);
-                else _getmasksf_ctx(ud, mask->id, mask, &ctx);
+                MAP_LoadMaskSurface(ud, mask->id, mask, &ctx);
             }
             PushResQueue(ud, task);
 
@@ -1060,40 +1389,8 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
 
             if (time)
             {
-                if (time->cb_ref != LUA_NOREF && time->cb_ref != LUA_REFNIL)
-                    luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-
-                if (time->type == TIME_TYPE_MAP)
-                {
-                    MAP_Data* map = (MAP_Data*)time->data;
-                    if (map)
-                    {
-                        map->loading = 0;
-                        if (map->mask_sfs) {
-                            for (Uint32 i = 0; i < map->masknum; i++) {
-                                if (map->mask_sfs[i]) SDL_FreeSurface(map->mask_sfs[i]);
-                            }
-                            SDL_free(map->mask_sfs);
-                            map->mask_sfs = NULL;
-                        }
-                        if (map->mask)
-                        {
-                            SDL_free(map->mask);
-                            map->mask = NULL;
-                            map->masknum = 0;
-                        }
-                    }
-                }
-                else if (time->type == TIME_TYPE_MASK)
-                {
-                    MASK_Data* mask = (MASK_Data*)time->data;
-                    if (mask)
-                    {
-                        if (mask->sf)
-                            SDL_FreeSurface(mask->sf);
-                        SDL_free(mask);
-                    }
-                }
+                MAP_UnrefRegistryRef(L, &time->cb_ref);
+                MAP_DiscardTaskWithoutCallback(time);
 
                 SDL_free(time);
             }
@@ -1118,113 +1415,20 @@ static int LUA_Run(lua_State* L)
         MAP_Task* next = node->next;
         MAP_Task* time = node;
 
-        lua_rawgeti(L, LUA_REGISTRYINDEX, time->cb_ref);
-        luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+        MAP_PopCallbackFunction(L, time);
 
         if (time->type == TIME_TYPE_MAP)
         {
             MAP_Data* map = (MAP_Data*)time->data;
-            Uint32 id = time->id;
-
-            if (!map->sf)
-            {
-                lua_pop(L, 1);
-            }
-            else
-            {
-                {
-                    SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                    
-            if (map->sf) {
-                if (ud->mode != 0x9527) {
-                    _lru_push(ud, id);
-                    _lru_evict(L, ud);
-                }
-            }
-            if (ud->mode == 0x9527)
-                    {
-                        *sf = map->sf;
-                        map->sf = NULL;
-                    }
-                    else
-                    {
-                        *sf = SDL_DuplicateSurface(map->sf);
-                    }
-                    luaL_setmetatable(L, "SDL_Surface");
-                }
-
-                lua_createtable(L, map->masknum, 0);
-                for (Uint32 i = 0; i < map->masknum; i++)
-                {
-                    MAP_MaskInfo* info = &map->mask[i];
-                    lua_createtable(L, 0, 7);
-                    lua_pushinteger(L, id);
-                    lua_setfield(L, -2, "id");
-                    lua_pushinteger(L, info->offset);
-                    lua_setfield(L, -2, "offset");
-                    lua_pushinteger(L, info->mode);
-                    lua_setfield(L, -2, "mode");
-                    lua_pushinteger(L, info->rect.x);
-                    lua_setfield(L, -2, "x");
-                    lua_pushinteger(L, info->rect.y);
-                    lua_setfield(L, -2, "y");
-                    lua_pushinteger(L, info->rect.w);
-                    lua_setfield(L, -2, "w");
-                    lua_pushinteger(L, info->rect.h);
-                    lua_setfield(L, -2, "h");
-                    
-                    if (map->mask_sfs && map->mask_sfs[i]) {
-                        SDL_Surface** sf_ptr = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                        if (ud->mode == 0x9527) {
-                            *sf_ptr = map->mask_sfs[i];
-                            map->mask_sfs[i] = NULL;
-                        } else {
-                            *sf_ptr = SDL_DuplicateSurface(map->mask_sfs[i]);
-                        }
-                        luaL_setmetatable(L, "SDL_Surface");
-                        lua_setfield(L, -2, "sf");
-                    }
-                    
-                    lua_seti(L, -2, i + 1);
-                }
-
-                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-                    lua_pop(L, 1);
-                }
-            }
-
-            if (map->mask_sfs) {
-                for (Uint32 i = 0; i < map->masknum; i++) {
-                    if (map->mask_sfs[i]) SDL_FreeSurface(map->mask_sfs[i]);
-                }
-                SDL_free(map->mask_sfs);
-                map->mask_sfs = NULL;
-            }
-            if (map->mask)
-            {
-                SDL_free(map->mask);
-                map->mask = NULL;
-                map->masknum = 0;
-            }
+            MAP_RunMapCallback(L, ud, time);
+            MAP_ClearMaskCache(map);
             map->loading = 0;
             SDL_free(time);
         }
         else if (time->type == TIME_TYPE_MASK)
         {
             MASK_Data* mask = (MASK_Data*)time->data;
-            if (!mask->sf)
-            {
-                lua_pop(L, 1);
-            }
-            else
-            {
-                SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                *sf = mask->sf;
-                luaL_setmetatable(L, "SDL_Surface");
-                if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-                    lua_pop(L, 1);
-                }
-            }
+            MAP_RunMaskCallback(L, time);
             SDL_free(mask);
             SDL_free(time);
         }
@@ -1299,23 +1503,8 @@ static void _lru_evict(lua_State* L, MAP_UserData* ud) {
         if (evict_id == 0xFFFFFFFF) break; // 所有节点都在加载中，放弃当前帧的回收
         
         _lru_remove(ud, evict_id);
-        
-        if (evict_map->sf) {
-            SDL_FreeSurface(evict_map->sf);
-            evict_map->sf = NULL;
-        }
-        if (evict_map->mask_sfs) {
-            for (Uint32 i = 0; i < evict_map->masknum; i++) {
-                if (evict_map->mask_sfs[i]) SDL_FreeSurface(evict_map->mask_sfs[i]);
-            }
-            SDL_free(evict_map->mask_sfs);
-            evict_map->mask_sfs = NULL;
-        }
-        if (evict_map->mask) {
-            SDL_free(evict_map->mask);
-            evict_map->mask = NULL;
-            evict_map->masknum = 0;
-        }
+
+        MAP_ClearMapCache(evict_map);
     }
 }
 
@@ -1398,34 +1587,14 @@ static int LUA_GetMap(lua_State* L)
             if (!map->sf)
                 map->sf = _getmapsf(ud, id);
 
-            
-            if (map->sf)
-            {
-                if (ud->mode != 0x9527) {
-                    _lru_push(ud, id);
-                    _lru_evict(L, ud);
-                }
-                if (ud->mode == 0x9527)
-                {
-                    out_sf = map->sf;
-                    map->sf = NULL;
-                }
-                else
-                {
-                    out_sf = SDL_DuplicateSurface(map->sf);
-                }
-            }
+            out_sf = MAP_AcquireOutputSurface(L, ud, id, map);
         }
         SDL_UnlockMutex(ud->req_mutex);
 
         if (!out_sf)
             return 0;
 
-        {
-            SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-            *sf = out_sf;
-            luaL_setmetatable(L, "SDL_Surface");
-        }
+        MAP_PushSurfaceUserdata(L, out_sf);
 
         return 1;
     }
@@ -1483,25 +1652,8 @@ static int LUA_GetMapInfo(lua_State* L)
             if (!map->sf)
                 map->sf = _getmapsf(ud, id);
 
-        
-        if (map->sf)
-        {
-            if (ud->mode != 0x9527) {
-                _lru_push(ud, id);
-                _lru_evict(L, ud);
-            }
-            if (ud->mode == 0x9527)
-            {
-                out_sf = map->sf;
-                map->sf = NULL;
-            }
-            else
-            {
-                out_sf = SDL_DuplicateSurface(map->sf);
-            }
-        }
-
-        _getmasksinfo(ud, id, &mask, &num);
+            out_sf = MAP_AcquireOutputSurface(L, ud, id, map);
+            _getmasksinfo(ud, id, &mask, &num);
     }
     SDL_UnlockMutex(ud->req_mutex);
 
@@ -1512,11 +1664,7 @@ static int LUA_GetMapInfo(lua_State* L)
         return 0;
     }
 
-    {
-        SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-        *sf = out_sf;
-        luaL_setmetatable(L, "SDL_Surface");
-    }
+    MAP_PushSurfaceUserdata(L, out_sf);
 
     lua_createtable(L, num, 0);
     for (Uint32 i = 0; i < num; i++)
@@ -1549,6 +1697,9 @@ static int LUA_GetMaskInfo(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
     Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
+
+    if (id >= ud->mapnum)
+        return luaL_error(L, "map id error!");
 
     Uint32 num = 0;
     MAP_MaskInfo* mask = NULL;
@@ -1594,6 +1745,9 @@ static int LUA_GetMask(lua_State* L)
     Uint32 id = (Uint32)luaL_checkinteger(L, -1);
     lua_getfield(L, 2, "offset");
     Uint32 offset = (Uint32)luaL_checkinteger(L, -1);
+
+    if (id >= ud->mapnum)
+        return luaL_error(L, "map id error!");
 
     if (has_cb)
     {
@@ -1644,19 +1798,14 @@ static int LUA_GetMask(lua_State* L)
         SDL_LockMutex(ud->req_mutex);
         if (!ud->closing && ud->file)
         {
-            if (ud->mode == 0x9527)
-                _getmasksf2(ud, id, &mask);
-            else
-                _getmasksf(ud, id, &mask);
+            MAP_LoadMaskSurface(ud, id, &mask, NULL);
         }
         SDL_UnlockMutex(ud->req_mutex);
 
         if (!mask.sf)
             return 0;
 
-        SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-        *sf = mask.sf;
-        luaL_setmetatable(L, "SDL_Surface");
+        MAP_PushSurfaceUserdata(L, mask.sf);
         return 1;
     }
     return 0;
@@ -2036,72 +2185,24 @@ openerr:
             if (ud->req_cond) SDL_CondBroadcast(ud->req_cond);
             SDL_UnlockMutex(ud->req_mutex);
         }
-        for (int i = 0; i < ud->num_workers; i++) {
-            if (ud->workers[i].thread) {
-                SDL_WaitThread(ud->workers[i].thread, NULL);
-            }
-            if (ud->workers[i].rw) ud->workers[i].rw->close(ud->workers[i].rw);
-        }
-        SDL_free(ud->workers);
-        ud->workers = NULL;
+        MAP_CleanupWorkers(ud);
     }
-    if (ud->req_mutex)
-    {
-        SDL_DestroyMutex(ud->req_mutex);
-        ud->req_mutex = NULL;
-    }
-    if (ud->res_mutex)
-    {
-        SDL_DestroyMutex(ud->res_mutex);
-        ud->res_mutex = NULL;
-    }
-    if (ud->req_cond) { SDL_DestroyCond(ud->req_cond); ud->req_cond = NULL; }
+    MAP_DestroySyncObjects(ud);
     if (ud->map)
     {
         SDL_free(ud->map);
         ud->map = NULL;
     }
-    if (ud->maplist)
-    {
-        SDL_free(ud->maplist);
-        ud->maplist = NULL;
-    }
-    if (ud->masklist)
-    {
-        SDL_free(ud->masklist);
-        ud->masklist = NULL;
-    }
-    if (ud->jpeh.mem)
-    {
-        SDL_free(ud->jpeh.mem);
-        ud->jpeh.mem = NULL;
-        ud->jpeh.size = 0;
-    }
-
-    if (ud->mem[0].mem)
-    {
-        SDL_free(ud->mem[0].mem);
-        ud->mem[0].mem = NULL;
-        ud->mem[0].size = 0;
-    }
-
-    if (ud->mem[1].mem)
-    {
-        SDL_free(ud->mem[1].mem);
-        ud->mem[1].mem = NULL;
-        ud->mem[1].size = 0;
-    }
+    MAP_FreeIndexTables(ud);
+    MAP_FreeJpegHeader(ud);
+    MAP_FreeMemBuffer(&ud->mem[0]);
+    MAP_FreeMemBuffer(&ud->mem[1]);
 
     if (rw && rw->close)
         rw->close(rw);
     ud->file = NULL;
 
-    if (ud->filebuf)
-    {
-        SDL_free(ud->filebuf);
-        ud->filebuf = NULL;
-        ud->filebuf_size = 0;
-    }
+    MAP_FreeFileBuffer(ud);
     return luaL_error(L, "open map data failed");
 }
 
@@ -2115,13 +2216,8 @@ static int LUA_Clear(lua_State* L)
     MAP_Task* curr = ud->req_queue_head;
     while (curr) {
         MAP_Task* next = curr->next;
-        if (curr->cb_ref != LUA_REFNIL && curr->cb_ref != LUA_NOREF) {
-            luaL_unref(L, LUA_REGISTRYINDEX, curr->cb_ref);
-        }
-        if (curr->type == TIME_TYPE_MAP) {
-            MAP_Data* map = (MAP_Data*)curr->data;
-            if (map) map->loading = 0;
-        }
+        MAP_UnrefRegistryRef(L, &curr->cb_ref);
+        MAP_AbortPendingTask(curr);
         /* active_tasks-- 必须在 SDL_free 之前，防止 worker 同时完成
          * 将计数减到负数后发出 clear_cond 信号造成 CondWait 死锁 */
         if (ud->active_tasks > 0) ud->active_tasks--;
@@ -2135,50 +2231,10 @@ static int LUA_Clear(lua_State* L)
         SDL_CondWait(ud->clear_cond, ud->req_mutex);
     }
 
-    for (Uint32 n = 0; n < ud->mapnum; n++) {
-        if (ud->map[n].lua_ref != LUA_REFNIL) {
-            luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
-            ud->map[n].lua_ref = LUA_REFNIL;
-        }
+    MAP_ClearAllMapCaches(L, ud, 0);
 
-        if (ud->map[n].sf)
-            SDL_FreeSurface(ud->map[n].sf);
-            
-        if (ud->map[n].mask_sfs) {
-            for (Uint32 i = 0; i < ud->map[n].masknum; i++) {
-                if (ud->map[n].mask_sfs[i]) SDL_FreeSurface(ud->map[n].mask_sfs[i]);
-            }
-            SDL_free(ud->map[n].mask_sfs);
-            ud->map[n].mask_sfs = NULL;
-        }
-        if (ud->map[n].mask) {
-            SDL_free(ud->map[n].mask);
-            ud->map[n].mask = NULL;
-            ud->map[n].masknum = 0;
-        }
-
-    }
-    SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
-    for (Uint32 n = 0; n < ud->mapnum; n++) {
-        ud->map[n].lua_ref = LUA_REFNIL;
-    }
-
-    ud->lru_head = 0xFFFFFFFF;
-    ud->lru_tail = 0xFFFFFFFF;
-    ud->lru_size = 0;
-
-
-    if (ud->mem[0].mem) {
-        SDL_free(ud->mem[0].mem);
-        ud->mem[0].mem = NULL;
-        ud->mem[0].size = 0;
-    }
-
-    if (ud->mem[1].mem) {
-        SDL_free(ud->mem[1].mem);
-        ud->mem[1].mem = NULL;
-        ud->mem[1].size = 0;
-    }
+    MAP_FreeMemBuffer(&ud->mem[0]);
+    MAP_FreeMemBuffer(&ud->mem[1]);
 
     SDL_LockMutex(ud->res_mutex);
     MAP_Task* rcurr = ud->res_queue_head;
@@ -2190,13 +2246,9 @@ static int LUA_Clear(lua_State* L)
             // The Surface and mask are cleared by the loop above, since map points to ud->map array.
             // Wait, rcurr->data is a pointer to ud->map[n].
         } else if (rcurr->type == TIME_TYPE_MASK && rcurr->data) {
-            MASK_Data* mask = (MASK_Data*)rcurr->data;
-            if (mask->sf) SDL_FreeSurface(mask->sf);
-            SDL_free(mask);
+            MAP_FreeMaskTaskData((MASK_Data*)rcurr->data);
         }
-        if (rcurr->cb_ref != LUA_REFNIL && rcurr->cb_ref != LUA_NOREF) {
-            luaL_unref(L, LUA_REGISTRYINDEX, rcurr->cb_ref);
-        }
+        MAP_UnrefRegistryRef(L, &rcurr->cb_ref);
         SDL_free(rcurr);
         rcurr = next;
     }
@@ -2227,14 +2279,7 @@ static int LUA_GC(lua_State* L)
     SDL_UnlockMutex(ud->req_mutex);
 
     if (ud->workers) {
-        for (int i = 0; i < ud->num_workers; i++) {
-            if (ud->workers[i].thread) SDL_WaitThread(ud->workers[i].thread, NULL);
-            if (ud->workers[i].rw) ud->workers[i].rw->close(ud->workers[i].rw);
-            if (ud->workers[i].mem0) SDL_free(ud->workers[i].mem0);
-            if (ud->workers[i].mem1) SDL_free(ud->workers[i].mem1);
-        }
-        SDL_free(ud->workers);
-        ud->workers = NULL;
+        MAP_CleanupWorkers(ud);
     }
 
     if (rw && rw->close)
@@ -2243,79 +2288,17 @@ static int LUA_GC(lua_State* L)
     MAP_DrainPendingNoCallback(L, ud);
 
     SDL_LockMutex(ud->req_mutex);
-    if (ud->map)
-    {
-        for (Uint32 n = 0; n < ud->mapnum; n++)
-        {
-            if (ud->map[n].lua_ref != LUA_REFNIL) {
-                luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
-                ud->map[n].lua_ref = LUA_REFNIL;
-            }
-            if (ud->map[n].sf)
-                SDL_FreeSurface(ud->map[n].sf);
+    MAP_ClearAllMapCaches(L, ud, 1);
 
-            if (ud->map[n].mask_sfs) {
-                for (Uint32 i = 0; i < ud->map[n].masknum; i++) {
-                    if (ud->map[n].mask_sfs[i]) SDL_FreeSurface(ud->map[n].mask_sfs[i]);
-                }
-                SDL_free(ud->map[n].mask_sfs);
-                ud->map[n].mask_sfs = NULL;
-            }
-            if (ud->map[n].mask)
-                SDL_free(ud->map[n].mask);
-        }
-
-        SDL_free(ud->map);
-        ud->map = NULL;
-    }
-
-    if (ud->maplist)
-    {
-        SDL_free(ud->maplist);
-        ud->maplist = NULL;
-    }
-
-    if (ud->masklist)
-    {
-        SDL_free(ud->masklist);
-        ud->masklist = NULL;
-    }
-
-    if (ud->jpeh.mem)
-    {
-        SDL_free(ud->jpeh.mem);
-        ud->jpeh.mem = NULL;
-        ud->jpeh.size = 0;
-    }
-
-    if (ud->mem[0].mem)
-    {
-        SDL_free(ud->mem[0].mem);
-        ud->mem[0].mem = NULL;
-        ud->mem[0].size = 0;
-    }
-
-    if (ud->mem[1].mem)
-    {
-        SDL_free(ud->mem[1].mem);
-        ud->mem[1].mem = NULL;
-        ud->mem[1].size = 0;
-    }
-
-    if (ud->filebuf)
-    {
-        SDL_free(ud->filebuf);
-        ud->filebuf = NULL;
-        ud->filebuf_size = 0;
-    }
+    MAP_FreeIndexTables(ud);
+    MAP_FreeJpegHeader(ud);
+    MAP_FreeMemBuffer(&ud->mem[0]);
+    MAP_FreeMemBuffer(&ud->mem[1]);
+    MAP_FreeFileBuffer(ud);
 
     SDL_UnlockMutex(ud->req_mutex);
 
-    SDL_DestroyMutex(ud->req_mutex);
-    ud->req_mutex = NULL;
-    if (ud->res_mutex) { SDL_DestroyMutex(ud->res_mutex); ud->res_mutex = NULL; }
-    if (ud->req_cond) { SDL_DestroyCond(ud->req_cond); ud->req_cond = NULL; }
-    if (ud->clear_cond) { SDL_DestroyCond(ud->clear_cond); ud->clear_cond = NULL; }
+    MAP_DestroySyncObjects(ud);
     return 0;
 }
 
