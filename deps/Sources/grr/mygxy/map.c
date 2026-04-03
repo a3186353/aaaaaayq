@@ -1266,10 +1266,15 @@ static void _lru_push(MAP_UserData* ud, Uint32 id) {
 static void _lru_evict(lua_State* L, MAP_UserData* ud) {
     while (ud->lru_size > ud->lru_limit) {
         Uint32 evict_id = ud->lru_tail;
-        if (evict_id == 0xFFFFFFFF) break;
-        MAP_Data* evict_map = &ud->map[evict_id];
+        MAP_Data* evict_map = NULL;
         
-        if (evict_map->loading) break; // 跳过正在被 Worker 线程操作的地图，避免 Use-After-Free
+        while (evict_id != 0xFFFFFFFF) {
+            evict_map = &ud->map[evict_id];
+            if (!evict_map->loading) break;
+            evict_id = evict_map->lru_prev;
+        }
+        
+        if (evict_id == 0xFFFFFFFF) break; // 所有节点都在加载中，放弃当前帧的回收
         
         _lru_remove(ud, evict_id);
         
