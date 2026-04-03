@@ -45,13 +45,8 @@ typedef struct
     Uint32 id;
     SDL_Surface* sf;
     MAP_MaskInfo* mask;
-    SDL_Surface** mask_sfs;
     Uint32 masknum;
     int loading;
-    Uint32 lru_prev;
-    Uint32 lru_next;
-    int in_lru;
-    int lua_ref;
 } MAP_Data;
 
 typedef struct
@@ -61,33 +56,11 @@ typedef struct
     MAP_MaskInfo info; //遮罩信息
 } MASK_Data;
 
-typedef struct MAP_UserData MAP_UserData;
-
-typedef struct MAP_Task MAP_Task;
-struct MAP_Task {
-    Uint32 type;
-    Uint32 id;
-    void* data;
-    MAP_UserData* ud;
-    int cb_ref;
-    MAP_Task* next;
-};
-
-typedef struct {
-    SDL_Thread* thread;
-    void* mem0; // 线程专属缓冲区 0
-    size_t mem0_size;
-    void* mem1; // 线程专属缓冲区 1
-    size_t mem1_size;
-    SDL_RWops* rw; // 线程专属独立文件句柄（指向共享只读内存）
-    MAP_UserData* ud;
-} MAP_Worker;
-
-struct MAP_UserData
+typedef struct
 {
     Uint32 flag;
     Uint32 mode;
-    SDL_RWops* file; // 主线程使用的句柄
+    SDL_RWops* file;
 
     void* filebuf;
     size_t filebuf_size;
@@ -100,33 +73,17 @@ struct MAP_UserData
     Uint32 masknum;// M1.0
     Uint32* masklist; //M1.0 遮罩偏移 
 
-    MAP_Mem mem[2]; // 仅主线程使用
-    MAP_Data* map;
+    MAP_Mem mem[2];
+    MAP_Data* map;   //缓存
 
-    MAP_Mem jpeh;
-
-    // 线程池与并发相关
-    MAP_Worker* workers;
-    int num_workers;
-    
-    MAP_Task* req_queue_head;
-    MAP_Task* req_queue_tail;
-    MAP_Task* res_queue_head;
-    MAP_Task* res_queue_tail;
-
-    Uint32 lru_head;
-    Uint32 lru_tail;
-    int lru_size;
-    int lru_limit;
-
-    SDL_mutex* req_mutex;
-    SDL_cond* req_cond;
-    SDL_cond* clear_cond;
-    SDL_mutex* res_mutex;
+    MAP_Mem jpeh; //MAPX
+    SDL_ListNode* list;
+    SDL_mutex* mutex;
+    SDL_cond* cond;
 
     int closing;
     int active_tasks;
-};
+}MAP_UserData;
 
 /* TIME_Data.type 类型标识常量
  * 替代多字符字符常量 'map'/'mask'，消除 Clang -Wmultichar 警告

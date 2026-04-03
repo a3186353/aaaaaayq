@@ -9,39 +9,21 @@
 #define MYGXY_API LUAMOD_API
 #endif
 
-typedef struct {
-    void** p_mem0;
-    size_t* p_mem0_size;
-    void** p_mem1;
-    size_t* p_mem1_size;
-    SDL_RWops* rw;
-} MAP_DecodeContext;
-
-static void _lru_remove(MAP_UserData* ud, Uint32 id);
-static void _lru_push(MAP_UserData* ud, Uint32 id);
-static void _lru_evict(lua_State* L, MAP_UserData* ud);
-
 //申请内存
-static void* _getmem_ctx(void** mem_ptr, size_t* mem_size, size_t size)
-{
-    if (*mem_size >= size)
-        return *mem_ptr;
-
-    *mem_ptr = SDL_realloc(*mem_ptr, size);
-    *mem_size = size;
-
-    if (*mem_ptr == NULL) {
-        SDL_OutOfMemory();
-        *mem_size = 0;
-    }
-
-    return *mem_ptr;
-}
-
-// 原始申请内存（兼容主线程）
 static void* _getmem(MAP_Mem* mem, size_t size)
 {
-    return _getmem_ctx(&mem->mem, &mem->size, size);
+    if (mem->size >= size)
+        return mem->mem;
+
+    mem->mem = SDL_realloc(mem->mem, size);
+    mem->size = size;
+
+    if (mem->mem == NULL) {
+        SDL_OutOfMemory();
+        mem->size = 0;
+    }
+
+    return mem->mem;
 }
 
 typedef struct
@@ -107,7 +89,7 @@ static size_t SDLCALL MAP_MemRW_Write(SDL_RWops* context, const void* ptr, size_
 
 static int SDLCALL MAP_MemRW_Close(SDL_RWops* context)
 {
-    SDL_free(context); /* 与 MAP_RWFromOwnedMem 中 SDL_malloc 成对 */
+    free(context);
     return 0;
 }
 
@@ -116,7 +98,7 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     if (!mem)
         return NULL;
 
-    MAP_MemRW* m = (MAP_MemRW*)SDL_malloc(sizeof(MAP_MemRW));
+    MAP_MemRW* m = (MAP_MemRW*)malloc(sizeof(MAP_MemRW));
     if (!m)
         return NULL;
 
@@ -135,34 +117,69 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
 //恢复普通jpg
 static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbuf)
 {
-    Uint32 TempNum = 0;
-    Uint16 TempTimes = 0;
+    // JPEG数据处理原理
+    // 1、复制D8到D9的数据到缓冲区中
+    // 2、删除第3、4个字节 FFA0
+    // 3、修改FFDA的长度00 09 为 00 0C
+    // 4、在FFDA数据的最后添加00 3F 00
+    // 5、替换FFDA到FF D9之间的FF数据为FF 00
+    Uint32 TempNum = 0;   // 临时变量，表示已读取的长度
+    Uint16 TempTimes = 0; // 临时变量，表示循环的次数
     Uint32 outsize = 0;
     int i = 0;
-
-    while (TempNum + 1 < insize && inbuf[0] == 0xFF)
+    // 当已读取数据的长度小于总长度时继续
+    while (TempNum < insize && *inbuf++ == 0xFF)
     {
         *outbuf++ = 0xFF;
-        Uint8 marker = inbuf[1];
-        inbuf += 2;
-        TempNum += 2;
-
-        switch (marker)
+        TempNum++;
+        switch (*inbuf)
         {
         case 0xD8:
             *outbuf++ = 0xD8;
+            inbuf++;
+            TempNum++;
             break;
         case 0xA0:
+            inbuf++;
             outbuf--;
+            TempNum++;
             break;
         case 0xC0:
+            *outbuf++ = 0xC0;
+            inbuf++;
+            TempNum++;
+
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+
+            for (i = 0; i < TempTimes; i++)
+            {
+                *outbuf++ = *inbuf++;
+                TempNum++;
+            }
+
+            break;
         case 0xC4:
+            *outbuf++ = 0xC4;
+            inbuf++;
+            TempNum++;
+
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+
+            for (i = 0; i < TempTimes; i++)
+            {
+                *outbuf++ = *inbuf++;
+                TempNum++;
+            }
+            break;
         case 0xDB:
-            *outbuf++ = marker;
-            if (TempNum + 2 > insize) return outsize;
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf);
-            if (TempNum + TempTimes > insize) TempTimes = insize - TempNum;
-            for (i = 0; i < TempTimes; i++) {
+            *outbuf++ = 0xDB;
+            inbuf++;
+            TempNum++;
+
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+
+            for (i = 0; i < TempTimes; i++)
+            {
                 *outbuf++ = *inbuf++;
                 TempNum++;
             }
@@ -171,45 +188,53 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
             *outbuf++ = 0xDA;
             *outbuf++ = 0x00;
             *outbuf++ = 0x0C;
-            
-            if (TempNum + 2 > insize) return outsize;
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf);
-            inbuf += 2;
-            TempNum += 2;
+            inbuf++;
+            TempNum++;
 
-            for (i = 2; i < TempTimes && TempNum < insize; i++) {
+            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+            inbuf++;
+            TempNum++;
+            inbuf++;
+
+            for (i = 2; i < TempTimes; i++)
+            {
                 *outbuf++ = *inbuf++;
                 TempNum++;
             }
             *outbuf++ = 0x00;
             *outbuf++ = 0x3F;
             *outbuf++ = 0x00;
-            outsize += 1;
+            outsize += 1; // 这里应该是+3的，因为前面的0xFFA0没有-2，所以这里只+1。
 
-            while (TempNum < insize) {
-                if (*inbuf == 0xFF) {
-                    if (TempNum + 1 < insize && inbuf[1] == 0xD9) {
-                        break;
-                    }
+            // 循环处理0xFFDA到0xFFD9之间所有的0xFF替换为0xFF00
+            for (; TempNum < insize - 2;)
+            {
+                if (*inbuf == 0xFF)
+                {
                     *outbuf++ = 0xFF;
                     *outbuf++ = 0x00;
                     inbuf++;
                     TempNum++;
                     outsize++;
-                } else {
+                }
+                else
+                {
                     *outbuf++ = *inbuf++;
                     TempNum++;
                 }
             }
-            outsize--;
+            // 直接在这里写上了0xFFD9结束Jpeg图片.
+            outsize--; // 这里多了一个字节，所以减去。
             outbuf--;
             *outbuf-- = 0xD9;
+
             break;
         case 0xD9:
+            // 算法问题，这里不会被执行，但结果一样。
             *outbuf++ = 0xD9;
+            TempNum++;
             break;
         default:
-            *outbuf++ = marker;
             break;
         }
     }
@@ -402,14 +427,7 @@ eof_found:
     return (int)(op - (Uint8*)out);
 }
 //取地表
-static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext* ctx);
-
 static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id)
-{
-    return _getmapsf_ctx(ud, id, NULL);
-}
-
-static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext* ctx)
 {
     if (id >= ud->mapnum)
         return 0;
@@ -419,17 +437,16 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
 
     Uint32 masknum;//遮罩数量
     SDL_Surface* sf = NULL;
-    SDL_RWops* rw = ctx ? ctx->rw : ud->file;
 
-    if (SDL_RWseek(rw, ud->maplist[id], RW_SEEK_SET) == -1 ||
-        SDL_RWread(rw, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩数量
+    if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
+        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩数量
         return 0;
 
     if (masknum > 65535)
         return 0;
 
     if (masknum > 0 && ud->flag == MAP_FLAG_M10 &&
-        SDL_RWseek(rw, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
+        SDL_RWseek(ud->file, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
         return 0;
 
     MAP_BlockInfo info = { 0, 0 };
@@ -438,7 +455,7 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
     int loop = 1;
     while (loop)
     {
-        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
+        if (SDL_RWread(ud->file, &info, sizeof(MAP_BlockInfo), 1) != 1)
             return 0;
 
         switch (info.flag)
@@ -448,11 +465,9 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
         case MAP_BLOCK_WEBP: //梦幻
         case MAP_BLOCK_0PNG: //大话
         {
-            if (ctx) mem0 = _getmem_ctx(ctx->p_mem0, ctx->p_mem0_size, info.size);
-            else mem0 = _getmem(&ud->mem[0], info.size);
-            if (!mem0) return 0;
-
-            if (SDL_RWread(rw, mem0, sizeof(Uint8), info.size) != info.size)
+            if (!(mem0 = _getmem(&ud->mem[0], info.size)))
+                return 0;
+            if (SDL_RWread(ud->file, mem0, sizeof(Uint8), info.size) != info.size)
                 return 0;
 
             loop = 0;
@@ -461,28 +476,24 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
         case MAP_BLOCK_JPEG:
         {
             if (ud->flag == MAP_FLAG_M10) {
-                if (ctx) mem0 = _getmem_ctx(ctx->p_mem0, ctx->p_mem0_size, info.size);
-                else mem0 = _getmem(&ud->mem[0], info.size);
-                if (!mem0) return 0;
-
-                if (SDL_RWread(rw, mem0, sizeof(Uint8), info.size) != info.size)
+                if (!(mem0 = _getmem(&ud->mem[0], info.size)))
+                    return 0;
+                if (SDL_RWread(ud->file, mem0, sizeof(Uint8), info.size) != info.size)
                     return 0;
 
                 if (((Uint16*)mem0)[1] == 0xA0FF) { //云风格式
-                    if (ctx) mem1 = _getmem_ctx(ctx->p_mem1, ctx->p_mem1_size, 153600);
-                    else mem1 = _getmem(&ud->mem[1], 153600); //320*240*2
-                    if (!mem1) return 0;
-
+                    if (!(mem1 = _getmem(&ud->mem[1], 153600))) { //320*240*2
+                        return 0;
+                    }
                     info.size = _fixjpeg(mem0, info.size, mem1);
                     mem0 = mem1;
                 }//大话普通
             }
             else {//MAPX 
-                if (ctx) mem0 = _getmem_ctx(ctx->p_mem0, ctx->p_mem0_size, ud->jpeh.size + info.size);
-                else mem0 = _getmem(&ud->mem[0], ud->jpeh.size + info.size);
-                if (!mem0) return 0;
+                if (!(mem0 = _getmem(&ud->mem[0], ud->jpeh.size + info.size)))
+                    return 0;
 
-                if (SDL_RWread(rw, (char*)mem0 + ud->jpeh.size, sizeof(Uint8), info.size) != info.size)
+                if (SDL_RWread(ud->file, (char*)mem0 + ud->jpeh.size, sizeof(Uint8), info.size) != info.size)
                     return 0;
 
                 SDL_memcpy(mem0, ud->jpeh.mem, ud->jpeh.size);
@@ -492,9 +503,7 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
                 ujDecode(img, mem0, (int)ud->jpeh.size + info.size, 1);
                 if (ujIsValid(img)) {
                     info.size = ujGetImageSize(img);
-                    if (ctx) mem1 = _getmem_ctx(ctx->p_mem1, ctx->p_mem1_size, info.size);
-                    else mem1 = _getmem(&ud->mem[1], info.size);
-                    if (mem1 && ujGetImage(img, mem1)) {
+                    if ((mem1 = _getmem(&ud->mem[1], info.size)) && ujGetImage(img, mem1)) {
                         //!ujIsColor(img)  P5灰度？
                         sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 24, SDL_PIXELFORMAT_RGB24);
                         SDL_memcpy(sf->pixels, mem1, info.size);
@@ -509,14 +518,14 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
         }
         case 0://结束
         {
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
                 return 0;
             info.size = 0;
             loop = 0;
             break;
         }
         default: //跳过
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
                 return 0;
             break;
         }
@@ -542,20 +551,13 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
     return sf;
 }
 
-static int _getmaskinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, MAP_DecodeContext* ctx);
 static int _getmaskinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info)
 {
-    return _getmaskinfo_ctx(ud, id, info, NULL);
-}
-
-static int _getmaskinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, MAP_DecodeContext* ctx)
-{
-    SDL_RWops* rw = ctx ? ctx->rw : ud->file;
-    Sint64 cur = SDL_RWtell(rw);
+    Sint64 cur = SDL_RWtell(ud->file);
     int ok = 0;
     if (cur < 0)
         cur = 0;
-    if (SDL_RWseek(rw, info->offset, RW_SEEK_SET) == -1)
+    if (SDL_RWseek(ud->file, info->offset, RW_SEEK_SET) == -1)
         goto end;
     if (ud->flag == MAP_FLAG_M10) {
         Uint32 raw_size = 0;
@@ -566,12 +568,12 @@ static int _getmaskinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, MAP
         info->mode = 0;
         info->head = 20;
 
-        if (SDL_RWread(rw, (void*)&info->rect, sizeof(SDL_Rect), 1) != 1)
+        if (SDL_RWread(ud->file, (void*)&info->rect, sizeof(SDL_Rect), 1) != 1)
             goto end;
-        if (SDL_RWread(rw, (void*)&raw_size, sizeof(Uint32), 1) != 1)
+        if (SDL_RWread(ud->file, (void*)&raw_size, sizeof(Uint32), 1) != 1)
             goto end;
 
-        if (SDL_RWread(rw, (void*)&mode, sizeof(Uint32), 1) == 1) {
+        if (SDL_RWread(ud->file, (void*)&mode, sizeof(Uint32), 1) == 1) {
             if (mode <= 16)
                 info->mode = mode;
         }
@@ -580,9 +582,9 @@ static int _getmaskinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, MAP
         ok = 1;
     }
     else {
-        if (SDL_RWread(rw, (void*)&info->size, sizeof(Uint32), 1) != 1)
+        if (SDL_RWread(ud->file, (void*)&info->size, sizeof(Uint32), 1) != 1)
             goto end;
-        if (SDL_RWread(rw, (void*)&info->rect, sizeof(SDL_Rect), 1) != 1)
+        if (SDL_RWread(ud->file, (void*)&info->rect, sizeof(SDL_Rect), 1) != 1)
             goto end;
 
         info->size -= 16;
@@ -595,11 +597,11 @@ static int _getmaskinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, MAP
         ok = 1;
     }
 end:
-    SDL_RWseek(rw, cur, RW_SEEK_SET);
+    SDL_RWseek(ud->file, cur, RW_SEEK_SET);
     return ok;
 }
 //取遮罩信息
-static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num, MAP_DecodeContext* ctx)
+static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num)
 {
     if (!mask || !num)
         return 0;
@@ -611,10 +613,9 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
 
     Uint32 masknum;//遮罩数量
     MAP_MaskInfo* masklist = NULL;
-    SDL_RWops* rw = ctx ? ctx->rw : ud->file;
 
-    if (SDL_RWseek(rw, ud->maplist[id], RW_SEEK_SET) == -1 ||
-        SDL_RWread(rw, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩ID
+    if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
+        SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩ID
         return 0;
 
     if (masknum == 0 || masknum > 65535)
@@ -630,7 +631,7 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
             SDL_free(masklist);
             return 0;
         }
-        if (SDL_RWread(rw, maskid, sizeof(Uint32), masknum) != masknum) {
+        if (SDL_RWread(ud->file, maskid, sizeof(Uint32), masknum) != masknum) {
             SDL_free(masklist);
             SDL_free(maskid);
             return 0;
@@ -643,7 +644,7 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
                 MAP_MaskInfo tmp;
                 SDL_memset(&tmp, 0, sizeof(MAP_MaskInfo));
                 tmp.offset = ud->masklist[maskid[i]];
-                if (_getmaskinfo_ctx(ud, id, &tmp, ctx))
+                if (_getmaskinfo(ud, id, &tmp))
                     masklist[valid++] = tmp;
             }
         }
@@ -663,7 +664,7 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
     Uint32 i = 0;
     while (loop)
     {
-        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1) {
+        if (SDL_RWread(ud->file, &info, sizeof(MAP_BlockInfo), 1) != 1) {
             SDL_free(masklist);
             return 0;
         }
@@ -672,12 +673,12 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
         case MAP_BLOCK_MASK://MAPX 
         {
             if (i < masknum) {
-                masklist[i].offset = (Uint32)SDL_RWtell(rw) - sizeof(Uint32);
-                _getmaskinfo_ctx(ud, id, &masklist[i], ctx);
+                masklist[i].offset = (Uint32)SDL_RWtell(ud->file) - sizeof(Uint32);
+                _getmaskinfo(ud, id, &masklist[i]);
                 i++;
             }
 
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+            if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1) {
                 SDL_free(masklist);
                 return 0;
             }
@@ -685,7 +686,7 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
         }
         case 0://结束
         {
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+            if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1) {
                 SDL_free(masklist);
                 return 0;
             }
@@ -694,7 +695,7 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
             break;
         }
         default: //跳过
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+            if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1) {
                 SDL_free(masklist);
                 return 0;
             }
@@ -706,18 +707,12 @@ static int _getmasksinfo_ctx(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, U
     *num = masknum;
     return 1;
 }
-
-static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num)
-{
-    return _getmasksinfo_ctx(ud, id, mask, num, NULL);
-}
 //取遮罩透明数据
-static Uint8* _getmaskdata_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_DecodeContext* ctx)
+static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
     Uint32 width, height, size;
-    SDL_RWops* rw = ctx ? ctx->rw : ud->file;
 
-    _getmaskinfo_ctx(ud, id, &mask->info, ctx);
+    _getmaskinfo(ud, id, &mask->info);
 
     width = mask->info.rect.w;
     height = mask->info.rect.h;
@@ -725,13 +720,11 @@ static Uint8* _getmaskdata_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP
 
     void* mem0, * mem1;
     int len = ((width + 3) >> 2) * height;// 4对齐>>2等于除以4
-    if (ctx) mem1 = _getmem_ctx(ctx->p_mem1, ctx->p_mem1_size, len);
-    else mem1 = _getmem(&ud->mem[1], len);
-    if (!mem1) return 0;
+    if (!(mem1 = _getmem(&ud->mem[1], len)))
+        return 0;
 
-    if (ctx) mem0 = _getmem_ctx(ctx->p_mem0, ctx->p_mem0_size, size);
-    else mem0 = _getmem(&ud->mem[0], size);
-    if (!mem0) return 0;
+    if (!(mem0 = _getmem(&ud->mem[0], size)))
+        return 0;
 
     int ok = 0;
     Uint32 head_try[3] = { 20, 24, 24 };
@@ -743,9 +736,9 @@ static Uint8* _getmaskdata_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP
         Uint32 s = size_try[i];
         if (s == 0)
             continue;
-        if (SDL_RWseek(rw, mask->info.offset + h, RW_SEEK_SET) == -1)
+        if (SDL_RWseek(ud->file, mask->info.offset + h, RW_SEEK_SET) == -1)
             continue;
-        if (SDL_RWread(rw, mem0, sizeof(Uint8), s) != s)
+        if (SDL_RWread(ud->file, mem0, sizeof(Uint8), s) != s)
             continue;
         if (_lzodecompress(mem0, mem1) == len)
             ok = 1;
@@ -755,9 +748,7 @@ static Uint8* _getmaskdata_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP
         return 0;
 
     Uint8* data = (Uint8*)mem1;
-    if (width == 0 || height == 0) return 0;
     Uint8* dedata = (Uint8*)SDL_malloc(width * height);
-    if (!dedata) return 0; /* OOM 保护：避免空指针写入崩溃 */
     Uint8* alpha = dedata;
     int  bitidx = 0;
 
@@ -780,9 +771,9 @@ static Uint8* _getmaskdata_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP
     return dedata;
 }
 //取遮罩
-static int _getmasksf_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_DecodeContext* ctx)
+static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
-    Uint8* alpha = _getmaskdata_ctx(ud, id, mask, ctx);
+    Uint8* alpha = _getmaskdata(ud, id, mask);
     SDL_Rect* rect = &mask->info.rect;
 
     if (!alpha)
@@ -808,7 +799,7 @@ static int _getmasksf_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Deco
 
     for (int y = sfy; y < msf->h; y += 240) {
         for (int x = sfx; x < msf->w; x += 320) {
-            SDL_Surface* sf = _getmapsf_ctx(ud, curid++, ctx);
+            SDL_Surface* sf = _getmapsf(ud, curid++);
             SDL_Rect xy = { x,y };
             if (sf)
                 SDL_BlitSurface(sf, NULL, msf, &xy); //Blit后rect会清零
@@ -843,9 +834,9 @@ static int _getmasksf_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Deco
     return 1;
 }
 //取遮罩
-static int _getmasksf2_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_DecodeContext* ctx)
+static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
 {
-    Uint8* alpha = _getmaskdata_ctx(ud, id, mask, ctx);
+    Uint8* alpha = _getmaskdata(ud, id, mask);
     SDL_Rect* rect = &mask->info.rect;
 
     if (!alpha)
@@ -887,178 +878,97 @@ static int _getmasksf2_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Dec
     return 1;
 }
 
-static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
+//载入线程
+static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
 {
-    return _getmasksf_ctx(ud, id, mask, NULL);
-}
+    TIME_Data* time = (TIME_Data*)param;
+    MAP_UserData* ud = time->ud;
 
-static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask)
-{
-    return _getmasksf2_ctx(ud, id, mask, NULL);
-}
-
-static void PushReqQueue(MAP_UserData* ud, MAP_Task* task) {
-    SDL_LockMutex(ud->req_mutex);
-    task->next = NULL;
-    if (ud->req_queue_tail) {
-        ud->req_queue_tail->next = task;
-    } else {
-        ud->req_queue_head = task;
-    }
-    ud->req_queue_tail = task;
-    SDL_CondSignal(ud->req_cond);
-    SDL_UnlockMutex(ud->req_mutex);
-}
-
-static MAP_Task* PopReqQueue(MAP_UserData* ud) {
-    MAP_Task* task = ud->req_queue_head;
-    if (task) {
-        ud->req_queue_head = task->next;
-        if (!ud->req_queue_head) ud->req_queue_tail = NULL;
-    }
-    return task;
-}
-
-static void PushResQueue(MAP_UserData* ud, MAP_Task* task) {
-    SDL_LockMutex(ud->res_mutex);
-    task->next = NULL;
-    if (ud->res_queue_tail) {
-        ud->res_queue_tail->next = task;
-    } else {
-        ud->res_queue_head = task;
-    }
-    ud->res_queue_tail = task;
-    SDL_UnlockMutex(ud->res_mutex);
-}
-
-static int SDLCALL WorkerThreadMain(void* data) {
-    MAP_Worker* worker = (MAP_Worker*)data;
-    MAP_UserData* ud = worker->ud;
-
-    MAP_DecodeContext ctx;
-    ctx.p_mem0 = &worker->mem0;
-    ctx.p_mem0_size = &worker->mem0_size;
-    ctx.p_mem1 = &worker->mem1;
-    ctx.p_mem1_size = &worker->mem1_size;
-    ctx.rw = worker->rw;
-
-    while (1) {
-        SDL_LockMutex(ud->req_mutex);
-        while (!ud->closing && ud->req_queue_head == NULL) {
-            SDL_CondWait(ud->req_cond, ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
+    if (ud->closing || !ud->file)
+    {
+        if (time->type == TIME_TYPE_MAP)
+        {
+            MAP_Data* map = (MAP_Data*)time->data;
+            map->loading = 0;
         }
-        if (ud->closing && ud->req_queue_head == NULL) {
-            SDL_UnlockMutex(ud->req_mutex);
-            break;
-        }
-        MAP_Task* task = PopReqQueue(ud);
-        SDL_UnlockMutex(ud->req_mutex);
-
-        if (task) {
-            if (task->type == TIME_TYPE_MAP) {
-                MAP_Data* map = (MAP_Data*)task->data;
-                map->sf = _getmapsf_ctx(ud, task->id, &ctx);
-                _getmasksinfo_ctx(ud, task->id, &map->mask, &map->masknum, &ctx);
-                if (map->masknum > 0 && map->mask) {
-                    map->mask_sfs = (SDL_Surface**)SDL_calloc(map->masknum, sizeof(SDL_Surface*));
-                    if (map->mask_sfs) {
-                        for (Uint32 i = 0; i < map->masknum; i++) {
-                            MASK_Data temp_mask;
-                            SDL_memset(&temp_mask, 0, sizeof(MASK_Data));
-                            temp_mask.id = task->id;
-                            temp_mask.info = map->mask[i];
-                            
-                            if (ud->mode == 0x9527)
-                                _getmasksf2_ctx(ud, task->id, &temp_mask, &ctx);
-                            else
-                                _getmasksf_ctx(ud, task->id, &temp_mask, &ctx);
-                                
-                            map->mask_sfs[i] = temp_mask.sf;
-                        }
-                    }
-                }
-            } else if (task->type == TIME_TYPE_MASK) {
-                MASK_Data* mask = (MASK_Data*)task->data;
-                if (ud->mode == 0x9527) _getmasksf2_ctx(ud, mask->id, mask, &ctx);
-                else _getmasksf_ctx(ud, mask->id, mask, &ctx);
-            }
-            PushResQueue(ud, task);
-
-            SDL_LockMutex(ud->req_mutex);
-            ud->active_tasks--;
-            if (ud->closing && ud->active_tasks == 0) {
-                SDL_CondSignal(ud->clear_cond);
-            }
-            SDL_UnlockMutex(ud->req_mutex);
-        }
+        ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+        SDL_ListAdd(&ud->list, param);
+        SDL_UnlockMutex(ud->mutex);
+        return 0;
     }
+    if (time->type == TIME_TYPE_MAP)
+    {
+        MAP_Data* map = (MAP_Data*)time->data;
+        map->sf = _getmapsf(ud, time->id);
+        _getmasksinfo(ud, time->id, &map->mask, &map->masknum);
+        map->loading = 0;
+    }
+    else if (time->type == TIME_TYPE_MASK)
+    {
+        MASK_Data* mask = (MASK_Data*)time->data;
+
+        if (ud->mode == 0x9527)
+            _getmasksf2(ud, mask->id, mask);
+        else
+            _getmasksf(ud, mask->id, mask);
+    }
+
+    SDL_ListAdd(&ud->list, param);
+    ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+    SDL_UnlockMutex(ud->mutex);
     return 0;
 }
 
 static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
 {
-    SDL_LockMutex(ud->req_mutex);
-    MAP_Task* req_node = ud->req_queue_head;
-    ud->req_queue_head = NULL;
-    ud->req_queue_tail = NULL;
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
+    SDL_ListNode* node = ud->list;
+    ud->list = NULL;
+    SDL_UnlockMutex(ud->mutex);
 
-    SDL_LockMutex(ud->res_mutex);
-    MAP_Task* res_node = ud->res_queue_head;
-    ud->res_queue_head = NULL;
-    ud->res_queue_tail = NULL;
-    SDL_UnlockMutex(ud->res_mutex);
+    while (node)
+    {
+        SDL_ListNode* next = node->next;
+        TIME_Data* time = (TIME_Data*)node->data;
+        SDL_free(node);
 
-    MAP_Task* lists[2] = { req_node, res_node };
-    for (int i = 0; i < 2; i++) {
-        MAP_Task* node = lists[i];
-        while (node)
+        if (time)
         {
-            MAP_Task* next = node->next;
-            MAP_Task* time = node;
+            if (time->cb_ref != LUA_NOREF && time->cb_ref != LUA_REFNIL)
+                luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
 
-            if (time)
+            if (time->type == TIME_TYPE_MAP)
             {
-                if (time->cb_ref != LUA_NOREF && time->cb_ref != LUA_REFNIL)
-                    luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-
-                if (time->type == TIME_TYPE_MAP)
+                MAP_Data* map = (MAP_Data*)time->data;
+                if (map)
                 {
-                    MAP_Data* map = (MAP_Data*)time->data;
-                    if (map)
+                    map->loading = 0;
+                    if (map->mask)
                     {
-                        map->loading = 0;
-                        if (map->mask_sfs) {
-                            for (Uint32 i = 0; i < map->masknum; i++) {
-                                if (map->mask_sfs[i]) SDL_FreeSurface(map->mask_sfs[i]);
-                            }
-                            SDL_free(map->mask_sfs);
-                            map->mask_sfs = NULL;
-                        }
-                        if (map->mask)
-                        {
-                            SDL_free(map->mask);
-                            map->mask = NULL;
-                            map->masknum = 0;
-                        }
+                        SDL_free(map->mask);
+                        map->mask = NULL;
+                        map->masknum = 0;
                     }
                 }
-                else if (time->type == TIME_TYPE_MASK)
+            }
+            else if (time->type == TIME_TYPE_MASK)
+            {
+                MASK_Data* mask = (MASK_Data*)time->data;
+                if (mask)
                 {
-                    MASK_Data* mask = (MASK_Data*)time->data;
-                    if (mask)
-                    {
-                        if (mask->sf)
-                            SDL_FreeSurface(mask->sf);
-                        SDL_free(mask);
-                    }
+                    if (mask->sf)
+                        SDL_FreeSurface(mask->sf);
+                    SDL_free(mask);
                 }
-
-                SDL_free(time);
             }
 
-            node = next;
+            SDL_free(time);
         }
+
+        node = next;
     }
 }
 
@@ -1066,16 +976,16 @@ static int LUA_Run(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
 
-    SDL_LockMutex(ud->res_mutex);
-    MAP_Task* node = ud->res_queue_head;
-    ud->res_queue_head = NULL;
-    ud->res_queue_tail = NULL;
-    SDL_UnlockMutex(ud->res_mutex);
+    SDL_LockMutex(ud->mutex);
+    SDL_ListNode* node = ud->list;
+    ud->list = NULL;
+    SDL_UnlockMutex(ud->mutex);
 
     while (node)
     {
-        MAP_Task* next = node->next;
-        MAP_Task* time = node;
+        SDL_ListNode* next = node->next;
+        TIME_Data* time = (TIME_Data*)node->data;
+        SDL_free(node);
 
         lua_rawgeti(L, LUA_REGISTRYINDEX, time->cb_ref);
         luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
@@ -1093,14 +1003,7 @@ static int LUA_Run(lua_State* L)
             {
                 {
                     SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                    
-            if (map->sf) {
-                if (ud->mode != 0x9527) {
-                    _lru_push(ud, id);
-                    _lru_evict(L, ud);
-                }
-            }
-            if (ud->mode == 0x9527)
+                    if (ud->mode == 0x9527)
                     {
                         *sf = map->sf;
                         map->sf = NULL;
@@ -1131,41 +1034,18 @@ static int LUA_Run(lua_State* L)
                     lua_setfield(L, -2, "w");
                     lua_pushinteger(L, info->rect.h);
                     lua_setfield(L, -2, "h");
-                    
-                    if (map->mask_sfs && map->mask_sfs[i]) {
-                        SDL_Surface** sf_ptr = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                        if (ud->mode == 0x9527) {
-                            *sf_ptr = map->mask_sfs[i];
-                            map->mask_sfs[i] = NULL;
-                        } else {
-                            *sf_ptr = SDL_DuplicateSurface(map->mask_sfs[i]);
-                        }
-                        luaL_setmetatable(L, "SDL_Surface");
-                        lua_setfield(L, -2, "sf");
-                    }
-                    
                     lua_seti(L, -2, i + 1);
                 }
 
-                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-                    lua_pop(L, 1);
-                }
+                lua_call(L, 2, 0);
             }
 
-            if (map->mask_sfs) {
-                for (Uint32 i = 0; i < map->masknum; i++) {
-                    if (map->mask_sfs[i]) SDL_FreeSurface(map->mask_sfs[i]);
-                }
-                SDL_free(map->mask_sfs);
-                map->mask_sfs = NULL;
-            }
             if (map->mask)
             {
                 SDL_free(map->mask);
                 map->mask = NULL;
                 map->masknum = 0;
             }
-            map->loading = 0;
             SDL_free(time);
         }
         else if (time->type == TIME_TYPE_MASK)
@@ -1180,9 +1060,7 @@ static int LUA_Run(lua_State* L)
                 SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
                 *sf = mask->sf;
                 luaL_setmetatable(L, "SDL_Surface");
-                if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-                    lua_pop(L, 1);
-                }
+                lua_call(L, 1, 0);
             }
             SDL_free(mask);
             SDL_free(time);
@@ -1193,10 +1071,6 @@ static int LUA_Run(lua_State* L)
             SDL_free(time);
         }
 
-        SDL_LockMutex(ud->req_mutex);
-        SDL_CondSignal(ud->req_cond);
-        SDL_UnlockMutex(ud->req_mutex);
-
         node = next;
     }
 
@@ -1206,100 +1080,6 @@ static int LUA_Run(lua_State* L)
 static int LUA_GetResult(lua_State* L)
 {
     return LUA_Run(L);
-}
-
-
-static void _lru_remove(MAP_UserData* ud, Uint32 id) {
-    MAP_Data* map = &ud->map[id];
-    if (!map->in_lru) return;
-    
-    if (map->lru_prev != 0xFFFFFFFF)
-        ud->map[map->lru_prev].lru_next = map->lru_next;
-    else
-        ud->lru_head = map->lru_next;
-        
-    if (map->lru_next != 0xFFFFFFFF)
-        ud->map[map->lru_next].lru_prev = map->lru_prev;
-    else
-        ud->lru_tail = map->lru_prev;
-        
-    map->in_lru = 0;
-    ud->lru_size--;
-}
-
-static void _lru_push(MAP_UserData* ud, Uint32 id) {
-    MAP_Data* map = &ud->map[id];
-    if (map->in_lru) _lru_remove(ud, id);
-    
-    map->lru_prev = 0xFFFFFFFF;
-    map->lru_next = ud->lru_head;
-    
-    if (ud->lru_head != 0xFFFFFFFF)
-        ud->map[ud->lru_head].lru_prev = id;
-    else
-        ud->lru_tail = id;
-        
-    ud->lru_head = id;
-    map->in_lru = 1;
-    ud->lru_size++;
-}
-
-static void _lru_evict(lua_State* L, MAP_UserData* ud) {
-    while (ud->lru_size > ud->lru_limit) {
-        Uint32 evict_id = ud->lru_tail;
-        if (evict_id == 0xFFFFFFFF) break;
-        MAP_Data* evict_map = &ud->map[evict_id];
-        
-        _lru_remove(ud, evict_id);
-        
-        if (evict_map->sf) {
-            SDL_FreeSurface(evict_map->sf);
-            evict_map->sf = NULL;
-        }
-        if (evict_map->mask_sfs) {
-            for (Uint32 i = 0; i < evict_map->masknum; i++) {
-                if (evict_map->mask_sfs[i]) SDL_FreeSurface(evict_map->mask_sfs[i]);
-            }
-            SDL_free(evict_map->mask_sfs);
-            evict_map->mask_sfs = NULL;
-        }
-        if (evict_map->mask) {
-            SDL_free(evict_map->mask);
-            evict_map->mask = NULL;
-            evict_map->masknum = 0;
-        }
-    }
-}
-
-
-static int LUA_SetTile(lua_State* L) {
-    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2);
-    if (id >= ud->mapnum) return 0;
-    
-    if (ud->map[id].lua_ref != LUA_REFNIL) {
-        luaL_unref(L, LUA_REGISTRYINDEX, ud->map[id].lua_ref);
-    }
-    
-    if (lua_isnil(L, 3)) {
-        ud->map[id].lua_ref = LUA_REFNIL;
-    } else {
-        lua_pushvalue(L, 3);
-        ud->map[id].lua_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    }
-    return 0;
-}
-
-static int LUA_GetTile(lua_State* L) {
-    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
-    Uint32 id = (Uint32)luaL_checkinteger(L, 2);
-    if (id >= ud->mapnum) return 0;
-    
-    if (ud->map[id].lua_ref != LUA_REFNIL) {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, ud->map[id].lua_ref);
-        return 1;
-    }
-    return 0;
 }
 
 static int LUA_GetMap(lua_State* L)
@@ -1315,48 +1095,36 @@ static int LUA_GetMap(lua_State* L)
 
     if (has_cb)
     {
-        SDL_LockMutex(ud->req_mutex);
+        SDL_LockMutex(ud->mutex);
         if (ud->closing || map->loading)
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return 0;
         }
         map->loading = 1;
         ud->active_tasks++;
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
 
-        MAP_Task* time = (MAP_Task*)SDL_malloc(sizeof(MAP_Task));
-        if (!time) {
-            SDL_LockMutex(ud->req_mutex);
-            map->loading = 0;
-            ud->active_tasks--;
-            SDL_UnlockMutex(ud->req_mutex);
-            return 0;
-        }
+        TIME_Data* time = (TIME_Data*)SDL_malloc(sizeof(TIME_Data));
         time->type = TIME_TYPE_MAP;
         time->ud = ud;
         time->data = (void*)map;
         time->id = id;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        PushReqQueue(ud, time);
+        SDL_AddTimer(0, TimerCallback, (void*)time);
     }
     else {
         SDL_Surface* out_sf = NULL;
 
-        SDL_LockMutex(ud->req_mutex);
-        if (!ud->closing && ud->file && !map->loading)
+        SDL_LockMutex(ud->mutex);
+        if (!ud->closing && ud->file)
         {
             if (!map->sf)
                 map->sf = _getmapsf(ud, id);
 
-            
             if (map->sf)
             {
-                if (ud->mode != 0x9527) {
-                    _lru_push(ud, id);
-                    _lru_evict(L, ud);
-                }
                 if (ud->mode == 0x9527)
                 {
                     out_sf = map->sf;
@@ -1368,7 +1136,7 @@ static int LUA_GetMap(lua_State* L)
                 }
             }
         }
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
 
         if (!out_sf)
             return 0;
@@ -1397,31 +1165,24 @@ static int LUA_GetMapInfo(lua_State* L)
 
     if (has_cb)
     {
-        SDL_LockMutex(ud->req_mutex);
+        SDL_LockMutex(ud->mutex);
         if (ud->closing || map->loading)
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return 0;
         }
         map->loading = 1;
         ud->active_tasks++;
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
 
-        MAP_Task* time = (MAP_Task*)SDL_malloc(sizeof(MAP_Task));
-        if (!time) {
-            SDL_LockMutex(ud->req_mutex);
-            map->loading = 0;
-            ud->active_tasks--;
-            SDL_UnlockMutex(ud->req_mutex);
-            return 0;
-        }
+        TIME_Data* time = (TIME_Data*)SDL_malloc(sizeof(TIME_Data));
         time->type = TIME_TYPE_MAP;
         time->ud = ud;
         time->data = (void*)map;
         time->id = id;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        PushReqQueue(ud, time);
+        SDL_AddTimer(0, TimerCallback, (void*)time);
         return 0;
     }
 
@@ -1429,19 +1190,14 @@ static int LUA_GetMapInfo(lua_State* L)
     Uint32 num = 0;
     MAP_MaskInfo* mask = NULL;
 
-    SDL_LockMutex(ud->req_mutex);
-        if (!ud->closing && ud->file && !map->loading)
-        {
-            if (!map->sf)
-                map->sf = _getmapsf(ud, id);
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file)
+    {
+        if (!map->sf)
+            map->sf = _getmapsf(ud, id);
 
-        
         if (map->sf)
         {
-            if (ud->mode != 0x9527) {
-                _lru_push(ud, id);
-                _lru_evict(L, ud);
-            }
             if (ud->mode == 0x9527)
             {
                 out_sf = map->sf;
@@ -1455,7 +1211,7 @@ static int LUA_GetMapInfo(lua_State* L)
 
         _getmasksinfo(ud, id, &mask, &num);
     }
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
 
     if (!out_sf)
     {
@@ -1505,10 +1261,10 @@ static int LUA_GetMaskInfo(lua_State* L)
     Uint32 num = 0;
     MAP_MaskInfo* mask = NULL;
 
-    SDL_LockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
     if (!ud->closing && ud->file)
         _getmasksinfo(ud, id, &mask, &num);
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
 
     lua_createtable(L, num, 0);
     for (Uint32 i = 0; i < num; i++)
@@ -1549,35 +1305,35 @@ static int LUA_GetMask(lua_State* L)
 
     if (has_cb)
     {
-        SDL_LockMutex(ud->req_mutex);
+        SDL_LockMutex(ud->mutex);
         if (ud->closing)
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return 0;
         }
         ud->active_tasks++;
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
 
         MASK_Data* mask = (MASK_Data*)SDL_calloc(1, sizeof(MASK_Data));
         if (!mask)
         {
-            SDL_LockMutex(ud->req_mutex);
+            SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
-            SDL_CondSignal(ud->req_cond);
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
             return 0;
         }
         mask->id = id;
         mask->info.offset = offset;
 
-        MAP_Task* time = (MAP_Task*)SDL_malloc(sizeof(MAP_Task));
+        TIME_Data* time = (TIME_Data*)SDL_malloc(sizeof(TIME_Data));
         if (!time)
         {
             SDL_free(mask);
-            SDL_LockMutex(ud->req_mutex);
+            SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
-            SDL_CondSignal(ud->req_cond);
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
             return 0;
         }
         time->type = TIME_TYPE_MASK;
@@ -1586,14 +1342,14 @@ static int LUA_GetMask(lua_State* L)
         time->id = 0;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        PushReqQueue(ud, time);
+        SDL_AddTimer(0, TimerCallback, (void*)time);
     }
     else {
         MASK_Data mask;
         SDL_memset(&mask, 0, sizeof(MASK_Data));
         mask.info.offset = offset;
 
-        SDL_LockMutex(ud->req_mutex);
+        SDL_LockMutex(ud->mutex);
         if (!ud->closing && ud->file)
         {
             if (ud->mode == 0x9527)
@@ -1601,7 +1357,7 @@ static int LUA_GetMask(lua_State* L)
             else
                 _getmasksf(ud, id, &mask);
         }
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
 
         if (!mask.sf)
             return 0;
@@ -1619,10 +1375,10 @@ static int LUA_GetCell(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
 
-    SDL_LockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
     if (ud->closing || !ud->file)
     {
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "cell read error!");
     }
 
@@ -1638,7 +1394,7 @@ static int LUA_GetCell(lua_State* L)
     Uint8* m192 = (Uint8*)_getmem(&ud->mem[1], 192);
     if (!cell || !m192)
     {
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "getmem error!");
     }
 
@@ -1692,10 +1448,10 @@ static int LUA_GetCell(lua_State* L)
         cell += line_size; //下一行
     }
     lua_pushlstring(L, mem, celllen);
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
     return 1;
 readerr:
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
     return luaL_error(L, "cell read error!");
 }
 
@@ -1705,16 +1461,16 @@ static int LUA_GetBlock(lua_State* L)
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
     Uint32 id = (Uint32)luaL_checkinteger(L, 2); //从0开始
 
-    SDL_LockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
     if (ud->closing || !ud->file)
     {
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "read error!");
     }
 
     if (id >= ud->mapnum)
     {
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "map id error!");
     }
 
@@ -1723,7 +1479,7 @@ static int LUA_GetBlock(lua_State* L)
     if (SDL_RWseek(ud->file, ud->maplist[id], RW_SEEK_SET) == -1 ||
         SDL_RWread(ud->file, &masknum, sizeof(Uint32), 1) != 1)//附近遮罩ID
     {
-        SDL_UnlockMutex(ud->req_mutex);
+        SDL_UnlockMutex(ud->mutex);
         return luaL_error(L, "read error!");
     }
 
@@ -1736,13 +1492,13 @@ static int LUA_GetBlock(lua_State* L)
         Uint32* maskid;
         if (!(maskid = (Uint32*)_getmem(&ud->mem[0], sizeof(Uint32) * masknum)))
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return luaL_error(L, "getmem error!");
         }
 
         if (SDL_RWread(ud->file, maskid, sizeof(Uint32), masknum) != masknum)
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return luaL_error(L, "read error!");
         }
 
@@ -1762,7 +1518,7 @@ static int LUA_GetBlock(lua_State* L)
     {
         if (SDL_RWread(ud->file, &info, sizeof(MAP_BlockInfo), 1) != 1)
         {
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return luaL_error(L, "read error!");
         }
 
@@ -1772,24 +1528,24 @@ static int LUA_GetBlock(lua_State* L)
         { //结束
             if (SDL_RWseek(ud->file, info.size, RW_SEEK_CUR) == -1)
             {
-                SDL_UnlockMutex(ud->req_mutex);
+                SDL_UnlockMutex(ud->mutex);
                 return luaL_error(L, "read error!");
             }
 
             lua_setfield(L, rettab, "MASK");
-            SDL_UnlockMutex(ud->req_mutex);
+            SDL_UnlockMutex(ud->mutex);
             return 1;
         }
         case MAP_BLOCK_MASK:
         {
             if (!(mem0 = _getmem(&ud->mem[0], info.size)))
             {
-                SDL_UnlockMutex(ud->req_mutex);
+                SDL_UnlockMutex(ud->mutex);
                 return luaL_error(L, "read error!");
             }
             if (SDL_RWread(ud->file, mem0, sizeof(Uint8), info.size) != info.size)
             {
-                SDL_UnlockMutex(ud->req_mutex);
+                SDL_UnlockMutex(ud->mutex);
                 return luaL_error(L, "read error!");
             }
 
@@ -1801,12 +1557,12 @@ static int LUA_GetBlock(lua_State* L)
         default:
             if (!(mem0 = _getmem(&ud->mem[0], info.size)))
             {
-                SDL_UnlockMutex(ud->req_mutex);
+                SDL_UnlockMutex(ud->mutex);
                 return luaL_error(L, "read error!");
             }
             if (SDL_RWread(ud->file, mem0, sizeof(Uint8), info.size) != info.size)
             {
-                SDL_UnlockMutex(ud->req_mutex);
+                SDL_UnlockMutex(ud->mutex);
                 return luaL_error(L, "read error!");
             }
 
@@ -1816,7 +1572,7 @@ static int LUA_GetBlock(lua_State* L)
             break;
         }
     }
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
     return 1;
 }
 
@@ -1870,54 +1626,23 @@ static int MAP_NEW(lua_State* L)
     ud->flag = head.flag;
     ud->rownum = (Uint32)SDL_ceil(head.height / 240.0); //行数
     ud->colnum = (Uint32)SDL_ceil(head.width / 320.0);  //列数
-    
-    if (ud->rownum > 0 && ud->colnum > (0xFFFFFFFFu / ud->rownum))
-        goto openerr;
     ud->mapnum = ud->rownum * ud->colnum;
-    
-    ud->lru_head = 0xFFFFFFFF;
-    ud->lru_tail = 0xFFFFFFFF;
-    ud->lru_size = 0;
-    ud->lru_limit = 200; // max tiles in memory
-
-    ud->req_mutex = SDL_CreateMutex();
-    ud->req_cond = SDL_CreateCond();
-    ud->clear_cond = SDL_CreateCond();
-    ud->res_mutex = SDL_CreateMutex();
-    if (!ud->req_mutex || !ud->req_cond || !ud->clear_cond || !ud->res_mutex)
+    ud->mutex = SDL_CreateMutex();
+    ud->cond = SDL_CreateCond();
+    ud->cond = SDL_CreateCond();
+    if (!ud->mutex)
         goto openerr;
-
-    /* Worker 线程数自适应：取逻辑核数的一半，限制在 [2, 8]，充分利用多核并发解码 */
-    {
-        int cpu = SDL_GetCPUCount();
-        ud->num_workers = cpu > 1 ? (cpu / 2) : 1;
-        if (ud->num_workers < 2) ud->num_workers = 2;
-        if (ud->num_workers > 8) ud->num_workers = 8;
-    }
-    ud->workers = SDL_calloc(ud->num_workers, sizeof(MAP_Worker));
-    if (!ud->workers)
-        goto openerr;
-
-    for (int i = 0; i < ud->num_workers; i++) {
-        ud->workers[i].ud = ud;
-        ud->workers[i].rw = MAP_RWFromOwnedMem(ud->filebuf, ud->filebuf_size);
-        ud->workers[i].thread = SDL_CreateThread(WorkerThreadMain, "WorkerThread", &ud->workers[i]);
-    }
     //地图部分
     ud->maplist = (Uint32*)SDL_malloc(ud->mapnum * sizeof(Uint32)); //地表偏移
     ud->map = (MAP_Data*)SDL_calloc(ud->mapnum, sizeof(MAP_Data));  //缓存
     if (!ud->maplist || !ud->map)
         goto openerr;
 
-    for (Uint32 n = 0; n < ud->mapnum; n++) {
-        ud->map[n].lua_ref = LUA_REFNIL;
-    }
-
     if (SDL_RWread(rw, ud->maplist, sizeof(Uint32), ud->mapnum) != ud->mapnum)
         goto openerr;
 
     //遮罩部分
-    if (head.flag == MAP_FLAG_M10) {
+    if (head.flag == 'M1.0') {
         Uint32 maskoffset;
         if (SDL_RWread(rw, &maskoffset, sizeof(Uint32), 1) != 1)
             goto openerr;
@@ -1980,34 +1705,14 @@ static int MAP_NEW(lua_State* L)
     }
 
 openerr:
-    if (ud->workers)
+    if (ud->mutex)
     {
-        if (ud->req_mutex) {
-            SDL_LockMutex(ud->req_mutex);
-            ud->closing = 1;
-            if (ud->req_cond) SDL_CondBroadcast(ud->req_cond);
-            SDL_UnlockMutex(ud->req_mutex);
-        }
-        for (int i = 0; i < ud->num_workers; i++) {
-            if (ud->workers[i].thread) {
-                SDL_WaitThread(ud->workers[i].thread, NULL);
-            }
-            if (ud->workers[i].rw) ud->workers[i].rw->close(ud->workers[i].rw);
-        }
-        SDL_free(ud->workers);
-        ud->workers = NULL;
+        SDL_DestroyMutex(ud->mutex);
+    ud->mutex = NULL;
+    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
+        SDL_DestroyCond(ud->cond);
+        ud->cond = NULL;
     }
-    if (ud->req_mutex)
-    {
-        SDL_DestroyMutex(ud->req_mutex);
-        ud->req_mutex = NULL;
-    }
-    if (ud->res_mutex)
-    {
-        SDL_DestroyMutex(ud->res_mutex);
-        ud->res_mutex = NULL;
-    }
-    if (ud->req_cond) { SDL_DestroyCond(ud->req_cond); ud->req_cond = NULL; }
     if (ud->map)
     {
         SDL_free(ud->map);
@@ -2061,64 +1766,15 @@ static int LUA_Clear(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
 
-    SDL_LockMutex(ud->req_mutex);
-    ud->closing = 1;
-    
-    MAP_Task* curr = ud->req_queue_head;
-    while (curr) {
-        MAP_Task* next = curr->next;
-        if (curr->cb_ref != LUA_REFNIL && curr->cb_ref != LUA_NOREF) {
-            luaL_unref(L, LUA_REGISTRYINDEX, curr->cb_ref);
-        }
-        if (curr->type == TIME_TYPE_MAP) {
-            MAP_Data* map = (MAP_Data*)curr->data;
-            if (map) map->loading = 0;
-        }
-        /* active_tasks-- 必须在 SDL_free 之前，防止 worker 同时完成
-         * 将计数减到负数后发出 clear_cond 信号造成 CondWait 死锁 */
-        if (ud->active_tasks > 0) ud->active_tasks--;
-        SDL_free(curr);
-        curr = next;
-    }
-    ud->req_queue_head = NULL;
-    ud->req_queue_tail = NULL;
-
-    while (ud->active_tasks > 0) {
-        SDL_CondWait(ud->clear_cond, ud->req_mutex);
-    }
+    SDL_LockMutex(ud->mutex);
 
     for (Uint32 n = 0; n < ud->mapnum; n++) {
-        if (ud->map[n].lua_ref != LUA_REFNIL) {
-            luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
-            ud->map[n].lua_ref = LUA_REFNIL;
-        }
 
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
-            
-        if (ud->map[n].mask_sfs) {
-            for (Uint32 i = 0; i < ud->map[n].masknum; i++) {
-                if (ud->map[n].mask_sfs[i]) SDL_FreeSurface(ud->map[n].mask_sfs[i]);
-            }
-            SDL_free(ud->map[n].mask_sfs);
-            ud->map[n].mask_sfs = NULL;
-        }
-        if (ud->map[n].mask) {
-            SDL_free(ud->map[n].mask);
-            ud->map[n].mask = NULL;
-            ud->map[n].masknum = 0;
-        }
 
     }
     SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
-    for (Uint32 n = 0; n < ud->mapnum; n++) {
-        ud->map[n].lua_ref = LUA_REFNIL;
-    }
-
-    ud->lru_head = 0xFFFFFFFF;
-    ud->lru_tail = 0xFFFFFFFF;
-    ud->lru_size = 0;
-
 
     if (ud->mem[0].mem) {
         SDL_free(ud->mem[0].mem);
@@ -2132,32 +1788,7 @@ static int LUA_Clear(lua_State* L)
         ud->mem[1].size = 0;
     }
 
-    SDL_LockMutex(ud->res_mutex);
-    MAP_Task* rcurr = ud->res_queue_head;
-    while (rcurr) {
-        MAP_Task* next = rcurr->next;
-        if (rcurr->type == TIME_TYPE_MAP && rcurr->data) {
-            MAP_Data* map = (MAP_Data*)rcurr->data;
-            map->loading = 0;
-            // The Surface and mask are cleared by the loop above, since map points to ud->map array.
-            // Wait, rcurr->data is a pointer to ud->map[n].
-        } else if (rcurr->type == TIME_TYPE_MASK && rcurr->data) {
-            MASK_Data* mask = (MASK_Data*)rcurr->data;
-            if (mask->sf) SDL_FreeSurface(mask->sf);
-            SDL_free(mask);
-        }
-        if (rcurr->cb_ref != LUA_REFNIL && rcurr->cb_ref != LUA_NOREF) {
-            luaL_unref(L, LUA_REGISTRYINDEX, rcurr->cb_ref);
-        }
-        SDL_free(rcurr);
-        rcurr = next;
-    }
-    ud->res_queue_head = NULL;
-    ud->res_queue_tail = NULL;
-    SDL_UnlockMutex(ud->res_mutex);
-
-    ud->closing = 0;
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
 
     return 0;
 }
@@ -2166,53 +1797,38 @@ static int LUA_GC(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
 
-    if (!ud->req_mutex)
+    if (!ud->mutex)
         return 0;
 
     SDL_RWops* rw = NULL;
 
-    SDL_LockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
     ud->closing = 1;
-    SDL_CondBroadcast(ud->req_cond);
     rw = ud->file;
     ud->file = NULL;
-    SDL_UnlockMutex(ud->req_mutex);
-
-    if (ud->workers) {
-        for (int i = 0; i < ud->num_workers; i++) {
-            if (ud->workers[i].thread) SDL_WaitThread(ud->workers[i].thread, NULL);
-            if (ud->workers[i].rw) ud->workers[i].rw->close(ud->workers[i].rw);
-            if (ud->workers[i].mem0) SDL_free(ud->workers[i].mem0);
-            if (ud->workers[i].mem1) SDL_free(ud->workers[i].mem1);
-        }
-        SDL_free(ud->workers);
-        ud->workers = NULL;
-    }
+    SDL_UnlockMutex(ud->mutex);
 
     if (rw && rw->close)
         rw->close(rw);
 
+    {
+        SDL_LockMutex(ud->mutex);
+        while (ud->active_tasks > 0) {
+            SDL_CondWait(ud->cond, ud->mutex);
+        }
+        SDL_UnlockMutex(ud->mutex);
+    }
+
     MAP_DrainPendingNoCallback(L, ud);
 
-    SDL_LockMutex(ud->req_mutex);
+    SDL_LockMutex(ud->mutex);
     if (ud->map)
     {
         for (Uint32 n = 0; n < ud->mapnum; n++)
         {
-            if (ud->map[n].lua_ref != LUA_REFNIL) {
-                luaL_unref(L, LUA_REGISTRYINDEX, ud->map[n].lua_ref);
-                ud->map[n].lua_ref = LUA_REFNIL;
-            }
             if (ud->map[n].sf)
                 SDL_FreeSurface(ud->map[n].sf);
 
-            if (ud->map[n].mask_sfs) {
-                for (Uint32 i = 0; i < ud->map[n].masknum; i++) {
-                    if (ud->map[n].mask_sfs[i]) SDL_FreeSurface(ud->map[n].mask_sfs[i]);
-                }
-                SDL_free(ud->map[n].mask_sfs);
-                ud->map[n].mask_sfs = NULL;
-            }
             if (ud->map[n].mask)
                 SDL_free(ud->map[n].mask);
         }
@@ -2261,13 +1877,13 @@ static int LUA_GC(lua_State* L)
         ud->filebuf_size = 0;
     }
 
-    SDL_UnlockMutex(ud->req_mutex);
+    SDL_UnlockMutex(ud->mutex);
 
-    SDL_DestroyMutex(ud->req_mutex);
-    ud->req_mutex = NULL;
-    if (ud->res_mutex) { SDL_DestroyMutex(ud->res_mutex); ud->res_mutex = NULL; }
-    if (ud->req_cond) { SDL_DestroyCond(ud->req_cond); ud->req_cond = NULL; }
-    if (ud->clear_cond) { SDL_DestroyCond(ud->clear_cond); ud->clear_cond = NULL; }
+    SDL_DestroyMutex(ud->mutex);
+    ud->mutex = NULL;
+    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
+    SDL_DestroyCond(ud->cond);
+    ud->cond = NULL;
     return 0;
 }
 
@@ -2290,8 +1906,6 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
         {"GetCell", LUA_GetCell},
         {"GetBlock", LUA_GetBlock},
         {"Clear", LUA_Clear},
-        {"SetTile", LUA_SetTile},
-        {"GetTile", LUA_GetTile},
         {"SetMode", LUA_SetMode},
         {"Run", LUA_Run},
         {NULL, NULL},
