@@ -488,6 +488,11 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
                 SDL_memcpy(mem0, ud->jpeh.mem, ud->jpeh.size);
 
                 ujImage img = ujCreate();
+                if (!img) {
+                    mem0 = NULL;
+                    loop = 0;
+                    break;
+                }
                 //ujSetChromaMode(img, UJ_CHROMA_MODE_FAST);
                 ujDecode(img, mem0, (int)ud->jpeh.size + info.size, 1);
                 if (ujIsValid(img)) {
@@ -497,10 +502,12 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
                     if (mem1 && ujGetImage(img, mem1)) {
                         //!ujIsColor(img)  P5灰度？
                         sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 24, SDL_PIXELFORMAT_RGB24);
-                        SDL_memcpy(sf->pixels, mem1, info.size);
+                        if (sf) {
+                            SDL_memcpy(sf->pixels, mem1, info.size);
+                        }
                     }
-                    ujFree(img);
                 }
+                ujFree(img);
                 mem0 = NULL;
             }
             loop = 0;
@@ -525,7 +532,8 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
     if (mem0 && info.size) {
         if (!sf) {
             SDL_RWops* src = SDL_RWFromMem(mem0, info.size);
-            sf = IMG_Load_RW(src, SDL_TRUE);
+            if (src)
+                sf = IMG_Load_RW(src, SDL_TRUE);
             
             SDL_LockMutex(ud->req_mutex);
             ud->map[id].sf = sf;
@@ -543,13 +551,15 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
 
         if (sf && sf->format->format != SDL_PIXELFORMAT_ARGB8888) {
             SDL_Surface* nsf = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, SDL_SWSURFACE);
-            SDL_FreeSurface(sf);
-            
-            SDL_LockMutex(ud->req_mutex);
-            ud->map[id].sf = nsf;
-            SDL_UnlockMutex(ud->req_mutex);
-            
-            sf = nsf;
+            if (nsf) {
+                SDL_FreeSurface(sf);
+                
+                SDL_LockMutex(ud->req_mutex);
+                ud->map[id].sf = nsf;
+                SDL_UnlockMutex(ud->req_mutex);
+                
+                sf = nsf;
+            }
         }
     }
 
@@ -801,6 +811,10 @@ static int _getmasksf_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Deco
 
     if (!alpha)
         return 0;
+    if (rect->w <= 0 || rect->h <= 0) {
+        SDL_free(alpha);
+        return 0;
+    }
 
     //if (rect->y < 0) { //负数(暂时不存在)
     //    rect->height += rect->y;
@@ -869,8 +883,16 @@ static int _getmasksf2_ctx(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Dec
 
     if (!alpha)
         return 0;
+    if (rect->w <= 0 || rect->h <= 0) {
+        SDL_free(alpha);
+        return 0;
+    }
 
     SDL_Surface* msf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, rect->w, rect->h, 8, SDL_PIXELFORMAT_INDEX8);
+    if (!msf) {
+        SDL_free(alpha);
+        return 0;
+    }
     SDL_Palette* palette = msf->format->palette;
     palette->colors[0].r = 255;
     palette->colors[0].g = 0;

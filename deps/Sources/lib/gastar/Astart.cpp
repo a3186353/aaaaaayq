@@ -2,6 +2,7 @@
 #include "Astart.h"
 #include "DLinkList.h"
 #include <string.h>
+#include <limits.h>
 //测距
 unsigned int CalcDistance(POINT p1, POINT p2)
 {
@@ -14,6 +15,11 @@ unsigned int CalcDistance(POINT p1, POINT p2)
 
 Map* WINAPI MapCreate(unsigned int width, unsigned int height, unsigned char* data)
 {
+    if (width == 0 || height == 0)
+        return NULL;
+    if (width > UINT_MAX / height)
+        return NULL;
+
     Map* map = (Map*)calloc(1, sizeof(Map));
     if (!map)
         return NULL;
@@ -48,6 +54,9 @@ void WINAPI MapDestroy(Map* map)
 
 bool WINAPI FindPath(Map* map, POINT* pStart, POINT* pEnd, bool mode)
 {
+    if (!map || !map->data || !map->node || !map->list || !pStart || !pEnd)
+        return false;
+
     /* 终点开始查找 */
     POINT start = *pEnd;
     POINT end = *pStart;
@@ -56,6 +65,10 @@ bool WINAPI FindPath(Map* map, POINT* pStart, POINT* pEnd, bool mode)
     unsigned int width = map->width;
     unsigned int height = map->height;
     unsigned int size = map->size;
+
+    if ((unsigned int)start.x >= width || (unsigned int)start.y >= height ||
+        (unsigned int)end.x >= width || (unsigned int)end.y >= height)
+        return false;
 
     DLinkList* list = map->list;
     list->Clean();
@@ -69,6 +82,8 @@ bool WINAPI FindPath(Map* map, POINT* pStart, POINT* pEnd, bool mode)
 
     unsigned int index = width * start.y + start.x;
     if (index >= size)
+        return false;
+    if (data[index] != OK || data[width * end.y + end.x] != OK)
         return false;
 
     node[index].start = CHECK;
@@ -105,27 +120,26 @@ bool WINAPI FindPath(Map* map, POINT* pStart, POINT* pEnd, bool mode)
                 continue;
 
             unsigned int beside_index = width * beside_pos.y + beside_pos.x; //相邻索引
-            if (data[beside_index] != OK || beside_index + 1 >= size ||
-                beside_index + width >= size || beside_index - 1 < 0 || beside_index - width < 0)
+            if (data[beside_index] != OK)
                 continue;
             switch (i)
             {
             case 1:
-                if (beside_index + 1 > size || data[beside_index + 1] != OK ||
-                    beside_index + width > size || data[beside_index + width] != OK)
+                if (data[beside_index + 1] != OK || data[beside_index + width] != OK)
                     continue;
+                break;
             case 3:
-                if (beside_index < 1 || data[beside_index - 1] != OK ||
-                    beside_index + width > size || data[beside_index + width] != OK)
+                if (data[beside_index - 1] != OK || data[beside_index + width] != OK)
                     continue;
+                break;
             case 5:
-                if (beside_index < 1 || data[beside_index - 1] != OK ||
-                    beside_index < width || data[beside_index - width] != OK)
+                if (data[beside_index - 1] != OK || data[beside_index - width] != OK)
                     continue;
+                break;
             case 7:
-                if (beside_index + 1 > size || data[beside_index + 1] != OK ||
-                    beside_index < width || data[beside_index - width] != OK)
+                if (data[beside_index + 1] != OK || data[beside_index - width] != OK)
                     continue;
+                break;
             }
 
             /* 检查是否已到达终点 */
@@ -186,8 +200,10 @@ bool WINAPI FindPath(Map* map, POINT* pStart, POINT* pEnd, bool mode)
 
 bool WINAPI NextPath(Map* map, POINT* pos)
 {
+    if (!map || !pos)
+        return false;
     unsigned int index = pos->y * map->width + pos->x;
-    if (index >= 0 && index < map->size)
+    if (index < map->size)
     {
         *pos = map->node[index].parent;
         return true;

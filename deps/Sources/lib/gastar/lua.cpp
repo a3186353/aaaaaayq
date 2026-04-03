@@ -63,12 +63,17 @@ static int astar_GetPath(lua_State* L)
     nodeCur = nodeStart;
 
     lua_newtable(L);
+    if (!map || !map->data || map->width == 0 || map->height == 0)
+        return 1;
+    if (nodeStart.x < 0 || nodeStart.x >= map->width || nodeStart.y < 0 || nodeStart.y >= map->height)
+        return 1;
     if (nodeEnd.x < 0 || nodeEnd.x >= map->width || nodeEnd.y < 0 || nodeEnd.y >= map->height)
         return 1;
     if (FindPath(map, &nodeStart, &nodeEnd, mode))
     {
         int i = 1;
-        for (;;)
+        unsigned int guard = map->size + 1;
+        while (guard-- > 0)
         {
             if (NextPath(map, &nodeCur))
             {
@@ -83,7 +88,7 @@ static int astar_GetPath(lua_State* L)
             }
             else
                 break;
-        };
+        }
     }
     return 1;
 }
@@ -92,12 +97,19 @@ static int astar_new(lua_State* L)
 {
     int w = luaL_checkinteger(L, 1);
     int h = luaL_checkinteger(L, 2);
+    if (w <= 0 || h <= 0)
+        return luaL_error(L, "invalid map size");
     Map* map = MapCreate(w, h, NULL);
+    if (!map)
+        return luaL_error(L, "create map failed");
     Map** ud = (Map**)lua_newuserdata(L, sizeof(Map*));
     *ud = map;
     map->data = (unsigned char*)malloc(map->size);
     if (!map->data)
-        return 0;
+    {
+        MapDestroy(map);
+        return luaL_error(L, "alloc map data failed");
+    }
     if (lua_isuserdata(L, 3) && lua_isnumber(L, 4))
     {
         const void* data = (char*)lua_topointer(L, 3);
@@ -105,7 +117,12 @@ static int astar_new(lua_State* L)
         if (len == map->size)
             memcpy(map->data, data, len);
         else
-            luaL_error(L, "data error");
+        {
+            free(map->data);
+            map->data = NULL;
+            MapDestroy(map);
+            return luaL_error(L, "data error");
+        }
     }
     else if (lua_isstring(L, 3))
     {
@@ -113,6 +130,17 @@ static int astar_new(lua_State* L)
         const void* data = (const void*)luaL_checklstring(L, 3, &len);
         if (len == map->size)
             memcpy(map->data, data, len);
+        else
+        {
+            free(map->data);
+            map->data = NULL;
+            MapDestroy(map);
+            return luaL_error(L, "data error");
+        }
+    }
+    else
+    {
+        memset(map->data, 0, map->size);
     }
     luaL_getmetatable(L, "gge_astar");
     lua_setmetatable(L, -2);
@@ -122,11 +150,12 @@ static int astar_new(lua_State* L)
 static int astar_gc(lua_State* L)
 {
     Map* map = *(Map**)luaL_checkudata(L, 1, "gge_astar");
-    if (map->data)
+    if (map)
     {
-        free(map->data);
+        if (map->data)
+            free(map->data);
         MapDestroy(map);
-        map->data = NULL;
+        *(Map**)lua_touserdata(L, 1) = NULL;
     }
 
     return 0;
