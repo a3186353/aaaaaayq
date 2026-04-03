@@ -93,6 +93,8 @@ static int astar_new(lua_State* L)
     int w = luaL_checkinteger(L, 1);
     int h = luaL_checkinteger(L, 2);
     Map* map = MapCreate(w, h, NULL);
+    if (!map) return 0;
+    
     Map** ud = (Map**)lua_newuserdata(L, sizeof(Map*));
     *ud = map;
     map->data = (unsigned char*)malloc(map->size);
@@ -124,13 +126,15 @@ static int astar_new(lua_State* L)
 static int astar_gc(lua_State* L)
 {
     Map* map = *(Map**)luaL_checkudata(L, 1, "gge_astar");
-    if (map->data)
+    if (map)
     {
-        free(map->data);
+        if (map->data)
+        {
+            free(map->data);
+            map->data = NULL;
+        }
         MapDestroy(map);
-        map->data = NULL;
     }
-
     return 0;
 }
 

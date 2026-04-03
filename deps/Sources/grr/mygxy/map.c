@@ -526,15 +526,29 @@ static SDL_Surface* _getmapsf_ctx(MAP_UserData* ud, Uint32 id, MAP_DecodeContext
         if (!sf) {
             SDL_RWops* src = SDL_RWFromMem(mem0, info.size);
             sf = IMG_Load_RW(src, SDL_TRUE);
+            
+            SDL_LockMutex(ud->req_mutex);
             ud->map[id].sf = sf;
+            if (sf && ud->mode != 0x9527) {
+                _lru_push(ud, id);
+                _lru_evict(NULL, ud);
+            }
+            SDL_UnlockMutex(ud->req_mutex);
         }
-        else
+        else {
+            SDL_LockMutex(ud->req_mutex);
             ud->map[id].sf = sf;
+            SDL_UnlockMutex(ud->req_mutex);
+        }
 
         if (sf && sf->format->format != SDL_PIXELFORMAT_ARGB8888) {
             SDL_Surface* nsf = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, SDL_SWSURFACE);
             SDL_FreeSurface(sf);
+            
+            SDL_LockMutex(ud->req_mutex);
             ud->map[id].sf = nsf;
+            SDL_UnlockMutex(ud->req_mutex);
+            
             sf = nsf;
         }
     }
@@ -949,11 +963,10 @@ static int SDLCALL WorkerThreadMain(void* data) {
 
     while (1) {
         SDL_LockMutex(ud->req_mutex);
-        while (!ud->closing && ud->req_queue_head == NULL) {
+        while (ud->file != NULL && ud->req_queue_head == NULL) {
             SDL_CondWait(ud->req_cond, ud->req_mutex);
         }
-        if (ud->closing) {
-            while (PopReqQueue(ud)); // 清空并丢弃任务，防止主线程死锁
+        if (ud->file == NULL) {
             SDL_UnlockMutex(ud->req_mutex);
             break;
         }
