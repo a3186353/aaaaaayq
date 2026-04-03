@@ -45,8 +45,13 @@ typedef struct
     Uint32 id;
     SDL_Surface* sf;
     MAP_MaskInfo* mask;
+    SDL_Surface** mask_sfs;
     Uint32 masknum;
     int loading;
+    Uint32 lru_prev;
+    Uint32 lru_next;
+    int in_lru;
+    int lua_ref;
 } MAP_Data;
 
 typedef struct
@@ -109,8 +114,14 @@ struct MAP_UserData
     MAP_Task* res_queue_head;
     MAP_Task* res_queue_tail;
 
+    Uint32 lru_head;
+    Uint32 lru_tail;
+    int lru_size;
+    int lru_limit;
+
     SDL_mutex* req_mutex;
     SDL_cond* req_cond;
+    SDL_cond* clear_cond;
     SDL_mutex* res_mutex;
 
     int closing;
