@@ -96,7 +96,17 @@ struct LuaDownload {
         // For file download, we need streaming
         if (!filepath.empty()) {
             // Download to file
-            FILE* fp = fopen(filepath.c_str(), "wb");
+            FILE* fp = nullptr;
+#ifdef _WIN32
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0);
+            if (wlen > 0) {
+                std::wstring wpath(wlen, 0);
+                MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &wpath[0], wlen);
+                fp = _wfopen(wpath.c_str(), L"wb");
+            }
+#else
+            fp = fopen(filepath.c_str(), "wb");
+#endif
             if (!fp) {
                 status = -1;
                 return;
