@@ -59,7 +59,12 @@ static void ensure_http_client() {
 // Check if a URL uses HTTPS scheme
 static bool is_https_url(const char* url) {
     if (!url) return false;
+#ifdef _WIN32
     return _strnicmp(url, "https:", 6) == 0;
+#else
+    #include <strings.h>
+    return strncasecmp(url, "https:", 6) == 0;
+#endif
 }
 
 // Post a completed response to the shared buffer (thread-safe)
