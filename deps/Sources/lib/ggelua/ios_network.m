@@ -16,10 +16,8 @@
 static int ios_trigger_network_permission(void)
 {
     @autoreleasepool {
-        __block int result = 0;
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-        NSURL *url = [NSURL URLWithString:@"https://captive.apple.com"];
+        NSURL *url = [NSURL URLWithString:@"http://captive.apple.com"];
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         config.timeoutIntervalForRequest = 5.0;
         config.timeoutIntervalForResource = 5.0;
@@ -29,20 +27,15 @@ static int ios_trigger_network_permission(void)
             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                 if (error) {
                     NSLog(@"[gge.core] Network trigger error: %@", error.localizedDescription);
-                    result = 0;
                 } else {
                     NSLog(@"[gge.core] Network permission granted.");
-                    result = 1;
                 }
-                dispatch_semaphore_signal(sem);
             }];
         [task resume];
 
-        long timeout = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-        if (timeout != 0) {
-            NSLog(@"[gge.core] Network permission request timed out.");
-        }
-        return result;
+        // 不需要阻塞主线程等待结果，因为弹窗本身是异步的
+        // 且此网络请求的成功与否（如连不上apple等）并不代表用户拒绝了权限
+        return 1;
     }
 }
 
