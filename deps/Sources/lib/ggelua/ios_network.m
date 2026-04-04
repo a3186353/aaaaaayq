@@ -19,7 +19,7 @@ static int ios_trigger_network_permission(void)
         __block int result = 0;
         dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-        NSURL *url = [NSURL URLWithString:@"http://captive.apple.com"];
+        NSURL *url = [NSURL URLWithString:@"https://captive.apple.com"];
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         config.timeoutIntervalForRequest = 5.0;
         config.timeoutIntervalForResource = 5.0;
