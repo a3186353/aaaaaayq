@@ -117,9 +117,9 @@ struct LuaDownload {
             resp.http_cb = [this, &fp, append_mode](HttpMessage* msg, http_parser_state state, const char* data, size_t size) {
                 if (cancelled.load()) return;
                 if (state == HP_HEADERS_COMPLETE) {
-                    // 断点续传安全检测：请求了 Range 但服务器返回 200（不支持），
+                    // 断点续传安全检测：请求了 Range 但服务器未返回 Content-Range 头（不支持），
                     // 需要截断文件重新写入，防止追加导致数据损坏
-                    if (append_mode && msg->status_code == 200) {
+                    if (append_mode && msg->GetHeader("Content-Range").empty()) {
                         if (fp) {
                             fclose(fp);
 #ifdef _WIN32
