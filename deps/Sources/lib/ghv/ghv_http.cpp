@@ -1,5 +1,5 @@
 /**
- * ghv_http.cpp - libhv AsyncHttpClient Lua binding
+ * ghv_http.cpp - libhv HTTP client Lua binding
  * Exports: luaopen_ghv_HttpRequests
  *
  * Usage in Lua:
@@ -7,25 +7,29 @@
  *   requests.get(url, [headers], callback)
  *   requests.head(url, [headers], callback)
  *   requests.post(url, [headers], [body], callback)
- *   -- HTTP callbacks are dispatched via ghv_poll_events() (shared event loop)
- *   -- Call requests.run() in game loop to deliver completed responses to Lua
+ *   requests.run()  -- call in game loop to deliver completed responses
  *
- * Thread model:
- *   AsyncHttpClient is constructed with ghv_shared_event_loop(), so it does NOT
- *   create its own EventLoopThread. All HTTP IO runs on the shared hloop_t,
- *   driven by hloop_process_events() in the main thread.
+ * Thread model (dual-path):
+ *   HTTP  → AsyncHttpClient on shared hloop_t (IOCP), high-performance
+ *   HTTPS → Synchronous http_client_send in a detached worker thread
  *
- *   However, AsyncHttpClient's response callbacks fire on the event loop
- *   (which IS the main thread in our polling model), but they fire during
- *   hloop_process_events() — NOT during a Lua pcall. So we still buffer
- *   responses and deliver them in l_http_run() for safe Lua callback dispatch.
+ *   Why: Windows IOCP (overlapio.c) has no SSL handshake support.
+ *   AsyncHttpClient calls hio_enable_ssl() which sets io_type to HIO_TYPE_SSL,
+ *   but IOCP's hio_write4/post_recv don't handle this type — the connection
+ *   fails silently or crashes. The synchronous path uses its own socket/SSL
+ *   state, completely independent of the event loop.
+ *
+ *   Both paths buffer results into s_http_responses (mutex-protected),
+ *   delivered to Lua callbacks in l_http_run().
  */
 #include "ghv_common.h"
 #include "AsyncHttpClient.h"
 #include "HttpMessage.h"
+#include "HttpClient.h"
 
 #include <cstring>
 #include <queue>
+#include <thread>
 
 struct HttpPendingResponse {
     int         status;
@@ -43,7 +47,7 @@ static std::vector<int> s_http_pending_refs;  // Track all outstanding callback 
 
 static void ensure_http_client() {
     if (!s_http_client) {
-        // CRITICAL FIX: Pass the shared event loop to AsyncHttpClient.
+        // Pass the shared event loop to AsyncHttpClient.
         // Without this, AsyncHttpClient(NULL) calls EventLoopThread::start()
         // which spawns a new OS thread. With a shared loop, it skips start()
         // and reuses our main-thread hloop_t driven by ghv_poll_events().
@@ -52,10 +56,44 @@ static void ensure_http_client() {
     }
 }
 
-// Internal: send async HTTP request
-static void do_http_request(lua_State* L, const char* method) {
-    ensure_http_client();
+// Check if a URL uses HTTPS scheme
+static bool is_https_url(const char* url) {
+    if (!url) return false;
+    return _strnicmp(url, "https:", 6) == 0;
+}
 
+// Post a completed response to the shared buffer (thread-safe)
+static void post_response(int cb_ref, bool has_response, int status, std::string body) {
+    HttpPendingResponse pending;
+    pending.callback_ref = cb_ref;
+    pending.has_response = has_response;
+    pending.status = status;
+    pending.body = std::move(body);
+
+    std::lock_guard<std::mutex> lock(s_http_mutex);
+    s_http_responses.push_back(std::move(pending));
+    // Remove from pending refs (it's now in responses)
+    auto& refs = s_http_pending_refs;
+    refs.erase(std::remove(refs.begin(), refs.end(), cb_ref), refs.end());
+}
+
+// HTTPS worker: synchronous HTTP client in a detached thread.
+// Uses its own socket + SSL state, completely independent of the event loop.
+// This bypasses the IOCP SSL incompatibility.
+static void https_worker(std::shared_ptr<HttpRequest> req, int cb_ref) {
+    HttpResponse resp;
+    int ret = http_client_send(req.get(), &resp);
+    if (ret == 0) {
+        post_response(cb_ref, true, resp.status_code, std::move(resp.body));
+    } else {
+        fprintf(stderr, "[ghv] HTTPS request failed: %s (ret=%d)\n",
+                req->url.c_str(), ret);
+        post_response(cb_ref, false, -1, "");
+    }
+}
+
+// Internal: send HTTP/HTTPS request with automatic path selection
+static void do_http_request(lua_State* L, const char* method) {
     const char* url = luaL_checkstring(L, 1);
 
     // Find the callback (always the last argument)
@@ -98,29 +136,24 @@ static void do_http_request(lua_State* L, const char* method) {
         s_http_pending_refs.push_back(cb_ref);
     }
 
-    // NOTE: Even though AsyncHttpClient now runs on the main thread's loop,
-    // the response callback fires inside hloop_process_events() (during IO
-    // dispatch), not during a Lua pcall. We must still buffer responses
-    // and deliver them in l_http_run() to avoid re-entrant Lua issues.
-    s_http_client->send(req, [cb_ref](const HttpResponsePtr& resp) {
-        HttpPendingResponse pending;
-        pending.callback_ref = cb_ref;
-        if (resp) {
-            pending.has_response = true;
-            pending.status = resp->status_code;
-            pending.body = std::move(resp->body);  // C++17 move: 消除深拷贝
-        } else {
-            pending.has_response = false;
-            pending.status = -1;
-        }
-        // Lock is still needed: although callback and l_http_run both run on
-        // main thread, they run in different phases of the event loop tick.
-        std::lock_guard<std::mutex> lock(s_http_mutex);
-        s_http_responses.push_back(std::move(pending));
-        // Remove from pending refs (it's now in responses)
-        auto& refs = s_http_pending_refs;
-        refs.erase(std::remove(refs.begin(), refs.end(), cb_ref), refs.end());
-    });
+    if (is_https_url(url)) {
+        // ===== HTTPS path: synchronous client in worker thread =====
+        // Windows IOCP (overlapio.c) cannot do SSL handshake.
+        // Use the synchronous http_client_send which manages its own
+        // socket + OpenSSL state, completely independent of hloop_t.
+        std::thread(https_worker, req, cb_ref).detach();
+    } else {
+        // ===== HTTP path: AsyncHttpClient on shared event loop =====
+        ensure_http_client();
+        s_http_client->send(req, [cb_ref](const HttpResponsePtr& resp) {
+            if (resp) {
+                post_response(cb_ref, true, resp->status_code,
+                              std::move(resp->body));
+            } else {
+                post_response(cb_ref, false, -1, "");
+            }
+        });
+    }
 }
 
 // requests.get(url, [headers], callback)
@@ -202,19 +235,9 @@ static int l_http_cleanup_gc(lua_State* L) {
         }
         s_http_pending_refs.clear();
     }
-    // CRITICAL FIX: Do NOT delete s_http_client here.
-    // AsyncHttpClient now shares the global event loop (ghv_shared_event_loop).
-    // Deleting it would call EventLoopThread::stop() which would stop the
-    // shared loop, breaking ALL other users (TcpClient, TcpServer).
-    //
-    // The old code deleted and re-created s_http_client each time the Lua
-    // state was closed/reopened, which caused EventLoopThread leaks because
-    // each new AsyncHttpClient() without a loop would spawn a new thread.
-    //
-    // With shared loop, the client has no thread to leak. Its channels and
-    // connection pools are harmless and will be cleaned up at process exit.
-    // If we need a clean slate (e.g., for hot-reload), we just clear the
-    // pending responses above — the client itself can be safely reused.
+    // Do NOT delete s_http_client here.
+    // AsyncHttpClient shares the global event loop (ghv_shared_event_loop).
+    // Deleting it would call EventLoopThread::stop() which breaks all IO.
     return 0;
 }
 

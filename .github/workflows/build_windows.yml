@@ -2,12 +2,12 @@ name: Build Windows DLLs
 
 on:
   push:
-    branches: [ main, master, trae ]
+    branches: [ main, master, trae, 实验室 ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_windows.yml'
   pull_request:
-    branches: [ main, master, trae ]
+    branches: [ main, master, trae, 实验室 ]
     paths:
       - 'deps/**'
   workflow_dispatch:
@@ -23,6 +23,7 @@ on:
 
 env:
   SOLUTION_FILE: deps/Projects/windows/Windows.sln
+  OPENSSL_VER: "3.6.1"
 
 jobs:
   build-windows:
@@ -63,6 +64,66 @@ jobs:
         # 验证
         Test-Path "deps\Projects\windows\Dependencies\libhv\hconfig.h"
         Test-Path "deps\Projects\windows\Sources\lib\ggelua\main.c"
+
+    # ── OpenSSL 静态编译 (去除 DLL 依赖) ──
+    - name: Setup NASM
+      uses: ilammy/setup-nasm@v1
+
+    - name: Cache OpenSSL (x64 static)
+      uses: actions/cache@v4
+      id: openssl-cache
+      with:
+        path: openssl-win-x64
+        key: openssl-${{ env.OPENSSL_VER }}-win-x64-static-mt-v1
+
+    - name: Build OpenSSL ${{ env.OPENSSL_VER }} (static /MT)
+      if: steps.openssl-cache.outputs.cache-hit != 'true'
+      shell: cmd
+      run: |
+        curl -sL "https://github.com/openssl/openssl/releases/download/openssl-%OPENSSL_VER%/openssl-%OPENSSL_VER%.tar.gz" -o openssl.tar.gz
+        tar xzf openssl.tar.gz
+        cd openssl-%OPENSSL_VER%
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" amd64
+        perl Configure VC-WIN64A no-shared no-tests no-apps no-docs ^
+          no-ssl3 no-comp no-engine no-deprecated ^
+          --prefix=%cd%\..\openssl-win-x64 ^
+          --openssldir=%cd%\..\openssl-win-x64\ssl
+        nmake build_libs
+        nmake install_dev DESTDIR=""
+        echo === OpenSSL %OPENSSL_VER% static x64 ===
+        dir /b ..\openssl-win-x64\lib\*.lib
+
+    - name: Replace OpenSSL libs (dynamic → static)
+      shell: pwsh
+      run: |
+        $depsLib = "deps/Dependencies/openssl/lib"
+        $staticLib = "openssl-win-x64/lib"
+
+        # 备份旧导入库
+        foreach ($name in @("libcrypto.lib", "libssl.lib")) {
+          $old = "$depsLib/$name"
+          if (Test-Path $old) {
+            $oldSize = (Get-Item $old).Length
+            Write-Host "  旧 $name : $([math]::Round($oldSize/1KB,1)) KB (导入库)"
+          }
+        }
+
+        # 复制静态库
+        Copy-Item "$staticLib/libcrypto.lib" -Destination $depsLib -Force
+        Copy-Item "$staticLib/libssl.lib"    -Destination $depsLib -Force
+
+        foreach ($name in @("libcrypto.lib", "libssl.lib")) {
+          $f = Get-Item "$depsLib/$name"
+          $sizeKB = [math]::Round($f.Length/1KB, 1)
+          Write-Host "  ✅ $name : $sizeKB KB (静态库)"
+        }
+
+        # 复制头文件 (确保版本一致)
+        $depsInc = "deps/Dependencies/openssl/include"
+        if (Test-Path "openssl-win-x64/include/openssl") {
+          Copy-Item "openssl-win-x64/include/openssl/*" -Destination "$depsInc/openssl/" -Force -Recurse
+          Write-Host "  ✅ OpenSSL 头文件已更新"
+        }
 
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh

@@ -2,12 +2,12 @@ name: Build Android APK Template
 
 on:
   push:
-    branches: [ main, master, trae ]
+    branches: [ main, master, trae, 实验室 ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_android.yml'
   pull_request:
-    branches: [ main, master, trae ]
+    branches: [ main, master, trae, 实验室 ]
     paths:
       - 'deps/**'
   workflow_dispatch:
@@ -105,13 +105,16 @@ jobs:
 
         if [ -f "${OPENSSL_INSTALL}/lib/libcrypto.a" ]; then
           CRYPTO_LIB="${OPENSSL_INSTALL}/lib/libcrypto.a"
+          SSL_LIB="${OPENSSL_INSTALL}/lib/libssl.a"
         elif [ -f "${OPENSSL_INSTALL}/lib64/libcrypto.a" ]; then
           CRYPTO_LIB="${OPENSSL_INSTALL}/lib64/libcrypto.a"
+          SSL_LIB="${OPENSSL_INSTALL}/lib64/libssl.a"
         else
           echo "::error::libcrypto.a not found in ${OPENSSL_INSTALL}"
           exit 1
         fi
         echo "Using libcrypto.a: ${CRYPTO_LIB}"
+        echo "Using libssl.a: ${SSL_LIB}"
 
         # 预编译 SDL .so 路径 (用于正确生成 DT_NEEDED 依赖)
         SDL_PREBUILT="${{ github.workspace }}/${{ env.GRADLE_PROJECT_DIR }}/app/src/main/jniLibs/${{ matrix.abi }}"
@@ -123,6 +126,7 @@ jobs:
           -DANDROID_PLATFORM=android-24 \
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} \
           -DOPENSSL_CRYPTO_LIB="${CRYPTO_LIB}" \
+          -DOPENSSL_SSL_LIB="${SSL_LIB}" \
           -DPREBUILT_SDL_DIR="${SDL_PREBUILT}" \
           -DCMAKE_INSTALL_PREFIX=install-android \
           -G Ninja

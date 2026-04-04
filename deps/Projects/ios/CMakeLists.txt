@@ -114,7 +114,7 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/util/md5.c"
     "${LIBHV_DIR}/util/sha1.c"
     # ssl stub
-    "${LIBHV_DIR}/ssl/nossl.c"
+    "${LIBHV_DIR}/ssl/openssl.c"
     "${LIBHV_DIR}/ssl/hssl.c"
 )
 add_library(libhv STATIC ${LIBHV_SOURCES})
@@ -132,7 +132,7 @@ target_include_directories(libhv PUBLIC
 )
 target_compile_definitions(libhv PUBLIC
     HV_STATICLIB
-    HV_WITHOUT_SSL   # SSL 由 ghv_crypto 直接使用 OpenSSL，不走 libhv SSL 层
+    WITH_OPENSSL      # SSL 设置
     EVENT_KQUEUE      # iOS/macOS 使用 kqueue
 )
 
@@ -170,14 +170,23 @@ target_link_libraries(ghv PUBLIC lua54 libhv)
 # iOS 交叉编译的 libcrypto.a 路径，可通过 cmake 参数覆盖：
 #   -DOPENSSL_CRYPTO_LIB=/path/to/ios/libcrypto.a
 set(OPENSSL_CRYPTO_LIB "${DEPS_DIR}/openssl/ios/lib/libcrypto.a"
-    CACHE FILEPATH "Path to iOS cross-compiled libcrypto.a")
+    CACHE FILEPATH "Path to iOS cross-compiled libcrypto.a (required for AEAD + SSL)")
+set(OPENSSL_SSL_LIB "${DEPS_DIR}/openssl/ios/lib/libssl.a"
+    CACHE FILEPATH "Path to iOS cross-compiled libssl.a (required for HTTPS)")
 if(EXISTS "${OPENSSL_CRYPTO_LIB}")
     target_link_libraries(ghv PRIVATE "${OPENSSL_CRYPTO_LIB}")
-    message(STATUS "[ghv] 链接 OpenSSL: ${OPENSSL_CRYPTO_LIB}")
+    message(STATUS "[ghv] 链接 OpenSSL Crypto: ${OPENSSL_CRYPTO_LIB}")
 else()
     message(WARNING "[ghv] libcrypto.a 未找到: ${OPENSSL_CRYPTO_LIB}\n"
-                    "  ghv_crypto.cpp 将编译但最终链接时需要提供 libcrypto.a\n"
                     "  使用 -DOPENSSL_CRYPTO_LIB=<path> 指定路径")
+endif()
+if(EXISTS "${OPENSSL_SSL_LIB}")
+    target_link_libraries(ghv PRIVATE "${OPENSSL_SSL_LIB}")
+    message(STATUS "[ghv] 链接 OpenSSL SSL: ${OPENSSL_SSL_LIB}")
+else()
+    message(WARNING "[ghv] libssl.a 未找到: ${OPENSSL_SSL_LIB}\n"
+                    "  HTTPS 功能将不可用\n"
+                    "  使用 -DOPENSSL_SSL_LIB=<path> 指定路径")
 endif()
 
 # ============================================================================

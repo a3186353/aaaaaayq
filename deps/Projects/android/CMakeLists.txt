@@ -172,7 +172,7 @@ set(LIBHV_SOURCES
     "${LIBHV_DIR}/util/base64.c"
     "${LIBHV_DIR}/util/md5.c"
     "${LIBHV_DIR}/util/sha1.c"
-    "${LIBHV_DIR}/ssl/nossl.c"
+    "${LIBHV_DIR}/ssl/openssl.c"
     "${LIBHV_DIR}/ssl/hssl.c"
 )
 add_library(libhv STATIC ${LIBHV_SOURCES})
@@ -182,7 +182,7 @@ target_include_directories(libhv PUBLIC
     "${LIBHV_DIR}/http/server" "${LIBHV_DIR}/ssl"
     "${LIBHV_DIR}/cpputil" "${LIBHV_DIR}/util"
 )
-target_compile_definitions(libhv PUBLIC HV_STATICLIB HV_WITHOUT_SSL EVENT_EPOLL)
+target_compile_definitions(libhv PUBLIC HV_STATICLIB WITH_OPENSSL EVENT_EPOLL)
 set_target_properties(libhv PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ============================================================================
@@ -205,16 +205,26 @@ target_include_directories(ghv PRIVATE
 target_link_libraries(ghv PUBLIC lua54 libhv)
 set_target_properties(ghv PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-set(OPENSSL_CRYPTO_LIB "" CACHE FILEPATH "Path to Android libcrypto.a (required for AEAD)")
+set(OPENSSL_CRYPTO_LIB "" CACHE FILEPATH "Path to Android libcrypto.a (required for AEAD + SSL)")
+set(OPENSSL_SSL_LIB    "" CACHE FILEPATH "Path to Android libssl.a (required for HTTPS)")
 if(OPENSSL_CRYPTO_LIB AND EXISTS "${OPENSSL_CRYPTO_LIB}")
     target_link_libraries(ghv PRIVATE "${OPENSSL_CRYPTO_LIB}")
-    message(STATUS "[ghv] 链接 OpenSSL: ${OPENSSL_CRYPTO_LIB}")
+    message(STATUS "[ghv] 链接 libcrypto: ${OPENSSL_CRYPTO_LIB}")
 else()
     message(FATAL_ERROR
         "[ghv] libcrypto.a 未找到: '${OPENSSL_CRYPTO_LIB}'\n"
         "  ghv_crypto.cpp 依赖 OpenSSL 3.x (EVP_CIPHER_fetch 等符号)\n"
         "  请使用 -DOPENSSL_CRYPTO_LIB=<path> 指定 libcrypto.a 路径\n"
         "  CI 环境: 参考 build_android.yml 中的 OpenSSL 交叉编译步骤")
+endif()
+if(OPENSSL_SSL_LIB AND EXISTS "${OPENSSL_SSL_LIB}")
+    target_link_libraries(ghv PRIVATE "${OPENSSL_SSL_LIB}")
+    message(STATUS "[ghv] 链接 libssl: ${OPENSSL_SSL_LIB}")
+else()
+    message(WARNING
+        "[ghv] libssl.a 未找到: '${OPENSSL_SSL_LIB}'\n"
+        "  HTTPS 功能将不可用 (充值等需要 HTTPS 的功能)\n"
+        "  请使用 -DOPENSSL_SSL_LIB=<path> 指定 libssl.a 路径")
 endif()
 
 # ============================================================================

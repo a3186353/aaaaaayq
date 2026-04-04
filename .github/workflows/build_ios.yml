@@ -2,12 +2,12 @@ name: Build iOS Dynamic Frameworks
 
 on:
   push:
-    branches: [ main, master, trae, 引擎升级 ]
+    branches: [ main, master, trae, 引擎升级, 实验室 ]
     paths:
       - 'deps/**'
       - '.github/workflows/build_ios.yml'
   pull_request:
-    branches: [ main, master, trae, 引擎升级 ]
+    branches: [ main, master, trae, 引擎升级, 实验室 ]
     paths:
       - 'deps/**'
   workflow_dispatch:
@@ -81,16 +81,19 @@ jobs:
         IOS_DIR="${{ github.workspace }}/${{ env.IOS_PROJECT_DIR }}"
         OPENSSL_INSTALL="${{ github.workspace }}/openssl-ios-iphoneos"
 
-        # 定位 libcrypto.a
+        # 定位 libcrypto.a 和 libssl.a
         if [ -f "${OPENSSL_INSTALL}/lib/libcrypto.a" ]; then
           CRYPTO_LIB="${OPENSSL_INSTALL}/lib/libcrypto.a"
+          SSL_LIB="${OPENSSL_INSTALL}/lib/libssl.a"
         elif [ -f "${OPENSSL_INSTALL}/lib64/libcrypto.a" ]; then
           CRYPTO_LIB="${OPENSSL_INSTALL}/lib64/libcrypto.a"
+          SSL_LIB="${OPENSSL_INSTALL}/lib64/libssl.a"
         else
           echo "::error::libcrypto.a not found in OpenSSL install directory"
           exit 1
         fi
         echo "Using libcrypto.a: ${CRYPTO_LIB}"
+        echo "Using libssl.a: ${SSL_LIB}"
 
         cmake -G Xcode \
           -B "${IOS_DIR}/build-iphoneos" \
@@ -98,6 +101,7 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE="${IOS_DIR}/ios.toolchain.cmake" \
           -DIOS_PLATFORM=OS \
           -DOPENSSL_CRYPTO_LIB="${CRYPTO_LIB}" \
+          -DOPENSSL_SSL_LIB="${SSL_LIB}" \
           -DOPENSSL_ROOT_DIR="${OPENSSL_INSTALL}" \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
