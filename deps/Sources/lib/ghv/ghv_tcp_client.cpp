@@ -365,28 +365,11 @@ static int l_tcp_client_connect(lua_State* L) {
 }
 
 // hv:disconnect()
-// NOTE: Do NOT release self_ref here! closesocket() is async — the
-// onConnection close callback will fire during the next hloop_process_events
-// and release self_ref there. Releasing here would allow GC to collect the
-// userdata before the async close completes, causing use-after-free.
-//
-// CRITICAL: Use queueInLoop (via eventfd) instead of setTimeout/runInLoop.
-// In the single-thread polling model, runInLoop() directly executes lambdas
-// (same thread + kRunning), and setTimeout(1ms) timers can fire in the SAME
-// hloop_process_events iteration during the timer phase. Only queueInLoop
-// guarantees execution in the NEXT iteration (via eventfd socketpair IO).
 static int l_tcp_client_disconnect(lua_State* L) {
     LuaTcpClient* self = check_tcp_client(L);
     if (self->client) {
         self->connected = false;
-        // Capture shared_ptr by value to keep TcpClientEventLoopTmpl alive
-        // until the deferred closesocket executes next iteration.
-        auto client = self->client;
-        client->loop()->queueInLoop([client]() {
-            if (client) {
-                client->closesocket();
-            }
-        });
+        self->client->closesocket();
     }
     return 0;
 }
