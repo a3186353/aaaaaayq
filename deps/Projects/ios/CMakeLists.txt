@@ -312,8 +312,7 @@ target_include_directories(mygxy PRIVATE
     "${MYGXY_SRC_DIR}"
     "${SDL_INCLUDE_DIR}"            # sdl_proxy.h → SDL.h
     "${DEPS_DIR}/SDL_image"         # sdl_proxy.h → SDL_image.h
-    "${DEPS_DIR}/SDL_image/external/libwebp-1.3.2"       # webp/decode.h
-    "${DEPS_DIR}/SDL_image/external/libwebp-1.3.2/src"   # webp 内部头文件
+    "${DEPS_DIR}/SDL_image/external/libwebp-1.3.2/src"   # webp/decode.h (decode.h 在 src/webp/ 下)
     "${DEPS_DIR}/zstd"
     "${DEPS_DIR}/zstd/common"
     "${DEPS_DIR}/lz4"
@@ -322,7 +321,8 @@ target_include_directories(mygxy PRIVATE
     "${ENGINE_ROOT}/external/vgmstream/src"   # libvgmstream.h (FSB 解码)
 )
 # 链接 zlib 静态库（不再内联 zlib 源文件，避免重复符号）
-target_link_libraries(mygxy PUBLIC lua54 zlib PRIVATE webp)
+# webp 使用 PUBLIC 链接，确保 webp target 的 PUBLIC include (src/) 传播到 mygxy
+target_link_libraries(mygxy PUBLIC lua54 zlib webp)
 target_compile_definitions(mygxy PRIVATE
     ZSTD_DISABLE_ASM=1  # iOS ARM64 禁用内联汇编，使用纯 C 实现
 )
