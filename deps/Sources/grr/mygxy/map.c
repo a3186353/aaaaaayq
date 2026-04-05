@@ -98,7 +98,7 @@ static size_t SDLCALL MAP_MemRW_Write(SDL_RWops* context, const void* ptr, size_
 
 static int SDLCALL MAP_MemRW_Close(SDL_RWops* context)
 {
-    free(context);
+    SDL_free(context);
     return 0;
 }
 
@@ -107,7 +107,7 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     if (!mem)
         return NULL;
 
-    MAP_MemRW* m = (MAP_MemRW*)malloc(sizeof(MAP_MemRW));
+    MAP_MemRW* m = (MAP_MemRW*)SDL_malloc(sizeof(MAP_MemRW));
     if (!m)
         return NULL;
 
@@ -123,133 +123,116 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     m->rw.close = MAP_MemRW_Close;
     return &m->rw;
 }
-//恢复普通jpg
-static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbuf)
+//恢复普通jpg（云风特殊编码 → 标准 JPEG）
+// 处理原理:
+//   1. 复制 FFD8 SOI
+//   2. 删除 FFA0 自定义标记
+//   3. 正确跳过所有标准 Marker（包括 APP0/APP1 等）
+//   4. 修改 FFDA(SOS) 长度 0009→000C，追加 00 3F 00
+//   5. 熵编码段中的原始 0xFF 转义为 FF00
+//   6. 输出标准 FFD9 结尾
+static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbuf, Uint32 outmax)
 {
-    // JPEG数据处理原理
-    // 1、复制D8到D9的数据到缓冲区中
-    // 2、删除第3、4个字节 FFA0
-    // 3、修改FFDA的长度00 09 为 00 0C
-    // 4、在FFDA数据的最后添加00 3F 00
-    // 5、替换FFDA到FF D9之间的FF数据为FF 00
-    Uint32 TempNum = 0;   // 临时变量，表示已读取的长度
-    Uint16 TempTimes = 0; // 临时变量，表示循环的次数
-    Uint32 outsize = 0;
-    int i = 0;
-    // 当已读取数据的长度小于总长度时继续
-    while (TempNum < insize && *inbuf++ == 0xFF)
+    if (insize < 4 || outmax < 8)
+        return 0;
+
+    unsigned char* ip     = inbuf;
+    unsigned char* ip_end = inbuf + insize;
+    unsigned char* op     = outbuf;
+    unsigned char* op_end = outbuf + outmax;
+
+    /* ---------- 1. SOI (FFD8) ---------- */
+    if (ip[0] != 0xFF || ip[1] != 0xD8)
+        return 0;
+    *op++ = 0xFF; *op++ = 0xD8;
+    ip += 2;
+
+    /* ---------- 2. 跳过 FFA0 ---------- */
+    if (ip + 2 <= ip_end && ip[0] == 0xFF && ip[1] == 0xA0)
+        ip += 2;
+
+    /* ---------- 3. 遍历 Marker ---------- */
+    while (ip + 2 <= ip_end && op + 2 <= op_end)
     {
-        *outbuf++ = 0xFF;
-        TempNum++;
-        switch (*inbuf)
-        {
-        case 0xD8:
-            *outbuf++ = 0xD8;
-            inbuf++;
-            TempNum++;
-            break;
-        case 0xA0:
-            inbuf++;
-            outbuf--;
-            TempNum++;
-            break;
-        case 0xC0:
-            *outbuf++ = 0xC0;
-            inbuf++;
-            TempNum++;
+        if (ip[0] != 0xFF)
+            break; /* 非 Marker 前缀，数据异常 */
 
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
+        Uint8 marker = ip[1];
+        ip += 2;
 
-            for (i = 0; i < TempTimes; i++)
-            {
-                *outbuf++ = *inbuf++;
-                TempNum++;
-            }
-
-            break;
-        case 0xC4:
-            *outbuf++ = 0xC4;
-            inbuf++;
-            TempNum++;
-
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
-
-            for (i = 0; i < TempTimes; i++)
-            {
-                *outbuf++ = *inbuf++;
-                TempNum++;
-            }
-            break;
-        case 0xDB:
-            *outbuf++ = 0xDB;
-            inbuf++;
-            TempNum++;
-
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
-
-            for (i = 0; i < TempTimes; i++)
-            {
-                *outbuf++ = *inbuf++;
-                TempNum++;
-            }
-            break;
-        case 0xDA:
-            *outbuf++ = 0xDA;
-            *outbuf++ = 0x00;
-            *outbuf++ = 0x0C;
-            inbuf++;
-            TempNum++;
-
-            TempTimes = SDL_SwapBE16(*(Uint16*)inbuf); // 将长度转换为Intel顺序
-            inbuf++;
-            TempNum++;
-            inbuf++;
-
-            for (i = 2; i < TempTimes; i++)
-            {
-                *outbuf++ = *inbuf++;
-                TempNum++;
-            }
-            *outbuf++ = 0x00;
-            *outbuf++ = 0x3F;
-            *outbuf++ = 0x00;
-            outsize += 1; // 这里应该是+3的，因为前面的0xFFA0没有-2，所以这里只+1。
-
-            // 循环处理0xFFDA到0xFFD9之间所有的0xFF替换为0xFF00
-            for (; TempNum < insize - 2;)
-            {
-                if (*inbuf == 0xFF)
-                {
-                    *outbuf++ = 0xFF;
-                    *outbuf++ = 0x00;
-                    inbuf++;
-                    TempNum++;
-                    outsize++;
-                }
-                else
-                {
-                    *outbuf++ = *inbuf++;
-                    TempNum++;
-                }
-            }
-            // 直接在这里写上了0xFFD9结束Jpeg图片.
-            outsize--; // 这里多了一个字节，所以减去。
-            outbuf--;
-            *outbuf-- = 0xD9;
-
-            break;
-        case 0xD9:
-            // 算法问题，这里不会被执行，但结果一样。
-            *outbuf++ = 0xD9;
-            TempNum++;
-            break;
-        default:
-            break;
+        /* EOI */
+        if (marker == 0xD9) {
+            *op++ = 0xFF; *op++ = 0xD9;
+            return (Uint32)(op - outbuf);
         }
-    }
-    outsize += insize;
 
-    return outsize;
+        /* SOS (FFDA) — 进入熵编码段 */
+        if (marker == 0xDA) {
+            if (ip + 2 > ip_end) break;
+            Uint16 orig_len = ((Uint16)ip[0] << 8) | ip[1];
+            if (orig_len < 2) break;
+
+            /* 写 FFDA + 新长度 000C */
+            if (op + 4 > op_end) break;
+            *op++ = 0xFF; *op++ = 0xDA;
+            *op++ = 0x00; *op++ = 0x0C;
+            ip += 2; /* 跳过原始长度 */
+
+            /* 复制 SOS 头剩余字节 */
+            Uint16 hdr_remain = orig_len - 2;
+            if (ip + hdr_remain > ip_end)
+                hdr_remain = (Uint16)(ip_end - ip);
+            if (op + hdr_remain > op_end)
+                hdr_remain = (Uint16)(op_end - op);
+            SDL_memcpy(op, ip, hdr_remain);
+            op += hdr_remain;
+            ip += hdr_remain;
+
+            /* 追加 00 3F 00 */
+            if (op + 3 > op_end) break;
+            *op++ = 0x00; *op++ = 0x3F; *op++ = 0x00;
+
+            /* 熵编码段：输入的最后 2 字节是 FFD9，不参与转义 */
+            unsigned char* ent_end = ip_end - 2;
+            if (ent_end < ip) ent_end = ip;
+
+            while (ip < ent_end && op + 2 <= op_end) {
+                if (*ip == 0xFF) {
+                    *op++ = 0xFF;
+                    *op++ = 0x00; /* byte-stuff */
+                    ip++;
+                } else {
+                    *op++ = *ip++;
+                }
+            }
+
+            /* 写结束标记 FFD9 */
+            if (op + 2 <= op_end) {
+                *op++ = 0xFF; *op++ = 0xD9;
+            }
+            return (Uint32)(op - outbuf);
+        }
+
+        /* 所有其他 Marker（FFC0/FFC4/FFDB/FFE0/FFE1…）：读长度，整段复制 */
+        if (ip + 2 > ip_end) break;
+        Uint16 seg_len = ((Uint16)ip[0] << 8) | ip[1];
+        if (seg_len < 2) break;
+        if (ip + seg_len > ip_end)
+            seg_len = (Uint16)(ip_end - ip);
+        if (op + 2 + seg_len > op_end) break;
+
+        *op++ = 0xFF;
+        *op++ = marker;
+        SDL_memcpy(op, ip, seg_len);
+        op += seg_len;
+        ip += seg_len;
+    }
+
+    /* 异常退出兜底：确保输出至少是合法的 JPEG 空壳 */
+    if (op + 2 <= op_end && (Uint32)(op - outbuf) > 2) {
+        *op++ = 0xFF; *op++ = 0xD9;
+    }
+    return (Uint32)(op - outbuf);
 }
 //解压遮罩数据
 static int _lzodecompress(void* in, void* out)
@@ -498,7 +481,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem)
                     if (!(mem1 = _getmem(&m[1], outmax))) {
                         return 0;
                     }
-                    info.size = _fixjpeg(mem0, info.size, mem1);
+                    info.size = _fixjpeg(mem0, info.size, mem1, outmax);
                     mem0 = mem1;
                 }//大话普通
             }
@@ -519,7 +502,27 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem)
                     if ((mem1 = _getmem(&m[1], info.size)) && ujGetImage(img, mem1)) {
                         //!ujIsColor(img)  P5灰度？
                         sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 24, SDL_PIXELFORMAT_RGB24);
-                        SDL_memcpy(sf->pixels, mem1, info.size);
+                        if (sf) {
+                            int w = ujGetWidth(img);
+                            int h = ujGetHeight(img);
+                            if (w > 320) w = 320;
+                            if (h > 240) h = 240;
+
+                            Uint8* src = (Uint8*)mem1;
+                            Uint8* dst = (Uint8*)sf->pixels;
+
+                            if (!ujIsColor(img)) {
+                                size_t px_count = (size_t)w * h;
+                                for (size_t p = 0; p < px_count; p++) {
+                                    Uint8 g = src[p];
+                                    *dst++ = g; *dst++ = g; *dst++ = g;
+                                }
+                            } else {
+                                for (int y = 0; y < h; y++) {
+                                    SDL_memcpy(dst + y * sf->pitch, src + y * w * 3, w * 3);
+                                }
+                            }
+                        }
                     }
                     ujFree(img);
                 }
@@ -717,7 +720,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
     }
 
     *mask = masklist;
-    *num = masknum;
+    *num = i;
     return 1;
 }
 //取遮罩透明数据（tmem: 临时缓冲区，传 NULL 使用 ud->mem）
@@ -805,6 +808,10 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
     //}
 
     SDL_Surface* msf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, rect->w, rect->h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!msf) {
+        SDL_free(alpha);
+        return 0;
+    }
     //SDL_SetSurfaceBlendMode(msf, SDL_BLENDMODE_BLEND);
 
     //从地表扣图
@@ -859,6 +866,10 @@ static int _getmasksf2(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tm
         return 0;
 
     SDL_Surface* msf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, rect->w, rect->h, 8, SDL_PIXELFORMAT_INDEX8);
+    if (!msf) {
+        SDL_free(alpha);
+        return 0;
+    }
     SDL_Palette* palette = msf->format->palette;
     palette->colors[0].r = 255;
     palette->colors[0].g = 0;
@@ -1010,19 +1021,21 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
                 if (map)
                 {
                     map->loading = 0;
+                    Uint32 saved_masknum = map->masknum;
                     if (map->mask)
                     {
                         SDL_free(map->mask);
                         map->mask = NULL;
                         map->masknum = 0;
                     }
-                }
-                if (mask_sfs)
-                {
-                    for (Uint32 i = 0; map && i < map->masknum; i++) {
-                        if (mask_sfs[i]) SDL_FreeSurface(mask_sfs[i]);
+                    if (mask_sfs)
+                    {
+                        for (Uint32 i = 0; i < saved_masknum; i++) {
+                            if (mask_sfs[i]) SDL_FreeSurface(mask_sfs[i]);
+                        }
+                        SDL_free(mask_sfs);
+                        mask_sfs = NULL;
                     }
-                    SDL_free(mask_sfs);
                 }
                 if (time->type == TIME_TYPE_MAPFULL) SDL_free(time->data);
             }
@@ -1130,6 +1143,7 @@ static int LUA_Run(lua_State* L)
                 lua_call(L, 2, 0);
             }
 
+            Uint32 saved_masknum = map->masknum;
             if (map->mask)
             {
                 SDL_free(map->mask);
@@ -1138,7 +1152,7 @@ static int LUA_Run(lua_State* L)
             }
             if (fm) {
                 if (fm->mask_sfs) {
-                    for (Uint32 i = 0; i < map->masknum; i++) {
+                    for (Uint32 i = 0; i < saved_masknum; i++) {
                          if (fm->mask_sfs[i]) SDL_FreeSurface(fm->mask_sfs[i]);
                     }
                     SDL_free(fm->mask_sfs);
@@ -1781,7 +1795,7 @@ static int MAP_NEW(lua_State* L)
         goto openerr;
 
     //遮罩部分
-    if (head.flag == 'M1.0') {
+    if (head.flag == MAP_FLAG_M10) {
         Uint32 maskoffset;
         if (SDL_RWread(rw, &maskoffset, sizeof(Uint32), 1) != 1)
             goto openerr;
@@ -1961,6 +1975,20 @@ static int LUA_Clear(lua_State* L)
                     if (mask->sf)
                         SDL_FreeSurface(mask->sf);
                     SDL_free(mask);
+                }
+            }
+            else if (time->type == TIME_TYPE_MAPFULL)
+            {
+                MAPFULL_Data* fm = (MAPFULL_Data*)time->data;
+                if (fm) {
+                    if (fm->mask_sfs) {
+                        Uint32 masknum = fm->map ? fm->map->masknum : 0;
+                        for (Uint32 i = 0; i < masknum; i++) {
+                            if (fm->mask_sfs[i]) SDL_FreeSurface(fm->mask_sfs[i]);
+                        }
+                        SDL_free(fm->mask_sfs);
+                    }
+                    SDL_free(fm);
                 }
             }
             SDL_free(time);

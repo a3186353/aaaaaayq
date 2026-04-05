@@ -590,6 +590,10 @@ static int l_tcp_server_derive_and_encrypt(lua_State* L) {
 
     session->crypto.SetSessionKey(session_key, GHV_KEY_SIZE);
     OPENSSL_cleanse(session_key, sizeof(session_key));
+
+    // 禁用该连接的 libhv unpack — 加密模式由 C++ 手动拆帧接管
+    channel->setUnpack(nullptr);
+
     session->state = ConnectionSecurityState::Encrypted;
     session->send_seq = 0;
     session->replay_window.Reset();
