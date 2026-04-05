@@ -1160,7 +1160,13 @@ static int LUA_Run(lua_State* L)
 
             if (!map->sf)
             {
-                lua_pop(L, 1);
+                if (lua_isfunction(L, -1)) {
+                    lua_pushnil(L);
+                    lua_pushnil(L);
+                    lua_pcall(L, 2, 0, 0);
+                } else {
+                    lua_pop(L, 1);
+                }
             }
             else
             {
@@ -1235,7 +1241,12 @@ static int LUA_Run(lua_State* L)
             MASK_Data* mask = (MASK_Data*)time->data;
             if (!mask->sf)
             {
-                lua_pop(L, 1);
+                if (lua_isfunction(L, -1)) {
+                    lua_pushnil(L);
+                    lua_pcall(L, 1, 0, 0);
+                } else {
+                    lua_pop(L, 1);
+                }
             }
             else
             {
