@@ -9,6 +9,7 @@
 #include "SDL_log.h"
 #include "SDL_system.h"
 #include "SDL_platform.h"
+#include "SDL_filesystem.h"
 #ifdef _WIN32
 #include "windows.h"
 #endif
