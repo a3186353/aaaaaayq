@@ -124,6 +124,11 @@ static int l_tcp_client_connect(lua_State* L) {
     const char* ip = luaL_checkstring(L, 2);
     int port = static_cast<int>(luaL_checkinteger(L, 3));
 
+    // Apply unpack setting to the base client to enable native TCP defragmentation
+    if (self->unpack) {
+        self->client->setUnpack(self->unpack.get());
+    }
+
     // Clean up old connection if one exists
     if (self->connected) {
         self->client->closesocket();
@@ -633,6 +638,35 @@ static int l_tcp_client_setcb_heartbeat(lua_State* L) {
     return 0;
 }
 
+// ============================================================
+// Ed25519 (防 MITM)
+// ============================================================
+
+// hv:ed25519Verify(msg, sig_64bytes, pub_key_32bytes) -> boolean
+static int l_tcp_client_ed25519_verify(lua_State* L) {
+    size_t msg_len = 0;
+    const char* msg = luaL_checklstring(L, 2, &msg_len);
+    size_t sig_len = 0;
+    const char* sig = luaL_checklstring(L, 3, &sig_len);
+    size_t pub_len = 0;
+    const char* pub = luaL_checklstring(L, 4, &pub_len);
+
+    if (sig_len != 64) return luaL_error(L, "Ed25519 signature must be exactly 64 bytes");
+    if (pub_len != 32) return luaL_error(L, "Ed25519 public key must be exactly 32 bytes");
+
+#ifndef GHV_NO_CRYPTO
+    bool ok = KeyExchange::Ed25519Verify(
+        reinterpret_cast<const uint8_t*>(msg), msg_len,
+        reinterpret_cast<const uint8_t*>(sig), 
+        reinterpret_cast<const uint8_t*>(pub));
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+#else
+    lua_pushboolean(L, 0);
+    return 1;
+#endif
+}
+
 // hv:run() -- called from main thread each frame, non-blocking poll
 static int l_tcp_client_run(lua_State* L) {
     ghv_poll_events();
@@ -718,6 +752,7 @@ GHV_EXPORT int luaopen_ghv_TcpClient(lua_State* L)
         {"clearEncryption",    l_tcp_client_clear_encryption},
         {"generateKeyPair",    l_tcp_client_generate_key_pair},   // ECDH: 生成公钥
         {"deriveAndEncrypt",   l_tcp_client_derive_and_encrypt},  // ECDH: 协商+加密
+        {"ed25519Verify",      l_tcp_client_ed25519_verify},      // 防 MITM 验签
         {"setReconnect",       l_tcp_client_set_reconnect},
         {"withSSL",            l_tcp_client_with_ssl},
         {"setHeartbeat",        l_tcp_client_set_heartbeat},       // M3: 心跳间隔

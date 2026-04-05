@@ -620,6 +620,44 @@ static int l_tcp_server_run(lua_State* L) {
     return 0;
 }
 
+// ============================================================
+// Ed25519 (防 MITM)
+// ============================================================
+
+// hv:ed25519Sign(msg, priv_key_32bytes) -> sig_64bytes
+static int l_tcp_server_ed25519_sign(lua_State* L) {
+    // 允许不传递 self 也可以当静态方法调用，但鉴于冒号语法，这里假定 1 是 self
+    size_t msg_len = 0;
+    const char* msg = luaL_checklstring(L, 2, &msg_len);
+    size_t priv_len = 0;
+    const char* priv = luaL_checklstring(L, 3, &priv_len);
+    if (priv_len != 32) return luaL_error(L, "Ed25519 private key must be 32 bytes");
+
+#ifndef GHV_NO_CRYPTO
+    uint8_t sig[64];
+    if (KeyExchange::Ed25519Sign(reinterpret_cast<const uint8_t*>(msg), msg_len,
+                                 reinterpret_cast<const uint8_t*>(priv), sig)) {
+        lua_pushlstring(L, reinterpret_cast<const char*>(sig), 64);
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+// hv:ed25519GenerateKeyPair() -> priv_key_out, pub_key_out
+static int l_tcp_server_ed25519_gen(lua_State* L) {
+#ifndef GHV_NO_CRYPTO
+    uint8_t priv[32];
+    uint8_t pub[32];
+    if (KeyExchange::Ed25519GenerateKeyPair(priv, pub)) {
+        lua_pushlstring(L, reinterpret_cast<const char*>(priv), 32);
+        lua_pushlstring(L, reinterpret_cast<const char*>(pub), 32);
+        return 2;
+    }
+#endif
+    return 0;
+}
+
 // GC — deferred destruction to prevent UAF when GC fires inside callback stacks.
 // Same pattern as TcpClient: if GC triggers during onMessage/onConnection,
 // direct delete → ~LuaTcpServer → server->stop() would execute inside the
@@ -688,6 +726,8 @@ GHV_EXPORT int luaopen_ghv_TcpServer(lua_State* L)
         {"clearEncryption",     l_tcp_server_clear_encryption},
         {"generateKeyPair",     l_tcp_server_generate_key_pair},   // ECDH
         {"deriveAndEncrypt",    l_tcp_server_derive_and_encrypt},  // ECDH
+        {"ed25519Sign",         l_tcp_server_ed25519_sign},        // 防 MITM 签名
+        {"ed25519GenerateKeyPair", l_tcp_server_ed25519_gen},      // 生成主公私钥对
         {"withSSL",             l_tcp_server_with_ssl},
         {"run",                 l_tcp_server_run},
         {NULL, NULL},

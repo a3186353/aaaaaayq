@@ -455,3 +455,92 @@ bool KeyExchange::DeriveSessionKey(const uint8_t peer_pub[32],
     }
     return ok;
 }
+
+// ============================================================
+// Ed25519 Sign / Verify (防 MITM)
+// ============================================================
+
+bool KeyExchange::Ed25519GenerateKeyPair(uint8_t priv_key_out[32], uint8_t pub_key_out[32]) {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    if (!ctx) return false;
+    EVP_PKEY* pkey = nullptr;
+    bool ok = false;
+    do {
+        if (EVP_PKEY_keygen_init(ctx) <= 0) break;
+        if (EVP_PKEY_keygen(ctx, &pkey) <= 0) break;
+
+        size_t priv_len = 32, pub_len = 32;
+        if (EVP_PKEY_get_raw_private_key(pkey, priv_key_out, &priv_len) <= 0) break;
+        if (EVP_PKEY_get_raw_public_key(pkey, pub_key_out, &pub_len) <= 0) break;
+
+        if (priv_len == 32 && pub_len == 32) ok = true;
+    } while (false);
+
+    if (pkey) EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    return ok;
+}
+
+bool KeyExchange::Ed25519Sign(const uint8_t* msg, size_t msg_len,
+                              const uint8_t priv_key[32], uint8_t signature_out[64]) {
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, priv_key, 32);
+    if (!pkey) {
+        fprintf(stderr, "[ghv_crypto] Ed25519Sign: invaild private key\n");
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    bool success = false;
+    do {
+        if (EVP_DigestSignInit(ctx, nullptr, nullptr, nullptr, pkey) <= 0) break;
+        size_t siglen = 64;
+        // Ed25519 uses EVP_DigestSign as a one-shot without update/final
+        if (EVP_DigestSign(ctx, signature_out, &siglen, msg, msg_len) <= 0) break;
+        if (siglen != 64) break;
+        success = true;
+    } while (false);
+
+    if (!success) {
+        fprintf(stderr, "[ghv_crypto] Ed25519Sign: signature failed\n");
+    }
+
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return success;
+}
+
+bool KeyExchange::Ed25519Verify(const uint8_t* msg, size_t msg_len,
+                                const uint8_t signature[64], const uint8_t pub_key[32]) {
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub_key, 32);
+    if (!pkey) {
+        fprintf(stderr, "[ghv_crypto] Ed25519Verify: invalid public key format\n");
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    bool success = false;
+    do {
+        if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, pkey) <= 0) break;
+        if (EVP_DigestVerify(ctx, signature, 64, msg, msg_len) <= 0) break;
+        success = true;
+    } while (false);
+
+    if (!success) {
+        fprintf(stderr, "[ghv_crypto] Ed25519Verify: signature verification failed\n");
+    }
+
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return success;
+}
+
