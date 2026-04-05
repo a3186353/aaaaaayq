@@ -326,6 +326,82 @@ target_compile_options(ggelua PRIVATE -Wno-format-security)
 target_link_libraries(ggelua PRIVATE SDL2_prebuilt)
 
 # ============================================================================
+# 6b. libwebp_decode — STATIC (WEBP 解码器, mygxy 静态链入)
+#     Android 预编译 libSDL_image.so 不含 WEBP 支持,
+#     map.c 内嵌回退路径直接调用 WebPDecodeRGBA 解码地图贴图
+# ============================================================================
+set(LIBWEBP_DIR "${DEPS_DIR}/SDL_image/external/libwebp-1.3.2")
+set(LIBWEBP_SRC "${LIBWEBP_DIR}/src")
+add_library(webp_decode STATIC
+    # dec (解码器核心)
+    "${LIBWEBP_SRC}/dec/alpha_dec.c"
+    "${LIBWEBP_SRC}/dec/buffer_dec.c"
+    "${LIBWEBP_SRC}/dec/frame_dec.c"
+    "${LIBWEBP_SRC}/dec/idec_dec.c"
+    "${LIBWEBP_SRC}/dec/io_dec.c"
+    "${LIBWEBP_SRC}/dec/quant_dec.c"
+    "${LIBWEBP_SRC}/dec/tree_dec.c"
+    "${LIBWEBP_SRC}/dec/vp8_dec.c"
+    "${LIBWEBP_SRC}/dec/vp8l_dec.c"
+    "${LIBWEBP_SRC}/dec/webp_dec.c"
+    # dsp (解码 DSP — 仅解码链路, 排除 enc/cost/ssim)
+    "${LIBWEBP_SRC}/dsp/alpha_processing.c"
+    "${LIBWEBP_SRC}/dsp/alpha_processing_neon.c"
+    "${LIBWEBP_SRC}/dsp/alpha_processing_sse2.c"
+    "${LIBWEBP_SRC}/dsp/alpha_processing_sse41.c"
+    "${LIBWEBP_SRC}/dsp/cpu.c"
+    "${LIBWEBP_SRC}/dsp/dec.c"
+    "${LIBWEBP_SRC}/dsp/dec_clip_tables.c"
+    "${LIBWEBP_SRC}/dsp/dec_mips32.c"
+    "${LIBWEBP_SRC}/dsp/dec_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/dec_msa.c"
+    "${LIBWEBP_SRC}/dsp/dec_neon.c"
+    "${LIBWEBP_SRC}/dsp/dec_sse2.c"
+    "${LIBWEBP_SRC}/dsp/dec_sse41.c"
+    "${LIBWEBP_SRC}/dsp/filters.c"
+    "${LIBWEBP_SRC}/dsp/filters_neon.c"
+    "${LIBWEBP_SRC}/dsp/filters_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/filters_msa.c"
+    "${LIBWEBP_SRC}/dsp/filters_sse2.c"
+    "${LIBWEBP_SRC}/dsp/lossless.c"
+    "${LIBWEBP_SRC}/dsp/lossless_neon.c"
+    "${LIBWEBP_SRC}/dsp/lossless_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/lossless_msa.c"
+    "${LIBWEBP_SRC}/dsp/lossless_sse2.c"
+    "${LIBWEBP_SRC}/dsp/lossless_sse41.c"
+    "${LIBWEBP_SRC}/dsp/rescaler.c"
+    "${LIBWEBP_SRC}/dsp/rescaler_neon.c"
+    "${LIBWEBP_SRC}/dsp/rescaler_mips32.c"
+    "${LIBWEBP_SRC}/dsp/rescaler_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/rescaler_msa.c"
+    "${LIBWEBP_SRC}/dsp/rescaler_sse2.c"
+    "${LIBWEBP_SRC}/dsp/upsampling.c"
+    "${LIBWEBP_SRC}/dsp/upsampling_neon.c"
+    "${LIBWEBP_SRC}/dsp/upsampling_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/upsampling_msa.c"
+    "${LIBWEBP_SRC}/dsp/upsampling_sse2.c"
+    "${LIBWEBP_SRC}/dsp/upsampling_sse41.c"
+    "${LIBWEBP_SRC}/dsp/yuv.c"
+    "${LIBWEBP_SRC}/dsp/yuv_neon.c"
+    "${LIBWEBP_SRC}/dsp/yuv_mips32.c"
+    "${LIBWEBP_SRC}/dsp/yuv_mips_dsp_r2.c"
+    "${LIBWEBP_SRC}/dsp/yuv_sse2.c"
+    "${LIBWEBP_SRC}/dsp/yuv_sse41.c"
+    # utils (解码工具)
+    "${LIBWEBP_SRC}/utils/bit_reader_utils.c"
+    "${LIBWEBP_SRC}/utils/color_cache_utils.c"
+    "${LIBWEBP_SRC}/utils/filters_utils.c"
+    "${LIBWEBP_SRC}/utils/huffman_utils.c"
+    "${LIBWEBP_SRC}/utils/quant_levels_dec_utils.c"
+    "${LIBWEBP_SRC}/utils/random_utils.c"
+    "${LIBWEBP_SRC}/utils/rescaler_utils.c"
+    "${LIBWEBP_SRC}/utils/thread_utils.c"
+    "${LIBWEBP_SRC}/utils/utils.c"
+)
+target_include_directories(webp_decode PUBLIC "${LIBWEBP_SRC}" "${LIBWEBP_DIR}")
+set_target_properties(webp_decode PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ============================================================================
 # 7. libmygxy.so — SHARED (基于旧 android-vs/grr/mygxy 精确文件列表)
 # ============================================================================
 set(MYGXY_SRC_DIR "${SOURCES_DIR}/grr/mygxy")
@@ -372,7 +448,7 @@ target_include_directories(mygxy PRIVATE
     "${PHYSFS_SRC_DIR}"                       # physfs.h (wpk.c 条件编译 WPK_USE_PHYSFS)
     "${ENGINE_ROOT}/external/vgmstream/src"
 )
-target_link_libraries(mygxy PUBLIC lua54 PRIVATE log physfs)
+target_link_libraries(mygxy PUBLIC lua54 PRIVATE log physfs webp_decode)
 target_link_libraries(mygxy PRIVATE SDL2_prebuilt SDL_image_prebuilt)
 target_compile_definitions(mygxy PRIVATE
     MYGXY_USE_DYNAMIC_PROXY=1

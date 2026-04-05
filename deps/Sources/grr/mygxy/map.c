@@ -2,6 +2,38 @@
 #include "map.h"
 
 #include <stdlib.h>
+#include <webp/decode.h>
+
+/* ---------- 内嵌 WEBP 软解码 ----------
+ * Android 预编译 libSDL_image.so 不含 WEBP 支持，
+ * IMG_Load_RW 会返回 NULL。此函数作为回退路径，
+ * 直接调用 libwebp API 解码 WEBP 数据为 ARGB8888 Surface。
+ */
+static SDL_Surface* _webp_soft_decode(const Uint8* data, size_t data_size)
+{
+    int width = 0, height = 0;
+    if (!WebPGetInfo(data, data_size, &width, &height))
+        return NULL;
+    if (width <= 0 || height <= 0)
+        return NULL;
+
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, width, height, 32, SDL_PIXELFORMAT_RGBA8888);
+    if (!sf)
+        return NULL;
+
+    /* WebPDecodeRGBAInto 直接写入 Surface pixels，避免二次拷贝 */
+    if (!WebPDecodeRGBAInto(data, data_size,
+                            (uint8_t*)sf->pixels,
+                            (size_t)sf->pitch * height,
+                            sf->pitch))
+    {
+        SDL_FreeSurface(sf);
+        return NULL;
+    }
+
+    return sf;
+}
 
 #if defined(_WIN32)
 #define MYGXY_API __declspec(dllexport)
@@ -581,6 +613,16 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
         if (!sf) {
             SDL_RWops* src = SDL_RWFromMem(mem0, (int)info.size);
             sf = IMG_Load_RW(src, SDL_TRUE);
+        }
+        /* IMG_Load_RW 失败 → 回退 WEBP 软解码
+         * (Android 预编译 libSDL_image 可能不含 WEBP 支持) */
+        if (!sf && info.size >= 12) {
+            const Uint8* hdr = (const Uint8*)mem0;
+            if (hdr[0]=='R' && hdr[1]=='I' && hdr[2]=='F' && hdr[3]=='F' &&
+                hdr[8]=='W' && hdr[9]=='E' && hdr[10]=='B' && hdr[11]=='P')
+            {
+                sf = _webp_soft_decode(hdr, info.size);
+            }
         }
 
         if (sf && sf->format->format != SDL_PIXELFORMAT_ARGB8888) {
