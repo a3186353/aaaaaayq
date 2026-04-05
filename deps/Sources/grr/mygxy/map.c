@@ -41,6 +41,7 @@ typedef struct
     Uint8* base;
     size_t size;
     size_t pos;
+    int owned;  /* 1: close 时释放 base; 0: 不释放 */
 } MAP_MemRW;
 
 static Sint64 SDLCALL MAP_MemRW_Seek(SDL_RWops* context, Sint64 offset, int whence)
@@ -98,11 +99,14 @@ static size_t SDLCALL MAP_MemRW_Write(SDL_RWops* context, const void* ptr, size_
 
 static int SDLCALL MAP_MemRW_Close(SDL_RWops* context)
 {
-    SDL_free(context);
+    MAP_MemRW* m = (MAP_MemRW*)context;
+    if (m->owned && m->base)
+        SDL_free(m->base);  /* 仅 owned 模式释放数据 */
+    SDL_free(m);
     return 0;
 }
 
-static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
+static SDL_RWops* _MAP_RWFromMem(void* mem, size_t size, int owned)
 {
     if (!mem)
         return NULL;
@@ -115,6 +119,7 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     m->base = (Uint8*)mem;
     m->size = size;
     m->pos = 0;
+    m->owned = owned;
 
     m->rw.size = NULL;
     m->rw.seek = MAP_MemRW_Seek;
@@ -122,6 +127,18 @@ static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
     m->rw.write = MAP_MemRW_Write;
     m->rw.close = MAP_MemRW_Close;
     return &m->rw;
+}
+
+/* Close 时释放 base 数据 */
+static SDL_RWops* MAP_RWFromOwnedMem(void* mem, size_t size)
+{
+    return _MAP_RWFromMem(mem, size, 1);
+}
+
+/* Close 时不释放 base 数据（caller 负责生命周期） */
+static SDL_RWops* MAP_RWFromBorrowedMem(void* mem, size_t size)
+{
+    return _MAP_RWFromMem(mem, size, 0);
 }
 //恢复普通jpg（云风特殊编码 → 标准 JPEG）
 // 处理原理:
@@ -419,14 +436,19 @@ eof_found:
     return (int)(op - (Uint8*)out);
 }
 //取地表（tmem: 临时缓冲区，传 NULL 使用 ud->mem；rw: 文件句柄）
+// ★ 0x9527 不缓存模式：不读/写 ud->map[id].sf，避免 Timer 线程竞态
+//   调用方负责 SDL_FreeSurface（同步路径由 Lua userdata 管理，
+//   异步路径由 TimerCallback/LUA_Run 管理）
 static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw)
 {
     MAP_Mem* m = tmem ? tmem : ud->mem;
+    int no_cache = (ud->mode == 0x9527);
 
     if (id >= ud->mapnum)
         return 0;
 
-    if (ud->map[id].sf)
+    /* 仅缓存模式使用缓存的 sf */
+    if (!no_cache && ud->map[id].sf)
         return ud->map[id].sf;
 
     Uint32 masknum;//遮罩数量
@@ -549,18 +571,31 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
 
     if (mem0 && info.size) {
         if (!sf) {
-            SDL_RWops* src = SDL_RWFromMem(mem0, info.size);
-            sf = IMG_Load_RW(src, SDL_TRUE);
-            ud->map[id].sf = sf;
+            /* 复制一份独立内存给 IMG_Load_RW，
+             * 因为后续 _getmem 可能重新分配 m[0]，
+             * 导致 SDL_RWFromMem 内部指针悬挂 */
+            void* img_copy = SDL_malloc(info.size);
+            if (img_copy) {
+                SDL_memcpy(img_copy, mem0, info.size);
+                SDL_RWops* src = MAP_RWFromOwnedMem(img_copy, info.size);
+                if (src) {
+                    sf = IMG_Load_RW(src, SDL_TRUE); /* SDL_TRUE → close 释放 img_copy */
+                } else {
+                    SDL_free(img_copy);
+                }
+            }
         }
-        else
-            ud->map[id].sf = sf;
+        /* else: sf 已由 ujpeg 软解码创建 */
 
         if (sf && sf->format->format != SDL_PIXELFORMAT_ARGB8888) {
             SDL_Surface* nsf = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, SDL_SWSURFACE);
             SDL_FreeSurface(sf);
-            ud->map[id].sf = nsf;
             sf = nsf;
+        }
+
+        /* 仅缓存模式写入 ud->map[id].sf */
+        if (!no_cache) {
+            ud->map[id].sf = sf;
         }
     }
 
@@ -824,8 +859,12 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         for (int x = sfx; x < msf->w; x += 320) {
             SDL_Surface* sf = _getmapsf(ud, curid++, tmem, rw);
             SDL_Rect xy = { x,y };
-            if (sf)
+            if (sf) {
                 SDL_BlitSurface(sf, NULL, msf, &xy); //Blit后rect会清零
+                /* 不缓存模式下 _getmapsf 返回新分配的 sf，Blit 完即释放 */
+                if (ud->mode == 0x9527)
+                    SDL_FreeSurface(sf);
+            }
         }
         mapid += ud->colnum;
         curid = mapid;
@@ -1778,7 +1817,7 @@ static int MAP_NEW(lua_State* L)
         return luaL_error(L, "open map data failed");
     SDL_memcpy(buf, in, (size_t)want);
 
-    SDL_RWops* rw = MAP_RWFromOwnedMem(buf, (size_t)want);
+    SDL_RWops* rw = MAP_RWFromBorrowedMem(buf, (size_t)want);
     if (rw == NULL)
     {
         SDL_free(buf);
