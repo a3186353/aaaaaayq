@@ -549,8 +549,12 @@ static int l_tcp_client_derive_and_encrypt(lua_State* L) {
     self->crypto.SetSessionKey(session_key, GHV_KEY_SIZE);
     OPENSSL_cleanse(session_key, sizeof(session_key));  // 立即擦除
 
-    // 3. 加密帧使用与 Pack 协议相同的 LE 帧头格式 (2B magic + 4B length LE)
-    //    C++ onMessage 内部已实现手动循环拆帧，无需切换 unpack 设置
+    // 3. 禁用 libhv unpack — 加密模式由 C++ 手动循环拆帧完全接管
+    //    如果不禁用，libhv 可能在加密切换边界错误拆分帧，
+    //    导致手动解析器收到非 0x4747 开头的碎片数据 (invalid magic)
+    if (self->connected && self->client && self->client->channel) {
+        self->client->channel->setUnpack(nullptr);
+    }
     self->recv_buf_.clear();  // 清空接收缓冲区
 
     // 4. 更新状态
