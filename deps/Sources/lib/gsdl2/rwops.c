@@ -1,11 +1,43 @@
 #include "gge.h"
 #include "SDL_rwops.h"
+#include "SDL_filesystem.h"
+#include "SDL_system.h"
+
+// 内部函数：实现热更新透明挂载（移动端特供 VFS 覆写机制）
+static SDL_RWops* RWFromFile_Override(const char* file, const char* mode) {
+    if (!file) return NULL;
+    
+    // 只拦截只读模式，并且只拦截相对路径
+    if (mode[0] == 'r' && file[0] != '/' && file[0] != '\\' && strstr(file, ":") == NULL) {
+#if defined(__ANDROID__)
+        const char* internalPath = SDL_AndroidGetInternalStoragePath();
+        if (internalPath) {
+            char overridePath[1024];
+            SDL_snprintf(overridePath, sizeof(overridePath), "%s/%s", internalPath, file);
+            SDL_RWops* rw = SDL_RWFromFile(overridePath, mode);
+            if (rw) return rw; // 命中了热更新目录下的文件
+        }
+#elif defined(__APPLE__) || defined(__IPHONEOS__)
+        char* prefPath = SDL_GetPrefPath("GGELUA", "GGELUA");
+        if (prefPath) {
+            char overridePath[1024];
+            // GetPrefPath 自带尾部斜杠，不需要加 '/'
+            SDL_snprintf(overridePath, sizeof(overridePath), "%s%s", prefPath, file);
+            SDL_RWops* rw = SDL_RWFromFile(overridePath, mode);
+            SDL_free(prefPath);
+            if (rw) return rw; // 命中了热更新目录（Documents）下的文件
+        }
+#endif
+    }
+    // 回退到物理真实路径（或安装包 Bundle 内部路径）
+    return SDL_RWFromFile(file, mode);
+}
 
 static int LUA_RWFromFile(lua_State* L)
 {
     const char* file = luaL_checkstring(L, 1);
     const char* mode = luaL_optstring(L, 2, "rb");
-    SDL_RWops* rw = SDL_RWFromFile(file, mode);
+    SDL_RWops* rw = RWFromFile_Override(file, mode);
     if (rw)
     {
         SDL_RWops** ud = (SDL_RWops**)lua_newuserdata(L, sizeof(SDL_RWops*));
@@ -195,7 +227,7 @@ static int LUA_LoadFile_RW(lua_State* L)
 static int LUA_LoadFile(lua_State* L)
 {
     const char* file = luaL_checkstring(L, 1);
-    SDL_RWops* rw = SDL_RWFromFile(file, "r");
+    SDL_RWops* rw = RWFromFile_Override(file, "rb");
     size_t nr;
     luaL_Buffer b;
     if (rw)
