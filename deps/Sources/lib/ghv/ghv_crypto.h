@@ -40,6 +40,9 @@ public:
     bool GenerateKeyPair(uint8_t[32]) { return false; }
     bool DeriveSessionKey(const uint8_t[32], uint8_t[32]) { return false; }
     bool HasKeyPair() const { return false; }
+
+    static bool Ed25519Sign(const uint8_t*, size_t, const uint8_t[32], uint8_t[64]) { return false; }
+    static bool Ed25519Verify(const uint8_t*, size_t, const uint8_t[64], const uint8_t[32]) { return false; }
 };
 
 // Stub CryptoProtocol — 所有加解密操作返回 false
@@ -108,6 +111,21 @@ public:
                           uint8_t session_key_out[32]);
 
     bool HasKeyPair() const { return local_key_ != nullptr; }
+
+    // ============================================================
+    // Ed25519 Identity Signature (防 MITM 中间人攻击)
+    // ============================================================
+    
+    // 生成一套 32 字节私钥与 32 字节公钥
+    static bool Ed25519GenerateKeyPair(uint8_t priv_key_out[32], uint8_t pub_key_out[32]);
+
+    // 使用 32 字节私钥对消息生成 64 字节签名
+    static bool Ed25519Sign(const uint8_t* msg, size_t msg_len,
+                            const uint8_t priv_key[32], uint8_t signature_out[64]);
+
+    // 使用 32 字节公钥验证 64 字节签名
+    static bool Ed25519Verify(const uint8_t* msg, size_t msg_len,
+                              const uint8_t signature[64], const uint8_t pub_key[32]);
 
 private:
     EVP_PKEY* local_key_ = nullptr;
