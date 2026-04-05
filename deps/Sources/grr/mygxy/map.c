@@ -1629,7 +1629,6 @@ static int MAP_NEW(lua_State* L)
     ud->mapnum = ud->rownum * ud->colnum;
     ud->mutex = SDL_CreateMutex();
     ud->cond = SDL_CreateCond();
-    ud->cond = SDL_CreateCond();
     if (!ud->mutex)
         goto openerr;
     //地图部分
@@ -1708,8 +1707,10 @@ openerr:
     if (ud->mutex)
     {
         SDL_DestroyMutex(ud->mutex);
-    ud->mutex = NULL;
-    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
+        ud->mutex = NULL;
+    }
+    if (ud->cond)
+    {
         SDL_DestroyCond(ud->cond);
         ud->cond = NULL;
     }
@@ -1768,14 +1769,25 @@ static int LUA_Clear(lua_State* L)
 
     SDL_LockMutex(ud->mutex);
 
-    for (Uint32 n = 0; n < ud->mapnum; n++) {
+    // 等待所有 Timer 线程异步任务完成，避免它们仍在读写 mem[] 和 map[]
+    while (ud->active_tasks > 0) {
+        SDL_CondWait(ud->cond, ud->mutex);
+    }
 
+    // 排空已完成但未消费的回调结果
+    SDL_ListNode* node = ud->list;
+    ud->list = NULL;
+
+    // 释放地表缓存
+    for (Uint32 n = 0; n < ud->mapnum; n++) {
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
-
+        if (ud->map[n].mask)
+            SDL_free(ud->map[n].mask);
     }
     SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
 
+    // 释放临时缓冲区
     if (ud->mem[0].mem) {
         SDL_free(ud->mem[0].mem);
         ud->mem[0].mem = NULL;
@@ -1789,6 +1801,32 @@ static int LUA_Clear(lua_State* L)
     }
 
     SDL_UnlockMutex(ud->mutex);
+
+    // 在锁外释放排空的回调资源（含 Lua ref 和 mask 数据）
+    while (node)
+    {
+        SDL_ListNode* next = node->next;
+        TIME_Data* time = (TIME_Data*)node->data;
+        SDL_free(node);
+
+        if (time)
+        {
+            if (time->cb_ref != LUA_NOREF && time->cb_ref != LUA_REFNIL)
+                luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+
+            if (time->type == TIME_TYPE_MASK)
+            {
+                MASK_Data* mask = (MASK_Data*)time->data;
+                if (mask) {
+                    if (mask->sf)
+                        SDL_FreeSurface(mask->sf);
+                    SDL_free(mask);
+                }
+            }
+            SDL_free(time);
+        }
+        node = next;
+    }
 
     return 0;
 }
@@ -1881,9 +1919,10 @@ static int LUA_GC(lua_State* L)
 
     SDL_DestroyMutex(ud->mutex);
     ud->mutex = NULL;
-    if (ud->cond) { SDL_DestroyCond(ud->cond); ud->cond = NULL; }
-    SDL_DestroyCond(ud->cond);
-    ud->cond = NULL;
+    if (ud->cond) {
+        SDL_DestroyCond(ud->cond);
+        ud->cond = NULL;
+    }
     return 0;
 }
 

@@ -53,9 +53,30 @@ static int GGE_LoadScript(lua_State* L)
             SDL_Log("[GGELUA] Override not found, falling back to APK assets");
         }
     }
+#elif defined(__APPLE__) || defined(__IPHONEOS__)
+    // iOS/Mac 热更覆盖：优先从 Documents (PrefPath) 加载运行脚本包
+    char* prefPath = SDL_GetPrefPath("GGELUA", "GGELUA");
+    if (prefPath)
+    {
+        size_t needLen = SDL_strlen(prefPath) + len + 1;
+        char* overridePath = (char*)SDL_malloc(needLen);
+        SDL_snprintf(overridePath, needLen, "%s%s", prefPath, path);
+        SDL_Log("[GGELUA] Apple override: trying '%s'", overridePath);
+        rw = SDL_RWFromFile(overridePath, "rb");
+        SDL_free(overridePath);
+        SDL_free(prefPath);
+        if (rw)
+        {
+            SDL_Log("[GGELUA] Loaded override script from Documents");
+        }
+        else
+        {
+            SDL_Log("[GGELUA] Override not found, falling back to app bundle");
+        }
+    }
 #endif
 
-    // 回退到默认路径 (Android 上从 APK assets 读取)
+    // 回退到默认路径 (纯安装环境)
     if (!rw)
     {
         rw = SDL_RWFromFile(path, "rb");
