@@ -90,6 +90,7 @@ typedef struct
  * 数值与 MSVC 多字符常量的编译结果一致 */
 #define TIME_TYPE_MAP   0x6D6170     /* 'map'  */
 #define TIME_TYPE_MASK  0x6D61736B   /* 'mask' */
+#define TIME_TYPE_MAPFULL 0x46554C4C   /* 'FULL' */
 
 /* MAP_Header.flag 文件标志 */
 #define MAP_FLAG_M10    0x4D312E30   /* 'M1.0' */
@@ -111,4 +112,11 @@ typedef struct
     void* data;
     MAP_UserData* ud;
     int cb_ref;
+    MAP_Mem mem[2];  /* 异步任务独立缓冲区，不复用 ud->mem[] */
 } TIME_Data;
+
+typedef struct
+{
+    MAP_Data* map;
+    SDL_Surface** mask_sfs;
+} MAPFULL_Data;
