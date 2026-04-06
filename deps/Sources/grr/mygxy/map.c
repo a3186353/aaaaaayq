@@ -36,29 +36,50 @@ static SDL_Surface* _webp_soft_decode(const Uint8* data, size_t data_size)
     int width = 0, height = 0;
     if (!WebPGetInfo(data, data_size, &width, &height))
         return NULL;
-    if (width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
         return NULL;
 
-    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, width, height, 32, SDL_PIXELFORMAT_ABGR8888);
-    if (!sf)
+    /* 两步解码：先到独立缓冲区，再逐行安全拷贝到 Surface
+     * 避免 WebPDecodeRGBAInto 直接写 Surface 时因 pitch 对齐差异越界 */
+    const int row_bytes = width * 4;
+    const size_t rgba_size = (size_t)row_bytes * height;
+    uint8_t* rgba = (uint8_t*)SDL_malloc(rgba_size);
+    if (!rgba)
         return NULL;
 
-    /* WebPDecodeRGBAInto 直接写入 Surface pixels，避免二次拷贝 */
-    if (!WebPDecodeRGBAInto(data, data_size,
-                            (uint8_t*)sf->pixels,
-                            (size_t)sf->pitch * height,
-                            sf->pitch))
+    if (!WebPDecodeRGBAInto(data, data_size, rgba, rgba_size, row_bytes))
     {
-        SDL_FreeSurface(sf);
+        SDL_free(rgba);
         return NULL;
     }
 
+    /* 直接输出 ARGB8888，同时做 RGBA→ARGB 通道交换
+     * 消除后台线程中 SDL_ConvertSurfaceFormat 的线程安全隐患 */
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!sf) {
+        SDL_free(rgba);
+        return NULL;
+    }
+
+    for (int y = 0; y < height; y++) {
+        const uint8_t* src = rgba + y * row_bytes;
+        Uint32* dst = (Uint32*)((uint8_t*)sf->pixels + y * sf->pitch);
+        for (int x = 0; x < width; x++) {
+            /* RGBA bytes → ARGB8888 uint32: (A<<24)|(R<<16)|(G<<8)|B */
+            dst[x] = ((Uint32)src[3] << 24) | ((Uint32)src[0] << 16)
+                   | ((Uint32)src[1] << 8)  |  (Uint32)src[2];
+            src += 4;
+        }
+    }
+
+    SDL_free(rgba);
     return sf;
 }
 
 /* ---------- 纯 C 软解码 JPEG/PNG（后台线程安全） ----------
- * 使用 stb_image 从内存解码 JPEG/PNG 为 ABGR8888 Surface。
+ * 使用 stb_image 从内存解码 JPEG/PNG 为 ARGB8888 Surface。
+ * 直接做 RGBA→ARGB 通道交换，消除后台线程 SDL_ConvertSurfaceFormat 调用。
  * 仅在异步路径（tmem != NULL）调用，主线程同步路径仍走 IMG_Load_RW。
  */
 static SDL_Surface* _stbi_soft_decode(const Uint8* data, size_t data_size)
@@ -75,21 +96,23 @@ static SDL_Surface* _stbi_soft_decode(const Uint8* data, size_t data_size)
     }
 
     SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, width, height, 32, SDL_PIXELFORMAT_ABGR8888);
+        SDL_SWSURFACE, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (!sf)
     {
         stbi_image_free(pixels);
         return NULL;
     }
 
-    /* 逐行拷贝（处理 pitch 对齐差异） */
-    const int row_bytes = width * 4;
+    /* 逐行拷贝 + RGBA→ARGB 通道交换 */
     for (int y = 0; y < height; y++)
     {
-        SDL_memcpy(
-            (Uint8*)sf->pixels + y * sf->pitch,
-            pixels + y * row_bytes,
-            row_bytes);
+        const unsigned char* src = pixels + (size_t)y * width * 4;
+        Uint32* dst = (Uint32*)((Uint8*)sf->pixels + y * sf->pitch);
+        for (int x = 0; x < width; x++) {
+            dst[x] = ((Uint32)src[3] << 24) | ((Uint32)src[0] << 16)
+                   | ((Uint32)src[1] << 8)  |  (Uint32)src[2];
+            src += 4;
+        }
     }
     stbi_image_free(pixels);
     return sf;
@@ -681,7 +704,8 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                     info.size = ujGetImageSize(img);
                     if ((mem1 = _getmem(&m[1], info.size)) && ujGetImage(img, mem1)) {
                         //!ujIsColor(img)  P5灰度？
-                        sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 24, SDL_PIXELFORMAT_RGB24);
+                        /* 直接输出 ARGB8888，避免后续 SDL_ConvertSurfaceFormat */
+                        sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, 320, 240, 32, SDL_PIXELFORMAT_ARGB8888);
                         if (sf) {
                             int w = ujGetWidth(img);
                             int h = ujGetHeight(img);
@@ -689,17 +713,23 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                             if (h > 240) h = 240;
 
                             Uint8* src = (Uint8*)mem1;
-                            Uint8* dst = (Uint8*)sf->pixels;
 
                             if (!ujIsColor(img)) {
-                                size_t px_count = (size_t)w * h;
-                                for (size_t p = 0; p < px_count; p++) {
-                                    Uint8 g = src[p];
-                                    *dst++ = g; *dst++ = g; *dst++ = g;
+                                for (int y = 0; y < h; y++) {
+                                    Uint32* row = (Uint32*)((Uint8*)sf->pixels + y * sf->pitch);
+                                    for (int x = 0; x < w; x++) {
+                                        Uint8 g = src[y * w + x];
+                                        row[x] = 0xFF000000u | ((Uint32)g << 16) | ((Uint32)g << 8) | g;
+                                    }
                                 }
                             } else {
                                 for (int y = 0; y < h; y++) {
-                                    SDL_memcpy(dst + y * sf->pitch, src + y * w * 3, w * 3);
+                                    Uint32* row = (Uint32*)((Uint8*)sf->pixels + y * sf->pitch);
+                                    Uint8* srow = src + y * w * 3;
+                                    for (int x = 0; x < w; x++) {
+                                        row[x] = 0xFF000000u | ((Uint32)srow[0] << 16) | ((Uint32)srow[1] << 8) | srow[2];
+                                        srow += 3;
+                                    }
                                 }
                             }
                         }
@@ -728,15 +758,23 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
     }
 
     if (mem0 && info.size) {
+        /* 单图块大小上限防护（防止损坏数据导致超大分配） */
+        if (info.size > 16 * 1024 * 1024)
+            return 0;
+
         /* ---- 后台线程（tmem != NULL）：全部使用纯 C 软解码 ----
          * iOS 平台下后台线程使用 IMG_Load_RW 会走 ImageIO (ObjC/CoreGraphics)，
          * 在无 @autoreleasepool 的线程中导致内存泄漏、堆损坏和闪退。
          * 纯 C 软解码库无 ObjC 依赖，线程安全，多端行为一致。
          *
+         * ★ 所有软解码器现已直接输出 ARGB8888 格式，
+         *   后台线程不再调用 SDL_ConvertSurfaceFormat（该函数使用
+         *   全局格式缓存，非线程安全，会导致堆损坏）。
+         *
          * 主线程（tmem == NULL）：仍使用 IMG_Load_RW，行为不变。
          */
 
-        /* 1. WEBP 软解码（libwebp 纯 C） */
+        /* 1. WEBP 软解码（libwebp 纯 C）→ 直出 ARGB8888 */
         if (!sf && info.size >= 12) {
             const Uint8* hdr = (const Uint8*)mem0;
             if (hdr[0]=='R' && hdr[1]=='I' && hdr[2]=='F' && hdr[3]=='F' &&
@@ -746,7 +784,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
             }
         }
 
-        /* 2. JPEG/PNG 软解码（stb_image 纯 C） — 仅后台线程 */
+        /* 2. JPEG/PNG 软解码（stb_image 纯 C）→ 直出 ARGB8888，仅后台线程 */
         if (!sf && tmem) {
             sf = _stbi_soft_decode((const Uint8*)mem0, info.size);
         }
@@ -757,10 +795,20 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
             sf = IMG_Load_RW(src, SDL_TRUE);
         }
 
+        /* 格式转换：仅主线程允许调用 SDL_ConvertSurfaceFormat
+         * 后台线程的所有软解码路径已直出 ARGB8888，无需转换。
+         * 若后台线程仍出现非 ARGB8888 格式（不应发生），丢弃该 Surface
+         * 防止使用格式不匹配的数据导致渲染异常。 */
         if (sf && sf->format->format != SDL_PIXELFORMAT_ARGB8888) {
-            SDL_Surface* nsf = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, SDL_SWSURFACE);
-            SDL_FreeSurface(sf);
-            sf = nsf;
+            if (tmem) {
+                /* 后台线程：不调用 SDL_ConvertSurfaceFormat（非线程安全） */
+                SDL_FreeSurface(sf);
+                sf = NULL;
+            } else {
+                SDL_Surface* nsf = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, SDL_SWSURFACE);
+                SDL_FreeSurface(sf);
+                sf = nsf;
+            }
         }
 
         /* 仅缓存模式写入 ud->map[id].sf */
