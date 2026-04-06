@@ -28,6 +28,13 @@
 #include <string.h>
 
 #include "ujpeg.h"
+#include "../map.h"  /* MAP_MALLOC / MAP_CALLOC / MAP_FREE */
+
+/* ujpeg 内部所有 malloc/calloc/free 统一走 MAP_ 隔离 zone，
+ * 防止后台线程 JPEG 解码碎片化污染 iOS nanov2 默认 zone */
+#define UJ_MALLOC(sz)      MAP_MALLOC(sz)
+#define UJ_CALLOC(c,sz)    MAP_CALLOC(c,sz)
+#define UJ_FREE(p)         MAP_FREE(p)
 
 /* UJ_NODECODE_BLOCK_SIZE: if #defined, this specifies the amount of bytes
  * to load from disk if ujDecodeFile() is used after ujDisableDecoding().
@@ -343,7 +350,7 @@ extern "C" {
             if (((c->width < 3) && (c->ssx != ssxmax)) || ((c->height < 3) && (c->ssy != ssymax))) ujThrow(UJ_UNSUPPORTED);
             if (!uj->no_decode) {
                 size = c->stride * uj->mbheight * c->ssy << 3;
-                if (!(c->pixels = (unsigned char*)malloc(size))) ujThrow(UJ_OUT_OF_MEM);
+                if (!(c->pixels = (unsigned char*)UJ_MALLOC(size))) ujThrow(UJ_OUT_OF_MEM);
                 memset(c->pixels, 0x80, size);
             }
         }
@@ -570,7 +577,7 @@ extern "C" {
         const int xmax = c->width - 3;
         unsigned char* out, * lin, * lout;
         int x, y;
-        out = (unsigned char*)malloc((c->width * c->height) << 1);
+        out = (unsigned char*)UJ_MALLOC((c->width * c->height) << 1);
         if (!out) ujThrow(UJ_OUT_OF_MEM);
         lin = c->pixels;
         lout = out;
@@ -590,7 +597,7 @@ extern "C" {
         }
         c->width <<= 1;
         c->stride = c->width;
-        free((void*)c->pixels);
+        UJ_FREE((void*)c->pixels);
         c->pixels = out;
     }
 
@@ -598,7 +605,7 @@ extern "C" {
         const int w = c->width, s1 = c->stride, s2 = s1 + s1;
         unsigned char* out, * cin, * cout;
         int x, y;
-        out = (unsigned char*)malloc((c->width * c->height) << 1);
+        out = (unsigned char*)UJ_MALLOC((c->width * c->height) << 1);
         if (!out) ujThrow(UJ_OUT_OF_MEM);
         for (x = 0; x < w; ++x) {
             cin = &c->pixels[x];
@@ -619,7 +626,7 @@ extern "C" {
         }
         c->height <<= 1;
         c->stride = c->width;
-        free((void*)c->pixels);
+        UJ_FREE((void*)c->pixels);
         c->pixels = out;
     }
 
@@ -629,7 +636,7 @@ extern "C" {
         const int xmax = c->width - 1;
         unsigned char* out, * lin, * lout;
         int x, y;
-        out = (unsigned char*)malloc((c->width * c->height) << 1);
+        out = (unsigned char*)UJ_MALLOC((c->width * c->height) << 1);
         if (!out) ujThrow(UJ_OUT_OF_MEM);
         lin = c->pixels;
         lout = out;
@@ -649,7 +656,7 @@ extern "C" {
         }
         c->width <<= 1;
         c->stride = c->width;
-        free((void*)c->pixels);
+        UJ_FREE((void*)c->pixels);
         c->pixels = out;
     }
 
@@ -657,7 +664,7 @@ extern "C" {
         const int w = c->width, s1 = c->stride, s2 = s1 + s1;
         unsigned char* out, * cin, * cout;
         int x, y;
-        out = (unsigned char*)malloc((c->width * c->height) << 1);
+        out = (unsigned char*)UJ_MALLOC((c->width * c->height) << 1);
         if (!out) ujThrow(UJ_OUT_OF_MEM);
         for (x = 0; x < w; ++x) {
             cin = &c->pixels[x];
@@ -677,7 +684,7 @@ extern "C" {
         }
         c->height <<= 1;
         c->stride = c->width;
-        free((void*)c->pixels);
+        UJ_FREE((void*)c->pixels);
         c->pixels = out;
     }
 
@@ -687,7 +694,7 @@ extern "C" {
         while (c->width < uj->width) { c->width <<= 1; ++xshift; }
         while (c->height < uj->height) { c->height <<= 1; ++yshift; }
         if (!xshift && !yshift) return;
-        out = (unsigned char*)malloc(c->width * c->height);
+        out = (unsigned char*)UJ_MALLOC(c->width * c->height);
         if (!out) ujThrow(UJ_OUT_OF_MEM);
         lin = c->pixels;
         lout = out;
@@ -698,7 +705,7 @@ extern "C" {
             lout += c->width;
         }
         c->stride = c->width;
-        free((void*)c->pixels);
+        UJ_FREE((void*)c->pixels);
         c->pixels = out;
     }
 
@@ -762,9 +769,9 @@ extern "C" {
         int i;
         for (i = 0; i < 3; ++i)
             if (uj->comp[i].pixels)
-                free((void*)uj->comp[i].pixels);
+                UJ_FREE((void*)uj->comp[i].pixels);
         if (uj->rgb)
-            free((void*)uj->rgb);
+            UJ_FREE((void*)uj->rgb);
     }
 
     void ujInit(ujContext* uj) {
@@ -834,7 +841,7 @@ extern "C" {
     ///////////////////////////////////////////////////////////////////////////////
 
     ujImage ujCreate(void) {
-        ujContext* uj = (ujContext*)calloc(1, sizeof(ujContext));
+        ujContext* uj = (ujContext*)UJ_CALLOC(1, sizeof(ujContext));
         ujError = uj ? UJ_OK : UJ_OUT_OF_MEM;
         return (ujImage)uj;
     }
@@ -928,7 +935,7 @@ extern "C" {
         if (img && ((ujContext*)img)->no_decode && (size > UJ_NODECODE_BLOCK_SIZE))
             size = UJ_NODECODE_BLOCK_SIZE;
 #endif
-        buf = malloc(size);
+        buf = UJ_MALLOC(size);
         if (!buf) {
             fclose(f);
             ujError = UJ_OUT_OF_MEM;
@@ -937,7 +944,7 @@ extern "C" {
         size = fread(buf, 1, size, f);
         fclose(f);
         img = ujDecode(img, buf, (int)size, 0);
-        free(buf);
+        UJ_FREE(buf);
         return img;
     }
 
@@ -997,7 +1004,7 @@ extern "C" {
         }
         else {
             if (!uj->rgb) {
-                uj->rgb = (unsigned char*)malloc(uj->width * uj->height * uj->ncomp);
+                uj->rgb = (unsigned char*)UJ_MALLOC(uj->width * uj->height * uj->ncomp);
                 if (!uj->rgb) { ujError = UJ_OUT_OF_MEM; return NULL; }
                 ujConvert(uj, uj->rgb);
                 if (ujError) return NULL;
@@ -1010,7 +1017,7 @@ extern "C" {
         ujError = UJ_OK;
         if (!img) { ujError = UJ_NO_CONTEXT; return; }
         ujDone((ujContext*)img);
-        free(img);
+        UJ_FREE(img);
     }
 
 #ifdef __cplusplus

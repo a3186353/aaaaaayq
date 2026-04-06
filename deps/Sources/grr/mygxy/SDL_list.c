@@ -1,12 +1,13 @@
 #include "sdl_proxy.h"
 #include "SDL_list.h"
+#include "map.h"
 
 void SDL_ListAdd(SDL_ListNode** list, void* data)
 {
     if (!list)
         return;
 
-    SDL_ListNode* node = (SDL_ListNode*)SDL_malloc(sizeof(SDL_ListNode));
+    SDL_ListNode* node = (SDL_ListNode*)MAP_MALLOC(sizeof(SDL_ListNode));
     if (!node)
         return;
 
@@ -32,7 +33,7 @@ int SDL_ListRemove(SDL_ListNode** list, void* data)
             else
                 *list = cur->next;
 
-            SDL_free(cur);
+            MAP_FREE(cur);
             return 1;
         }
         prev = cur;
@@ -51,9 +52,8 @@ void SDL_ListClear(SDL_ListNode** list)
     while (cur)
     {
         SDL_ListNode* next = cur->next;
-        SDL_free(cur);
+        MAP_FREE(cur);
         cur = next;
     }
     *list = NULL;
 }
-

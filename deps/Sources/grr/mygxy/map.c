@@ -4,6 +4,56 @@
 #include <stdlib.h>
 #include "../../../Dependencies/SDL_image/external/libwebp-1.3.2/src/webp/decode.h"
 
+/* ==========================================================================
+ * iOS 独立 malloc zone 实现
+ * 声明在 map.h，实现在此。非 Apple 平台此段不编译。
+ * ========================================================================== */
+#if defined(__APPLE__) && !defined(_WIN32)
+#include <os/lock.h>
+
+static malloc_zone_t* _map_zone = NULL;
+static os_unfair_lock  _map_zone_lock = OS_UNFAIR_LOCK_INIT;
+
+static void _map_ensure_zone(void)
+{
+    if (_map_zone) return;
+    os_unfair_lock_lock(&_map_zone_lock);
+    if (!_map_zone) {
+        _map_zone = malloc_create_zone(0, 0);
+        if (_map_zone)
+            malloc_set_zone_name(_map_zone, "mygxy_decode");
+    }
+    os_unfair_lock_unlock(&_map_zone_lock);
+}
+
+void* _map_zone_malloc(size_t sz)
+{
+    _map_ensure_zone();
+    return _map_zone ? malloc_zone_malloc(_map_zone, sz) : malloc(sz);
+}
+
+void* _map_zone_calloc(size_t count, size_t sz)
+{
+    _map_ensure_zone();
+    return _map_zone ? malloc_zone_calloc(_map_zone, count, sz) : calloc(count, sz);
+}
+
+void* _map_zone_realloc(void* p, size_t sz)
+{
+    _map_ensure_zone();
+    return _map_zone ? malloc_zone_realloc(_map_zone, p, sz) : realloc(p, sz);
+}
+
+void _map_zone_free(void* p)
+{
+    if (!p) return;
+    if (_map_zone)
+        malloc_zone_free(_map_zone, p);
+    else
+        free(p);
+}
+#endif /* __APPLE__ */
+
 /* ---------- 内嵌 stb_image 纯 C JPEG/PNG 解码 ----------
  * 后台线程（SDLTimer）不能调用 IMG_Load_RW，因为 iOS 上它会走
  * ImageIO (ObjC/CoreGraphics)，在无 @autoreleasepool 的线程中
@@ -11,6 +61,7 @@
  * stb_image 是纯 C 实现，线程安全，零 ObjC 依赖。
  * 使用 STB_IMAGE_STATIC 确保所有函数为 static，不与 SDL_image
  * 内部同名符号冲突。
+ * STBI_MALLOC/FREE/REALLOC 使用 MAP_ 宏，iOS 上走隔离 zone。
  */
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -20,9 +71,9 @@
 #define STBI_NO_HDR
 #define STBI_NO_LINEAR
 #define STBI_NO_FAILURE_STRINGS
-#define STBI_MALLOC(sz)           SDL_malloc(sz)
-#define STBI_REALLOC(p,newsz)     SDL_realloc(p,newsz)
-#define STBI_FREE(p)              SDL_free(p)
+#define STBI_MALLOC(sz)           MAP_MALLOC(sz)
+#define STBI_REALLOC(p,newsz)     MAP_REALLOC(p,newsz)
+#define STBI_FREE(p)              MAP_FREE(p)
 #define STBI_ASSERT(x)            SDL_assert(x)
 #include "stb_image.h"
 
@@ -42,19 +93,19 @@ static MAP_RawPixels _webp_raw_decode(const Uint8* data, size_t data_size)
 
     const int row_bytes = width * 4;
     const size_t rgba_size = (size_t)row_bytes * height;
-    uint8_t* rgba = (uint8_t*)SDL_malloc(rgba_size);
+    uint8_t* rgba = (uint8_t*)MAP_MALLOC(rgba_size);
     if (!rgba)
         return raw;
 
     if (!WebPDecodeRGBAInto(data, data_size, rgba, rgba_size, row_bytes))
     {
-        SDL_free(rgba);
+        MAP_FREE(rgba);
         return raw;
     }
 
-    Uint32* out = (Uint32*)SDL_malloc((size_t)width * height * sizeof(Uint32));
+    Uint32* out = (Uint32*)MAP_MALLOC((size_t)width * height * sizeof(Uint32));
     if (!out) {
-        SDL_free(rgba);
+        MAP_FREE(rgba);
         return raw;
     }
 
@@ -69,7 +120,7 @@ static MAP_RawPixels _webp_raw_decode(const Uint8* data, size_t data_size)
         }
     }
 
-    SDL_free(rgba);
+    MAP_FREE(rgba);
     raw.pixels = out;
     raw.width = width;
     raw.height = height;
@@ -93,7 +144,7 @@ static MAP_RawPixels _stbi_raw_decode(const Uint8* data, size_t data_size)
         return raw;
     }
 
-    Uint32* out = (Uint32*)SDL_malloc((size_t)width * height * sizeof(Uint32));
+    Uint32* out = (Uint32*)MAP_MALLOC((size_t)width * height * sizeof(Uint32));
     if (!out) {
         stbi_image_free(pixels);
         return raw;
@@ -126,7 +177,7 @@ static SDL_Surface* _raw_to_surface(MAP_RawPixels* raw, Uint32 pixel_format)
     SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
         SDL_SWSURFACE, raw->width, raw->height, 32, pixel_format);
     if (!sf) {
-        SDL_free(raw->pixels);
+        MAP_FREE(raw->pixels);
         raw->pixels = NULL;
         return NULL;
     }
@@ -138,7 +189,7 @@ static SDL_Surface* _raw_to_surface(MAP_RawPixels* raw, Uint32 pixel_format)
             raw->pixels + y * raw->width,
             row_bytes);
     }
-    SDL_free(raw->pixels);
+    MAP_FREE(raw->pixels);
     raw->pixels = NULL;
     return sf;
 }
@@ -177,8 +228,8 @@ static void* _getmem(MAP_Mem* mem, size_t size)
     if (mem->size >= size)
         return mem->mem;
 
-    SDL_free(mem->mem);
-    mem->mem = SDL_malloc(size);
+    MAP_FREE(mem->mem);
+    mem->mem = MAP_MALLOC(size);
     if (mem->mem == NULL) {
         SDL_OutOfMemory();
         mem->size = 0;
@@ -191,7 +242,7 @@ static void* _getmem(MAP_Mem* mem, size_t size)
 static void _freemem(MAP_Mem* mem)
 {
     if (mem->mem) {
-        SDL_free(mem->mem);
+        MAP_FREE(mem->mem);
         mem->mem = NULL;
         mem->size = 0;
     }
@@ -269,8 +320,8 @@ static int SDLCALL MAP_MemRW_Close(SDL_RWops* context)
 {
     MAP_MemRW* m = (MAP_MemRW*)context;
     if (m->owned && m->base)
-        SDL_free(m->base);  /* 仅 owned 模式释放数据 */
-    SDL_free(m);
+        MAP_FREE(m->base);  /* 仅 owned 模式释放数据 */
+    MAP_FREE(m);
     return 0;
 }
 
@@ -279,7 +330,7 @@ static SDL_RWops* _MAP_RWFromMem(void* mem, size_t size, int owned)
     if (!mem)
         return NULL;
 
-    MAP_MemRW* m = (MAP_MemRW*)SDL_malloc(sizeof(MAP_MemRW));
+    MAP_MemRW* m = (MAP_MemRW*)MAP_MALLOC(sizeof(MAP_MemRW));
     if (!m)
         return NULL;
 
@@ -757,7 +808,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                         if (h > 240) h = 240;
 
                         /* 直接输出到裸像素缓冲区（不调用 SDL_CreateRGBSurfaceWithFormat） */
-                        Uint32* px = (Uint32*)SDL_calloc((size_t)320 * 240, sizeof(Uint32));
+                        Uint32* px = (Uint32*)MAP_CALLOC((size_t)320 * 240, sizeof(Uint32));
                         if (px) {
                             Uint8* src = (Uint8*)mem1;
                             if (!ujIsColor(img)) {
@@ -935,19 +986,19 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
     if (masknum == 0 || masknum > 65535)
         return 0;
 
-    masklist = (MAP_MaskInfo*)SDL_malloc(masknum * sizeof(MAP_MaskInfo));
+    masklist = (MAP_MaskInfo*)MAP_MALLOC(masknum * sizeof(MAP_MaskInfo));
     if (!masklist)
         return 0;
 
     if (ud->flag == MAP_FLAG_M10) {
-        Uint32* maskid = (Uint32*)SDL_malloc(masknum * sizeof(Uint32));
+        Uint32* maskid = (Uint32*)MAP_MALLOC(masknum * sizeof(Uint32));
         if (!maskid) {
-            SDL_free(masklist);
+            MAP_FREE(masklist);
             return 0;
         }
         if (SDL_RWread(rw, maskid, sizeof(Uint32), masknum) != masknum) {
-            SDL_free(masklist);
-            SDL_free(maskid);
+            MAP_FREE(masklist);
+            MAP_FREE(maskid);
             return 0;
         }
         Uint32 valid = 0;
@@ -962,9 +1013,9 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
                     masklist[valid++] = tmp;
             }
         }
-        SDL_free(maskid);
+        MAP_FREE(maskid);
         if (valid == 0) {
-            SDL_free(masklist);
+            MAP_FREE(masklist);
             return 0;
         }
         *mask = masklist;
@@ -979,7 +1030,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
     while (loop)
     {
         if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1) {
-            SDL_free(masklist);
+            MAP_FREE(masklist);
             return 0;
         }
         switch (info.flag)
@@ -993,7 +1044,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
             }
 
             if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
-                SDL_free(masklist);
+                MAP_FREE(masklist);
                 return 0;
             }
             break;
@@ -1001,7 +1052,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
         case 0://结束
         {
             if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
-                SDL_free(masklist);
+                MAP_FREE(masklist);
                 return 0;
             }
             info.size = 0;
@@ -1010,7 +1061,7 @@ static int _getmasksinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint3
         }
         default: //跳过
             if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
-                SDL_free(masklist);
+                MAP_FREE(masklist);
                 return 0;
             }
             break;
@@ -1071,7 +1122,7 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
         return 0;
 
     Uint8* data = (Uint8*)mem1;
-    Uint8* dedata = (Uint8*)SDL_malloc(width * height);
+    Uint8* dedata = (Uint8*)MAP_MALLOC(width * height);
     if (!dedata)
         return 0;
     Uint8* alpha = dedata;
@@ -1108,9 +1159,9 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 
     if (is_async) {
         /* ---- 后台线程：纯内存操作，零 SDL Surface API 调用 ---- */
-        Uint32* canvas = (Uint32*)SDL_calloc((size_t)rect->w * rect->h, sizeof(Uint32));
+        Uint32* canvas = (Uint32*)MAP_CALLOC((size_t)rect->w * rect->h, sizeof(Uint32));
         if (!canvas) {
-            SDL_free(alpha);
+            MAP_FREE(alpha);
             return 0;
         }
 
@@ -1126,7 +1177,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
                 _getmapsf(ud, curid++, tmem, rw, &tile);
                 if (tile.pixels) {
                     _blit_raw_tile(&tile, canvas, rect->w, rect->h, x, y);
-                    SDL_free(tile.pixels);
+                    MAP_FREE(tile.pixels);
                 }
             }
             mapid += ud->colnum;
@@ -1152,7 +1203,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
             }
         }
 
-        SDL_free(alpha);
+        MAP_FREE(alpha);
         mask->raw.pixels = canvas;
         mask->raw.width = rect->w;
         mask->raw.height = rect->h;
@@ -1162,7 +1213,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
     /* ---- 主线程路径（原逻辑不变） ---- */
     SDL_Surface* msf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, rect->w, rect->h, 32, SDL_PIXELFORMAT_ARGB8888);
     if (!msf) {
-        SDL_free(alpha);
+        MAP_FREE(alpha);
         return 0;
     }
     //从地表扣图
@@ -1206,7 +1257,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         pixels += msf->pitch;
     }
 
-    SDL_free(alpha);
+    MAP_FREE(alpha);
     mask->sf = msf;
     return 1;
 }
@@ -1279,7 +1330,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
         if (fm && time->result_masknum > 0 && time->result_mask)
         {
             fm->masknum = time->result_masknum;
-            fm->mask_raws = (MAP_RawPixels*)SDL_calloc(time->result_masknum, sizeof(MAP_RawPixels));
+            fm->mask_raws = (MAP_RawPixels*)MAP_CALLOC(time->result_masknum, sizeof(MAP_RawPixels));
             if (fm->mask_raws) {
                 for (Uint32 i = 0; i < time->result_masknum; i++) {
                     MASK_Data mdata;
@@ -1333,7 +1384,7 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
     {
         SDL_ListNode* next = node->next;
         TIME_Data* time = (TIME_Data*)node->data;
-        SDL_free(node);
+        MAP_FREE(node);
 
         if (time)
         {
@@ -1354,21 +1405,21 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
                 
                 /* 释放 Timer 线程产出的裸像素（存在 time->result_* 中） */
                 if (time->result_raw.pixels) {
-                    SDL_free(time->result_raw.pixels);
+                    MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
                 if (time->result_mask) {
-                    SDL_free(time->result_mask);
+                    MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
                 }
                 if (mask_raws)
                 {
                     for (Uint32 i = 0; i < saved_masknum; i++) {
-                        if (mask_raws[i].pixels) SDL_free(mask_raws[i].pixels);
+                        if (mask_raws[i].pixels) MAP_FREE(mask_raws[i].pixels);
                     }
-                    SDL_free(mask_raws);
+                    MAP_FREE(mask_raws);
                 }
-                if (time->type == TIME_TYPE_MAPFULL) SDL_free(time->data);
+                if (time->type == TIME_TYPE_MAPFULL) MAP_FREE(time->data);
             }
             else if (time->type == TIME_TYPE_MASK)
             {
@@ -1377,14 +1428,14 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
                 {
                     /* 释放后台线程产出的裸像素 */
                     if (mask->raw.pixels)
-                        SDL_free(mask->raw.pixels);
-                    SDL_free(mask);
+                        MAP_FREE(mask->raw.pixels);
+                    MAP_FREE(mask);
                 }
             }
 
             _freemem(&time->mem[0]);
             _freemem(&time->mem[1]);
-            SDL_free(time);
+            MAP_FREE(time);
         }
 
         node = next;
@@ -1404,7 +1455,7 @@ static int LUA_Run(lua_State* L)
     {
         SDL_ListNode* next = node->next;
         TIME_Data* time = (TIME_Data*)node->data;
-        SDL_free(node);
+        MAP_FREE(node);
 
         lua_rawgeti(L, LUA_REGISTRYINDEX, time->cb_ref);
         luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
@@ -1488,19 +1539,19 @@ static int LUA_Run(lua_State* L)
 
             /* 释放 Timer 线程产出的遮罩信息 */
             if (time->result_mask) {
-                SDL_free(time->result_mask);
+                MAP_FREE(time->result_mask);
                 time->result_mask = NULL;
             }
             if (fm) {
                 if (fm->mask_raws) {
                     for (Uint32 i = 0; i < fm->masknum; i++) {
-                         if (fm->mask_raws[i].pixels) SDL_free(fm->mask_raws[i].pixels);
+                         if (fm->mask_raws[i].pixels) MAP_FREE(fm->mask_raws[i].pixels);
                     }
-                    SDL_free(fm->mask_raws);
+                    MAP_FREE(fm->mask_raws);
                 }
-                SDL_free(fm);
+                MAP_FREE(fm);
             }
-            SDL_free(time);
+            MAP_FREE(time);
         }
         else if (time->type == TIME_TYPE_MASK)
         {
@@ -1531,13 +1582,13 @@ static int LUA_Run(lua_State* L)
                     lua_pop(L, 1);
                 }
             }
-            SDL_free(mask);
-            SDL_free(time);
+            MAP_FREE(mask);
+            MAP_FREE(time);
         }
         else
         {
             lua_pop(L, 1);
-            SDL_free(time);
+            MAP_FREE(time);
         }
 
         node = next;
@@ -1574,7 +1625,7 @@ static int LUA_GetMap(lua_State* L)
         ud->active_tasks++;
         SDL_UnlockMutex(ud->mutex);
 
-        TIME_Data* time = (TIME_Data*)SDL_calloc(1, sizeof(TIME_Data));
+        TIME_Data* time = (TIME_Data*)MAP_CALLOC(1, sizeof(TIME_Data));
         time->type = TIME_TYPE_MAP;
         time->ud = ud;
         time->data = (void*)map;
@@ -1583,7 +1634,7 @@ static int LUA_GetMap(lua_State* L)
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
         if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
             luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-            SDL_free(time);
+            MAP_FREE(time);
             SDL_LockMutex(ud->mutex);
             map->loading = 0;
             ud->active_tasks--;
@@ -1653,12 +1704,12 @@ static int LUA_GetMapFull(lua_State* L)
         ud->active_tasks++;
         SDL_UnlockMutex(ud->mutex);
 
-        TIME_Data* time = (TIME_Data*)SDL_calloc(1, sizeof(TIME_Data));
+        TIME_Data* time = (TIME_Data*)MAP_CALLOC(1, sizeof(TIME_Data));
         time->type = TIME_TYPE_MAPFULL;
         time->ud = ud;
         time->id = id;
         
-        MAPFULL_Data* fm = (MAPFULL_Data*)SDL_calloc(1, sizeof(MAPFULL_Data));
+        MAPFULL_Data* fm = (MAPFULL_Data*)MAP_CALLOC(1, sizeof(MAPFULL_Data));
         fm->map = map;
         time->data = (void*)fm;
         
@@ -1666,8 +1717,8 @@ static int LUA_GetMapFull(lua_State* L)
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
         if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
             luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-            SDL_free(fm);
-            SDL_free(time);
+            MAP_FREE(fm);
+            MAP_FREE(time);
             SDL_LockMutex(ud->mutex);
             map->loading = 0;
             ud->active_tasks--;
@@ -1704,7 +1755,7 @@ static int LUA_GetMapInfo(lua_State* L)
         ud->active_tasks++;
         SDL_UnlockMutex(ud->mutex);
 
-        TIME_Data* time = (TIME_Data*)SDL_calloc(1, sizeof(TIME_Data));
+        TIME_Data* time = (TIME_Data*)MAP_CALLOC(1, sizeof(TIME_Data));
         time->type = TIME_TYPE_MAP;
         time->ud = ud;
         time->data = (void*)map;
@@ -1713,7 +1764,7 @@ static int LUA_GetMapInfo(lua_State* L)
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
         if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
             luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-            SDL_free(time);
+            MAP_FREE(time);
             SDL_LockMutex(ud->mutex);
             map->loading = 0;
             ud->active_tasks--;
@@ -1754,7 +1805,7 @@ static int LUA_GetMapInfo(lua_State* L)
     if (!out_sf)
     {
         if (num && mask)
-            SDL_free(mask);
+            MAP_FREE(mask);
         return 0;
     }
 
@@ -1787,7 +1838,7 @@ static int LUA_GetMapInfo(lua_State* L)
     }
 
     if (num && mask)
-        SDL_free(mask);
+        MAP_FREE(mask);
     return 2;
 }
 
@@ -1827,7 +1878,7 @@ static int LUA_GetMaskInfo(lua_State* L)
     }
 
     if (num && mask)
-        SDL_free(mask);
+        MAP_FREE(mask);
     return 1;
 }
 
@@ -1852,7 +1903,7 @@ static int LUA_GetMask(lua_State* L)
         ud->active_tasks++;
         SDL_UnlockMutex(ud->mutex);
 
-        MASK_Data* mask = (MASK_Data*)SDL_calloc(1, sizeof(MASK_Data));
+        MASK_Data* mask = (MASK_Data*)MAP_CALLOC(1, sizeof(MASK_Data));
         if (!mask)
         {
             SDL_LockMutex(ud->mutex);
@@ -1864,10 +1915,10 @@ static int LUA_GetMask(lua_State* L)
         mask->id = id;
         mask->info.offset = offset;
 
-        TIME_Data* time = (TIME_Data*)SDL_calloc(1, sizeof(TIME_Data));
+        TIME_Data* time = (TIME_Data*)MAP_CALLOC(1, sizeof(TIME_Data));
         if (!time)
         {
-            SDL_free(mask);
+            MAP_FREE(mask);
             SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
             SDL_CondSignal(ud->cond);
@@ -1882,8 +1933,8 @@ static int LUA_GetMask(lua_State* L)
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
         if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
             luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
-            SDL_free(mask);
-            SDL_free(time);
+            MAP_FREE(mask);
+            MAP_FREE(time);
             SDL_LockMutex(ud->mutex);
             ud->active_tasks--;
             SDL_CondSignal(ud->cond);
@@ -2133,7 +2184,7 @@ static int MAP_NEW(lua_State* L)
 
     MAP_Header head;
 
-    void* buf = SDL_malloc((size_t)want);
+    void* buf = MAP_MALLOC((size_t)want);
     if (!buf)
         return luaL_error(L, "open map data failed");
     SDL_memcpy(buf, in, (size_t)want);
@@ -2141,7 +2192,7 @@ static int MAP_NEW(lua_State* L)
     SDL_RWops* rw = MAP_RWFromBorrowedMem(buf, (size_t)want);
     if (rw == NULL)
     {
-        SDL_free(buf);
+        MAP_FREE(buf);
         return luaL_error(L, "open map data failed");
     }
 
@@ -2149,7 +2200,7 @@ static int MAP_NEW(lua_State* L)
     {
         if (rw->close)
             rw->close(rw);
-        SDL_free(buf);
+        MAP_FREE(buf);
         return luaL_error(L, "open map data failed");
     }
 
@@ -2157,7 +2208,7 @@ static int MAP_NEW(lua_State* L)
     {
         if (rw->close)
             rw->close(rw);
-        SDL_free(buf);
+        MAP_FREE(buf);
         return luaL_error(L, "Unsupported map!");
     }
 
@@ -2176,8 +2227,8 @@ static int MAP_NEW(lua_State* L)
     if (!ud->mutex)
         goto openerr;
     //地图部分
-    ud->maplist = (Uint32*)SDL_malloc(ud->mapnum * sizeof(Uint32)); //地表偏移
-    ud->map = (MAP_Data*)SDL_calloc(ud->mapnum, sizeof(MAP_Data));  //缓存
+    ud->maplist = (Uint32*)MAP_MALLOC(ud->mapnum * sizeof(Uint32)); //地表偏移
+    ud->map = (MAP_Data*)MAP_CALLOC(ud->mapnum, sizeof(MAP_Data));  //缓存
     if (!ud->maplist || !ud->map)
         goto openerr;
 
@@ -2194,7 +2245,7 @@ static int MAP_NEW(lua_State* L)
             goto openerr;
 
         if (ud->masknum > 0) {
-            ud->masklist = (Uint32*)SDL_malloc(ud->masknum * sizeof(Uint32));  //遮罩偏移
+            ud->masklist = (Uint32*)MAP_MALLOC(ud->masknum * sizeof(Uint32));  //遮罩偏移
             if (SDL_RWread(rw, ud->masklist, sizeof(Uint32), ud->masknum) != ud->masknum)
                 goto openerr;
         }
@@ -2260,36 +2311,36 @@ openerr:
     }
     if (ud->map)
     {
-        SDL_free(ud->map);
+        MAP_FREE(ud->map);
         ud->map = NULL;
     }
     if (ud->maplist)
     {
-        SDL_free(ud->maplist);
+        MAP_FREE(ud->maplist);
         ud->maplist = NULL;
     }
     if (ud->masklist)
     {
-        SDL_free(ud->masklist);
+        MAP_FREE(ud->masklist);
         ud->masklist = NULL;
     }
     if (ud->jpeh.mem)
     {
-        SDL_free(ud->jpeh.mem);
+        MAP_FREE(ud->jpeh.mem);
         ud->jpeh.mem = NULL;
         ud->jpeh.size = 0;
     }
 
     if (ud->mem[0].mem)
     {
-        SDL_free(ud->mem[0].mem);
+        MAP_FREE(ud->mem[0].mem);
         ud->mem[0].mem = NULL;
         ud->mem[0].size = 0;
     }
 
     if (ud->mem[1].mem)
     {
-        SDL_free(ud->mem[1].mem);
+        MAP_FREE(ud->mem[1].mem);
         ud->mem[1].mem = NULL;
         ud->mem[1].size = 0;
     }
@@ -2300,7 +2351,7 @@ openerr:
 
     if (ud->filebuf)
     {
-        SDL_free(ud->filebuf);
+        MAP_FREE(ud->filebuf);
         ud->filebuf = NULL;
         ud->filebuf_size = 0;
     }
@@ -2327,19 +2378,19 @@ static int LUA_Clear(lua_State* L)
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
         if (ud->map[n].mask)
-            SDL_free(ud->map[n].mask);
+            MAP_FREE(ud->map[n].mask);
     }
     SDL_memset(ud->map, 0, ud->mapnum * sizeof(MAP_Data));
 
     // 释放临时缓冲区
     if (ud->mem[0].mem) {
-        SDL_free(ud->mem[0].mem);
+        MAP_FREE(ud->mem[0].mem);
         ud->mem[0].mem = NULL;
         ud->mem[0].size = 0;
     }
 
     if (ud->mem[1].mem) {
-        SDL_free(ud->mem[1].mem);
+        MAP_FREE(ud->mem[1].mem);
         ud->mem[1].mem = NULL;
         ud->mem[1].size = 0;
     }
@@ -2351,7 +2402,7 @@ static int LUA_Clear(lua_State* L)
     {
         SDL_ListNode* next = node->next;
         TIME_Data* time = (TIME_Data*)node->data;
-        SDL_free(node);
+        MAP_FREE(node);
 
         if (time)
         {
@@ -2362,11 +2413,11 @@ static int LUA_Clear(lua_State* L)
             {
                 /* 释放 Timer 线程产出的结果 */
                 if (time->result_raw.pixels) {
-                    SDL_free(time->result_raw.pixels);
+                    MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
                 if (time->result_mask) {
-                    SDL_free(time->result_mask);
+                    MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
                 }
             }
@@ -2375,19 +2426,19 @@ static int LUA_Clear(lua_State* L)
                 MASK_Data* mask = (MASK_Data*)time->data;
                 if (mask) {
                     if (mask->raw.pixels)
-                        SDL_free(mask->raw.pixels);
-                    SDL_free(mask);
+                        MAP_FREE(mask->raw.pixels);
+                    MAP_FREE(mask);
                 }
             }
             else if (time->type == TIME_TYPE_MAPFULL)
             {
                 /* 释放 Timer 线程产出的结果 */
                 if (time->result_raw.pixels) {
-                    SDL_free(time->result_raw.pixels);
+                    MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
                 if (time->result_mask) {
-                    SDL_free(time->result_mask);
+                    MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
                 }
                 MAPFULL_Data* fm = (MAPFULL_Data*)time->data;
@@ -2395,16 +2446,16 @@ static int LUA_Clear(lua_State* L)
                     if (fm->mask_raws) {
                         Uint32 masknum = fm->masknum;
                         for (Uint32 i = 0; i < masknum; i++) {
-                            if (fm->mask_raws[i].pixels) SDL_free(fm->mask_raws[i].pixels);
+                            if (fm->mask_raws[i].pixels) MAP_FREE(fm->mask_raws[i].pixels);
                         }
-                        SDL_free(fm->mask_raws);
+                        MAP_FREE(fm->mask_raws);
                     }
-                    SDL_free(fm);
+                    MAP_FREE(fm);
                 }
             }
             _freemem(&time->mem[0]);
             _freemem(&time->mem[1]);
-            SDL_free(time);
+            MAP_FREE(time);
         }
         node = next;
     }
@@ -2448,49 +2499,49 @@ static int LUA_GC(lua_State* L)
                 SDL_FreeSurface(ud->map[n].sf);
 
             if (ud->map[n].mask)
-                SDL_free(ud->map[n].mask);
+                MAP_FREE(ud->map[n].mask);
         }
 
-        SDL_free(ud->map);
+        MAP_FREE(ud->map);
         ud->map = NULL;
     }
 
     if (ud->maplist)
     {
-        SDL_free(ud->maplist);
+        MAP_FREE(ud->maplist);
         ud->maplist = NULL;
     }
 
     if (ud->masklist)
     {
-        SDL_free(ud->masklist);
+        MAP_FREE(ud->masklist);
         ud->masklist = NULL;
     }
 
     if (ud->jpeh.mem)
     {
-        SDL_free(ud->jpeh.mem);
+        MAP_FREE(ud->jpeh.mem);
         ud->jpeh.mem = NULL;
         ud->jpeh.size = 0;
     }
 
     if (ud->mem[0].mem)
     {
-        SDL_free(ud->mem[0].mem);
+        MAP_FREE(ud->mem[0].mem);
         ud->mem[0].mem = NULL;
         ud->mem[0].size = 0;
     }
 
     if (ud->mem[1].mem)
     {
-        SDL_free(ud->mem[1].mem);
+        MAP_FREE(ud->mem[1].mem);
         ud->mem[1].mem = NULL;
         ud->mem[1].size = 0;
     }
 
     if (ud->filebuf)
     {
-        SDL_free(ud->filebuf);
+        MAP_FREE(ud->filebuf);
         ud->filebuf = NULL;
         ud->filebuf_size = 0;
     }

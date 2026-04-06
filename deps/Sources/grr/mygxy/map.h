@@ -8,6 +8,35 @@
 #include "SDL_list.h"
 
 #include "ujpeg/ujpeg.h"
+
+/* ==========================================================================
+ * iOS 隔离 malloc zone —— 防止 nanov2 堆腐蚀
+ * 后台 JPEG 解码线程的碎片化 malloc/free 会破坏与 Metal 渲染管线
+ * 共享的 nano zone guard page，导致 nanov2_guard_corruption_detected。
+ * 将 mygxy 模块的所有内存分配隔离到独立 zone。
+ * 非 Apple 平台直接转发到 SDL_malloc，零开销。
+ * ========================================================================== */
+#if defined(__APPLE__) && !defined(_WIN32)
+#include <malloc/malloc.h>
+
+/* 在 map.c 中定义 */
+void* _map_zone_malloc(size_t sz);
+void* _map_zone_calloc(size_t count, size_t sz);
+void* _map_zone_realloc(void* p, size_t sz);
+void  _map_zone_free(void* p);
+
+#define MAP_MALLOC(sz)         _map_zone_malloc(sz)
+#define MAP_CALLOC(c,sz)       _map_zone_calloc(c,sz)
+#define MAP_REALLOC(p,sz)      _map_zone_realloc(p,sz)
+#define MAP_FREE(p)            _map_zone_free(p)
+
+#else
+#define MAP_MALLOC(sz)         SDL_malloc(sz)
+#define MAP_CALLOC(c,sz)       SDL_calloc(c,sz)
+#define MAP_REALLOC(p,sz)      SDL_realloc(p,sz)
+#define MAP_FREE(p)            SDL_free(p)
+#endif
+
 #define MAP_NAME "xyq_map"
 
 /* 后台线程安全的像素缓冲区（不依赖任何 SDL Surface API）
