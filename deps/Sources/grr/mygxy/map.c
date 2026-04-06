@@ -1430,7 +1430,10 @@ static int LUA_Run(lua_State* L)
                 if (lua_isfunction(L, -1)) {
                     lua_pushnil(L);
                     lua_pushnil(L);
-                    lua_pcall(L, 2, 0, 0);
+                    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                        SDL_Log("Map[%d] Lua Callback Error: %s", id, lua_tostring(L, -1));
+                        lua_pop(L, 1);
+                    }
                 } else {
                     lua_pop(L, 1);
                 }
@@ -1477,7 +1480,10 @@ static int LUA_Run(lua_State* L)
                     lua_seti(L, -2, i + 1);
                 }
 
-                lua_call(L, 2, 0);
+                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                    SDL_Log("Map[%d] Lua Callback Error: %s", id, lua_tostring(L, -1));
+                    lua_pop(L, 1);
+                }
             }
 
             /* 释放 Timer 线程产出的遮罩信息 */
@@ -1507,7 +1513,10 @@ static int LUA_Run(lua_State* L)
             {
                 if (lua_isfunction(L, -1)) {
                     lua_pushnil(L);
-                    lua_pcall(L, 1, 0, 0);
+                    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                        SDL_Log("MapMask Lua Callback Error: %s", lua_tostring(L, -1));
+                        lua_pop(L, 1);
+                    }
                 } else {
                     lua_pop(L, 1);
                 }
@@ -1517,7 +1526,10 @@ static int LUA_Run(lua_State* L)
                 SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
                 *sf = mask_sf;
                 luaL_setmetatable(L, "SDL_Surface");
-                lua_call(L, 1, 0);
+                if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                    SDL_Log("MapMask Lua Callback Error: %s", lua_tostring(L, -1));
+                    lua_pop(L, 1);
+                }
             }
             SDL_free(mask);
             SDL_free(time);
@@ -1569,7 +1581,16 @@ static int LUA_GetMap(lua_State* L)
         time->id = id;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        SDL_AddTimer(0, TimerCallback, (void*)time);
+        if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
+            luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+            SDL_free(time);
+            SDL_LockMutex(ud->mutex);
+            map->loading = 0;
+            ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
+            return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+        }
     }
     else {
         SDL_Surface* out_sf = NULL;
@@ -1643,7 +1664,17 @@ static int LUA_GetMapFull(lua_State* L)
         
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        SDL_AddTimer(0, TimerCallback, (void*)time);
+        if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
+            luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+            SDL_free(fm);
+            SDL_free(time);
+            SDL_LockMutex(ud->mutex);
+            map->loading = 0;
+            ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
+            return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+        }
         return 0;
     }
     
@@ -1680,7 +1711,16 @@ static int LUA_GetMapInfo(lua_State* L)
         time->id = id;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        SDL_AddTimer(0, TimerCallback, (void*)time);
+        if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
+            luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+            SDL_free(time);
+            SDL_LockMutex(ud->mutex);
+            map->loading = 0;
+            ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
+            return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+        }
         return 0;
     }
 
@@ -1840,7 +1880,16 @@ static int LUA_GetMask(lua_State* L)
         time->id = 0;
         lua_pushvalue(L, 3);
         time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        SDL_AddTimer(0, TimerCallback, (void*)time);
+        if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
+            luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+            SDL_free(mask);
+            SDL_free(time);
+            SDL_LockMutex(ud->mutex);
+            ud->active_tasks--;
+            SDL_CondSignal(ud->cond);
+            SDL_UnlockMutex(ud->mutex);
+            return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+        }
     }
     else {
         MASK_Data mask;
