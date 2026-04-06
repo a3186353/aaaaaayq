@@ -780,7 +780,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 if (SDL_RWread(rw, mem0, sizeof(Uint8), info.size) != info.size)
                     return 0;
 
-                if (((Uint16*)mem0)[1] == 0xA0FF) { //云风格式
+                if (info.size >= 4 && ((Uint16*)mem0)[1] == 0xA0FF) { //云风格式（需至少4字节才安全读取）
                     Uint32 outmax = info.size * 2 + 256; // 安全余量
                     if (outmax < 153600) outmax = 153600;
                     if (!(mem1 = _getmem(&m[1], outmax))) {
@@ -2230,6 +2230,14 @@ static int MAP_NEW(lua_State* L)
     ud->flag = head.flag;
     ud->rownum = (Uint32)SDL_ceil(head.height / 240.0); //行数
     ud->colnum = (Uint32)SDL_ceil(head.width / 320.0);  //列数
+
+    // 溢出 & 合理性检查：防止损坏地图头导致 mapnum 溢出→分配过小→堆越界
+    if (ud->rownum == 0 || ud->colnum == 0 ||
+        ud->rownum > 10000 || ud->colnum > 10000 ||
+        (ud->colnum > 0 && ud->rownum > 0xFFFFFFFFu / ud->colnum)) {
+        MAP_FREE(buf);
+        return luaL_error(L, "Invalid map dimensions: %ux%u", head.width, head.height);
+    }
     ud->mapnum = ud->rownum * ud->colnum;
     ud->mutex = SDL_CreateMutex();
     ud->cond = SDL_CreateCond();

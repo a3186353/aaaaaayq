@@ -3,6 +3,21 @@
 #include "SDL_filesystem.h"
 #include "SDL_system.h"
 
+// iOS/macOS: 缓存 PrefPath，消除每次文件操作触发 ObjC 对象分配
+// SDL_GetPrefPath 内部调用 NSSearchPathForDirectoriesInDomains，
+// 会创建 NSArray/NSString 等 ObjC 对象，高频调用加剧 nanov2 碎片化
+// 导致 nanov2_guard_corruption_detected 崩溃
+#if defined(__APPLE__) || defined(__IPHONEOS__)
+static char* _cached_pref_path = NULL;
+
+static const char* _get_cached_pref_path(void) {
+    if (!_cached_pref_path) {
+        _cached_pref_path = SDL_GetPrefPath("GGELUA", "GGELUA");
+    }
+    return _cached_pref_path;
+}
+#endif
+
 // 内部函数：实现热更新透明挂载（移动端特供 VFS 覆写机制）
 static SDL_RWops* RWFromFile_Override(const char* file, const char* mode) {
     if (!file) return NULL;
@@ -18,13 +33,13 @@ static SDL_RWops* RWFromFile_Override(const char* file, const char* mode) {
             if (rw) return rw; // 命中了热更新目录下的文件
         }
 #elif defined(__APPLE__) || defined(__IPHONEOS__)
-        char* prefPath = SDL_GetPrefPath("GGELUA", "GGELUA");
+        const char* prefPath = _get_cached_pref_path();
         if (prefPath) {
             char overridePath[1024];
             // GetPrefPath 自带尾部斜杠，不需要加 '/'
             SDL_snprintf(overridePath, sizeof(overridePath), "%s%s", prefPath, file);
             SDL_RWops* rw = SDL_RWFromFile(overridePath, mode);
-            SDL_free(prefPath);
+            // 缓存的路径不释放，进程退出时自动回收
             if (rw) return rw; // 命中了热更新目录（Documents）下的文件
         }
 #endif
