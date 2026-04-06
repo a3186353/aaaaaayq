@@ -50,8 +50,7 @@ typedef struct
 {
     Uint32 id;
     SDL_Surface* sf;       /* 主线程缓存（同步路径） */
-    MAP_RawPixels raw;     /* 后台线程输出（异步路径） */
-    MAP_MaskInfo* mask;
+    MAP_MaskInfo* mask;    /* 主线程消费后的遮罩信息 */
     Uint32 masknum;
     int loading;
 } MAP_Data;
@@ -120,7 +119,11 @@ typedef struct
     void* data;
     MAP_UserData* ud;
     int cb_ref;
-    MAP_Mem mem[2];  /* 异步任务独立缓冲区，不复用 ud->mem[] */
+    MAP_Mem mem[2];        /* 异步任务独立缓冲区，不复用 ud->mem[] */
+    /* ---- 异步解码结果（Timer线程写入，主线程消费） ---- */
+    MAP_RawPixels result_raw;       /* 地表裸像素 */
+    MAP_MaskInfo* result_mask;      /* 遮罩信息数组 */
+    Uint32 result_masknum;          /* 遮罩数量 */
 } TIME_Data;
 
 typedef struct
