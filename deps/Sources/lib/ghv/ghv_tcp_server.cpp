@@ -241,6 +241,15 @@ static int l_tcp_server_start(lua_State* L) {
                 }
 
                 // 完整帧：就地解密（ptr 指向 rb 内部可写区域）
+                {
+                    // 诊断：在 DecryptAndVerify 前打印每帧帧头
+                    uint32_t diag_seq;
+                    memcpy(&diag_seq, ptr + 6, 4);
+                    fprintf(stderr, "[ghv] DIAG FRAME-BEFORE-DECRYPT conn=%u rb_total=%zu "
+                            "frame_size=%zu seq=%u magic=%02X%02X\n",
+                            channel->id(), rb.size(), frame_size, diag_seq,
+                            ptr[0], ptr[1]);
+                }
                 CryptoProtocol::DecryptResult decrypt_out;
                 if (!session->crypto.DecryptAndVerify(ptr, frame_size, decrypt_out)) {
                     fprintf(stderr, "[ghv] SECURITY: server decrypt/MAC failed for conn %u, kicking\n",
