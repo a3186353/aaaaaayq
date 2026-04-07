@@ -199,6 +199,13 @@ bool CryptoProtocol::EncryptAndSeal(const uint8_t* plaintext, size_t plain_len,
     if (!success) {
         fprintf(stderr, "[ghv_crypto] EncryptAndSeal: encryption failed\n");
         out_frame.clear();
+    } else {
+        // ── 发送侧帧指纹（用于与接收侧 MAC 失败诊断比对） ──
+        fprintf(stderr, "[ghv_crypto] DIAG SEAL seq=%u plain_len=%zu frame_size=%zu "
+                        "hdr6=[%02X%02X %02X%02X%02X%02X] key_fp=%02X%02X%02X%02X\n",
+                seq_no, plain_len, frame_size,
+                frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+                session_key_[0], session_key_[1], session_key_[2], session_key_[3]);
     }
 
     return success;
@@ -256,6 +263,10 @@ bool CryptoProtocol::DecryptAndVerify(uint8_t* frame, size_t frame_len,
     // Calculate ciphertext length (frame - header - tag)
     size_t ciphertext_len = frame_len - GHV_HEADER_SIZE - GHV_TAG_SIZE;
 
+    // ── 诊断：在 in-place 解密前保存 header 原始字节副本 ──
+    uint8_t header_snapshot[GHV_HEADER_SIZE];
+    memcpy(header_snapshot, frame, GHV_HEADER_SIZE);
+
     // Pointers
     uint8_t* ciphertext_ptr = frame + GHV_HEADER_SIZE;
     uint8_t* tag_ptr        = frame + frame_len - GHV_TAG_SIZE;
@@ -299,20 +310,36 @@ bool CryptoProtocol::DecryptAndVerify(uint8_t* frame, size_t frame_len,
         if (EVP_DecryptFinal_ex(ctx, ciphertext_ptr + out_len, &final_len) != 1) {
             // MAC verification FAILED — packet was tampered with
             fprintf(stderr, "[ghv_crypto] DecryptAndVerify: MAC verification FAILED (tampered packet)\n");
-            // ── 诊断信息 ──
+            // ── 增强诊断：使用 in-place 解密前保存的 header 快照 ──
             fprintf(stderr, "[ghv_crypto] DIAG frame_len=%zu ciphertext_len=%zu seq_no=%u\n",
                     frame_len, ciphertext_len, seq_no);
-            fprintf(stderr, "[ghv_crypto] DIAG header[%u]: ", GHV_HEADER_SIZE);
-            for (size_t di = 0; di < GHV_HEADER_SIZE && di < frame_len; ++di)
-                fprintf(stderr, "%02X ", frame[di]);
+            // 打印帧头快照（解密前保存，不受 in-place 修改影响）
+            fprintf(stderr, "[ghv_crypto] DIAG header_snapshot[%u]: ", GHV_HEADER_SIZE);
+            for (size_t di = 0; di < GHV_HEADER_SIZE; ++di)
+                fprintf(stderr, "%02X ", header_snapshot[di]);
             fprintf(stderr, "\n");
+            // 单独打印 Length 和 SeqNo 的解析值（验证 LE 解码）
+            uint32_t diag_len, diag_seq;
+            memcpy(&diag_len, header_snapshot + 2, 4);
+            memcpy(&diag_seq, header_snapshot + 6, 4);
+            fprintf(stderr, "[ghv_crypto] DIAG parsed: Length=%u(expect %zu) SeqNo=%u "
+                            "nonce_hex=",
+                    diag_len, frame_len - 6, diag_seq);
+            for (size_t di = 10; di < GHV_HEADER_SIZE; ++di)
+                fprintf(stderr, "%02X", header_snapshot[di]);
+            fprintf(stderr, "\n");
+            // Tag 和密钥指纹
             fprintf(stderr, "[ghv_crypto] DIAG tag[%u]: ", GHV_TAG_SIZE);
             for (size_t di = 0; di < GHV_TAG_SIZE; ++di)
                 fprintf(stderr, "%02X ", tag_copy[di]);
             fprintf(stderr, "\n");
-            // 打印 session_key 前 4 字节指纹（用于比对双方密钥是否一致）
             fprintf(stderr, "[ghv_crypto] DIAG key_fingerprint=%02X%02X%02X%02X\n",
                     session_key_[0], session_key_[1], session_key_[2], session_key_[3]);
+            // 打印密文前 16 字节（用于比对发送侧输出）
+            fprintf(stderr, "[ghv_crypto] DIAG ciphertext_head[16]: ");
+            for (size_t di = 0; di < 16 && di < ciphertext_len; ++di)
+                fprintf(stderr, "%02X ", (frame + GHV_HEADER_SIZE)[di]);
+            fprintf(stderr, "\n");
             break;
         }
 
