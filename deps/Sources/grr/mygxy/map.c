@@ -1344,7 +1344,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
              * 32 个遮罩 × 1000×800×4 ≈ 100MB，已是 iOS 承受上限 */
             #define MAP_MAX_MASKS_PER_TILE 32
             if (time->result_masknum > MAP_MAX_MASKS_PER_TILE) {
-                SDL_Log("[MAP] Warning: masknum %u exceeds limit %d, clamping",
+                fprintf(stderr, "[MAP] Warning: masknum %u exceeds limit %d, clamping\n",
                         time->result_masknum, MAP_MAX_MASKS_PER_TILE);
                 time->result_masknum = MAP_MAX_MASKS_PER_TILE;
             }
@@ -1360,7 +1360,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
                     /* E3: 单遮罩面积安全阀——超过 4096×4096 直接跳过 */
                     SDL_Rect* mr = &mdata.info.rect;
                     if ((Sint64)mr->w * mr->h > 4096LL * 4096LL) {
-                        SDL_Log("[MAP] Warning: mask %u area %dx%d too large, skipping",
+                        fprintf(stderr, "[MAP] Warning: mask %u area %dx%d too large, skipping\n",
                                 i, mr->w, mr->h);
                         continue;
                     }
