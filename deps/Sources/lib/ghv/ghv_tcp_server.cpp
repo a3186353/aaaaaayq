@@ -199,10 +199,9 @@ static int l_tcp_server_start(lua_State* L) {
             size_t incoming_len = buf->size();
             rb.insert(rb.end(), incoming, incoming + incoming_len);
 
-            // P3-1: 基于偏移量遍历，循环结束后批量 erase（单次 memmove）
-            size_t consumed = 0;
-            while (rb.size() - consumed >= 6) {  // 至少需要 Magic(2) + Length(4) 才能解析
-                uint8_t* ptr = rb.data() + consumed;
+            // P3-1: 循环解包，处理完毕立即从缓冲区截断并丢弃指针，避免 Lua pcall 重入引发的 Iterator Invalidation (UAF) 与内存争用
+            while (rb.size() >= 6) {  // 至少需要 Magic(2) + Length(4) 才能解析
+                uint8_t* ptr = rb.data();
 
                 // P3-5: 快速校验 Magic 字节，非法数据立即失败
                 if (ptr[0] != GHV_MAGIC_BYTE_0 || ptr[1] != GHV_MAGIC_BYTE_1) {
@@ -228,7 +227,7 @@ static int l_tcp_server_start(lua_State* L) {
                     return;
                 }
 
-                if (rb.size() - consumed < frame_size) {
+                if (rb.size() < frame_size) {
                     break;  // 帧未完整，等待更多数据
                 }
 
@@ -252,14 +251,17 @@ static int l_tcp_server_start(lua_State* L) {
                     return;
                 }
 
-                // 投递解密后的明文给 Lua
-                // NOTE: plaintext 指向 rb 内部（就地解密），lua_pushlstring 会复制数据，
-                //       后续操作不会影响已复制的 Lua 字符串。
+                // 关键一步：在进入可能挂起或重入的 Lua pcall 之前，
+                // 深拷贝出业务明文，并【立即】将这段记忆从缓冲区擦除，不再信任 ptr 的生命周期！
+                std::string lua_payload(reinterpret_cast<const char*>(plaintext), plain_len);
+                rb.erase(rb.begin(), rb.begin() + static_cast<ptrdiff_t>(frame_size));
+
+                // 投递解密并深拷贝后的明文给 Lua
                 if (push_server_userdata(L, self)) {
                     int ud_idx = lua_gettop(L);
                     if (ghv_get_lua_ref(L, ud_idx, "on_message")) {
                         lua_pushinteger(L, channel->id());
-                        lua_pushlstring(L, reinterpret_cast<const char*>(plaintext), plain_len);
+                        lua_pushlstring(L, lua_payload.data(), lua_payload.size());
                         if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
                             fprintf(stderr, "[ghv] server message callback error: %s\n",
                                     lua_tostring(L, -1));
@@ -268,12 +270,6 @@ static int l_tcp_server_start(lua_State* L) {
                     }
                     lua_pop(L, 1);
                 }
-
-                consumed += frame_size;
-            }
-            // P3-1: 批量移除已处理的帧（单次 memmove，替代逐帧 erase）
-            if (consumed > 0) {
-                rb.erase(rb.begin(), rb.begin() + static_cast<ptrdiff_t>(consumed));
             }
             return;
         } else if (session && session->state == ConnectionSecurityState::Handshaking) {
