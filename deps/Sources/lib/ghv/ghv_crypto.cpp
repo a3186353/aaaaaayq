@@ -242,12 +242,6 @@ bool CryptoProtocol::DecryptAndVerify(uint8_t* frame, size_t frame_len,
     if (declared_body_len + 6 != frame_len) {
         fprintf(stderr, "[ghv_crypto] DecryptAndVerify: length mismatch (header_body=%u+6, actual=%zu)\n",
                 declared_body_len, frame_len);
-        // Debug: hex dump first 32 bytes
-        fprintf(stderr, "[ghv_crypto] DEBUG hex dump: ");
-        for (size_t i = 0; i < 32 && i < frame_len; ++i) {
-            fprintf(stderr, "%02X ", frame[i]);
-        }
-        fprintf(stderr, "\n");
         return false;
     }
 
