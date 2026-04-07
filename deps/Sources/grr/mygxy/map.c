@@ -22,6 +22,8 @@
 static malloc_zone_t* _map_zone = NULL;
 static os_unfair_lock  _map_zone_lock = OS_UNFAIR_LOCK_INIT;
 
+/* 双重检查锁——仅保护一次性 zone 创建。
+ * malloc_zone_t 自身线程安全（Apple 文档），后续操作无需加锁。 */
 static void _map_ensure_zone(void)
 {
     if (_map_zone) return;
@@ -34,42 +36,36 @@ static void _map_ensure_zone(void)
     os_unfair_lock_unlock(&_map_zone_lock);
 }
 
+/* 以下四个函数不再加 os_unfair_lock：
+ * 1. malloc_zone_t 自带线程安全（Apple 内部用 nano/tiny/small 各自的锁）
+ * 2. 外层加锁与 nano zone 内部锁嵌套，可能导致 priority inversion
+ * 3. 每次 malloc/free 都走 os_unfair_lock 造成不必要的串行化 */
+
 void* _map_zone_malloc(size_t sz)
 {
     _map_ensure_zone();
-    os_unfair_lock_lock(&_map_zone_lock);
-    void* p = _map_zone ? malloc_zone_malloc(_map_zone, sz) : malloc(sz);
-    os_unfair_lock_unlock(&_map_zone_lock);
-    return p;
+    return _map_zone ? malloc_zone_malloc(_map_zone, sz) : malloc(sz);
 }
 
 void* _map_zone_calloc(size_t count, size_t sz)
 {
     _map_ensure_zone();
-    os_unfair_lock_lock(&_map_zone_lock);
-    void* p = _map_zone ? malloc_zone_calloc(_map_zone, count, sz) : calloc(count, sz);
-    os_unfair_lock_unlock(&_map_zone_lock);
-    return p;
+    return _map_zone ? malloc_zone_calloc(_map_zone, count, sz) : calloc(count, sz);
 }
 
 void* _map_zone_realloc(void* p, size_t sz)
 {
     _map_ensure_zone();
-    os_unfair_lock_lock(&_map_zone_lock);
-    void* r = _map_zone ? malloc_zone_realloc(_map_zone, p, sz) : realloc(p, sz);
-    os_unfair_lock_unlock(&_map_zone_lock);
-    return r;
+    return _map_zone ? malloc_zone_realloc(_map_zone, p, sz) : realloc(p, sz);
 }
 
 void _map_zone_free(void* p)
 {
     if (!p) return;
-    os_unfair_lock_lock(&_map_zone_lock);
     if (_map_zone)
         malloc_zone_free(_map_zone, p);
     else
         free(p);
-    os_unfair_lock_unlock(&_map_zone_lock);
 }
 #endif /* __APPLE__ */
 
