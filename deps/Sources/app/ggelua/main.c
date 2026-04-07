@@ -151,10 +151,6 @@ static int GGE_LoadScript(lua_State* L)
 int SDL_main(int argc, char** argv)
 {
 #ifdef _WIN32
-    // 当 exe 被放在 assets/ 子目录时，让 Windows 也搜索上级目录的 DLL
-    // 这样通过启动器 SDL.OpenURL 拉起时能找到根目录的 ggelua.dll 等
-    SetDllDirectoryA("..");
-
     CONSOLE_FONT_INFOEX info = { 0 }; // 以下设置字体
     info.cbSize = sizeof(info);
     info.dwFontSize.Y = 16;

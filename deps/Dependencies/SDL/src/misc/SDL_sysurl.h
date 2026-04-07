@@ -28,6 +28,7 @@ extern "C" {
 #endif
 
 extern int SDL_SYS_OpenURL(const char *url);
+extern int SDL_SYS_OpenURL_Dir(const char *url, const char *dir);
 
 #ifdef __cplusplus
 }

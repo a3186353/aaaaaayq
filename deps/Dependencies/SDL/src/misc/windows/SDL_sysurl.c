@@ -34,7 +34,13 @@ int SDL_SYS_OpenURL(const char *url)
 /* https://msdn.microsoft.com/en-us/library/windows/desktop/bb762153%28v=vs.85%29.aspx */
 int SDL_SYS_OpenURL(const char *url)
 {
+    return SDL_SYS_OpenURL_Dir(url, NULL);
+}
+
+int SDL_SYS_OpenURL_Dir(const char *url, const char *dir)
+{
     WCHAR *wurl;
+    WCHAR *wdir = NULL;
     HINSTANCE rc;
 
     /* MSDN says for safety's sake, make sure COM is initialized. */
@@ -49,9 +55,14 @@ int SDL_SYS_OpenURL(const char *url)
         return SDL_OutOfMemory();
     }
 
+    if (dir) {
+        wdir = WIN_UTF8ToStringW(dir);
+    }
+
     /* Success returns value greater than 32. Less is an error. */
-    rc = ShellExecuteW(NULL, L"open", wurl, NULL, NULL, SW_SHOWNORMAL);
+    rc = ShellExecuteW(NULL, L"open", wurl, NULL, wdir, SW_SHOWNORMAL);
     SDL_free(wurl);
+    if (wdir) SDL_free(wdir);
     WIN_CoUninitialize();
     return (rc > ((HINSTANCE)32)) ? 0 : WIN_SetError("Couldn't open given URL.");
 }
