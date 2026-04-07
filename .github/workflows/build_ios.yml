@@ -236,6 +236,15 @@ jobs:
         cp -R "${INSTALL_DIR}/Frameworks/"*.framework "${APP_DIR}/Frameworks/"
         echo "  ✅ Frameworks 已复制"
 
+        # 复制 ASAN 动态库（由于启用了 ASan 编译，需要打包这个库才能在真机运行）
+        ASAN_DYLIB=$(find $(xcode-select -p)/Toolchains -name "libclang_rt.asan_ios_dynamic.dylib" | head -n 1)
+        if [ -n "$ASAN_DYLIB" ] && [ -f "$ASAN_DYLIB" ]; then
+          cp "$ASAN_DYLIB" "${APP_DIR}/Frameworks/"
+          chmod 755 "${APP_DIR}/Frameworks/libclang_rt.asan_ios_dynamic.dylib"
+          echo "  ✅ Copied ASAN dylib: $ASAN_DYLIB"
+          codesign --force --sign - --timestamp=none "${APP_DIR}/Frameworks/libclang_rt.asan_ios_dynamic.dylib"
+        fi
+
         # 复制主程序二进制
         cp "${INSTALL_DIR}/GGELUA.app/GGELUA" "${APP_DIR}/GGELUA"
         chmod 755 "${APP_DIR}/GGELUA"
