@@ -146,11 +146,6 @@ bool CryptoProtocol::EncryptAndSeal(const uint8_t* plaintext, size_t plain_len,
     hdr->SetSeqNo(seq_no);
 
     // Generate nonce and write to header
-    // 诊断：检测 nonce_counter_ 是否被堆腐蚀
-    if (nonce_counter_ > static_cast<uint64_t>(seq_no) + 1000) {
-        fprintf(stderr, "[ghv_crypto] !!CORRUPTION!! nonce_counter_=%llu but seq_no=%u\n",
-                static_cast<unsigned long long>(nonce_counter_), seq_no);
-    }
     BuildNonce(hdr->nonce, seq_no);
 
     // Pointers into frame

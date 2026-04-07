@@ -17,44 +17,7 @@
 #include <jni.h>
 #endif
 
-/* ======================================================================
- * iOS 诊断 + nanov2 禁用尝试
- * __attribute__((constructor)) 在 main() 前执行，尽可能早地设置
- * MallocNanoZone=0 来禁用 nanov2 分配器，防止 guard page 崩溃。
- * 如果 setenv 太晚（nano zone 已初始化），则下面的 zone_check 会报告状态。
- * ====================================================================== */
-#if defined(__APPLE__) && !defined(_WIN32)
-#include <stdint.h>
-#include <sys/types.h>
-#include <stddef.h>
-#include <malloc/malloc.h>
-#include <stdlib.h>
 
-__attribute__((constructor))
-static void _ggelua_disable_nanozone(void)
-{
-    setenv("MallocNanoZone", "0", 1);
-}
-
-/* 在 SDL_main 入口调用，检测默认 zone 健康状态 */
-/* 注意：ASan 模式下跳过，因为 ASan 替换了 malloc zone，
- * malloc_zone_check 会触发 mi_check 导致误报 abort */
-static void _ggelua_check_zones(void)
-{
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer)
-    SDL_Log("[ZONE] ASan active, skipping malloc_zone_check (ASan replaces default zone)");
-    return;
-#endif
-#endif
-    /* 仅做最基本的自身 zone 检查，不使用 mach API 枚举以避免编译错误 */
-    malloc_zone_t* dz = malloc_default_zone();
-    const char* dz_name = malloc_get_zone_name(dz);
-    SDL_Log("[ZONE] default zone: %s, check=%d",
-            dz_name ? dz_name : "(null)",
-            malloc_zone_check(dz));
-}
-#endif
 
 int luaopen_ggelua(lua_State* L);
 typedef struct _PACKINFO
@@ -187,9 +150,6 @@ static int GGE_LoadScript(lua_State* L)
 
 int SDL_main(int argc, char** argv)
 {
-#if defined(__APPLE__) && !defined(_WIN32)
-    _ggelua_check_zones();
-#endif
 #ifdef _WIN32
     CONSOLE_FONT_INFOEX info = { 0 }; // 以下设置字体
     info.cbSize = sizeof(info);

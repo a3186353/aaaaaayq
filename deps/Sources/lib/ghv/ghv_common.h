@@ -87,50 +87,62 @@ inline int ghv_poll_events() {
 }
 
 // ============================================================
-// Thread count monitoring (for diagnosing thread leaks)
+// Platform socket includes (shared by TcpClient / TcpServer)
 // ============================================================
 
+#include <cstring>
 #ifdef _WIN32
-#include <tlhelp32.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <netinet/tcp.h>
 #endif
 
-// Returns the current number of threads in this process.
-// Useful for verifying that thread count stays stable after fixes.
-inline int ghv_get_thread_count() {
-#ifdef _WIN32
-    DWORD pid = GetCurrentProcessId();
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return -1;
-    int count = 0;
-    THREADENTRY32 te;
-    te.dwSize = sizeof(te);
-    if (Thread32First(snap, &te)) {
-        do {
-            if (te.th32OwnerProcessID == pid) ++count;
-        } while (Thread32Next(snap, &te));
-    }
-    CloseHandle(snap);
-    return count;
-#elif defined(__linux__) || defined(__ANDROID__)
-    // Read /proc/self/status for "Threads:" line
-    FILE* f = fopen("/proc/self/status", "r");
-    if (!f) return -1;
-    int count = -1;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "Threads:", 8) == 0) {
-            count = atoi(line + 8);
-            break;
-        }
-    }
-    fclose(f);
-    return count;
-#else
-    return -1; // Unsupported platform
+// ============================================================
+// libhv internal: per-IO private read buffer allocation
+// ============================================================
+// Allocates a private readbuf for an IO handle, detaching it from the
+// shared loop->readbuf. Required for encrypted sessions to prevent
+// cross-talk when multiple sockets are ready in the same poll cycle.
+
+extern "C" void hio_alloc_readbuf(hio_t* io, int len);
+#ifndef HLOOP_READ_BUFSIZE
+#define HLOOP_READ_BUFSIZE 65536
 #endif
+
+// ============================================================
+// Shared network helpers
+// ============================================================
+
+#include "ghv_net_protocol.h"  // GHV_MAX_FRAME_SIZE, GHV_KEY_SIZE, etc.
+
+// Optimize a TCP socket for low-latency game RPC traffic.
+// Called once per connection in both TcpClient and TcpServer.
+inline void ghv_optimize_game_socket(int fd) {
+    int flag = 1;
+    // Disable Nagle algorithm for low-latency RPC
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+               reinterpret_cast<const char*>(&flag), sizeof(flag));
+    // Enable TCP keepalive (detect dead connections)
+    setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,
+               reinterpret_cast<const char*>(&flag), sizeof(flag));
 }
 
-// ============================================================
+// Initialize an unpack_setting_t for length-field-based defragmentation.
+// Used by both TcpClient and TcpServer's setUnpack() Lua API.
+inline void ghv_init_unpack_setting(unpack_setting_t* s,
+                                     int head_flag_len,
+                                     int len_field_bytes) {
+    memset(s, 0, sizeof(unpack_setting_t));
+    s->mode                = UNPACK_BY_LENGTH_FIELD;
+    s->package_max_length  = GHV_MAX_FRAME_SIZE;  // 1MB, 防恶意超大包
+    s->body_offset         = head_flag_len + len_field_bytes;
+    s->length_field_offset = head_flag_len;
+    s->length_field_bytes  = len_field_bytes;
+    s->length_field_coding = ENCODE_BY_LITTEL_ENDIAN;
+    s->length_adjustment   = 0;
+}
+
 // Lua callback reference helpers
 // ============================================================
 

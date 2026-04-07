@@ -16,20 +16,6 @@
 #endif
 #include "TcpClient.h"
 
-// libhv 内部函数：为 IO handle 分配独立 readbuf（脱离共享 loop->readbuf）
-extern "C" void hio_alloc_readbuf(hio_t* io, int len);
-#ifndef HLOOP_READ_BUFSIZE
-#define HLOOP_READ_BUFSIZE 65536
-#endif
-
-#include <cstring>
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <netinet/tcp.h>
-#endif
-
 #define GHV_TCP_CLIENT_META "GHV_TcpClient"
 
 struct LuaTcpClient {
@@ -166,15 +152,7 @@ static int l_tcp_client_connect(lua_State* L) {
     self->client->onConnection = [self](const hv::SocketChannelPtr& channel) {
         lua_State* L = self->L;
         if (channel->isConnected()) {
-            // === Socket optimization for game RPC ===
-            int fd = channel->fd();
-            // 1. Disable Nagle algorithm for low-latency RPC
-            int flag = 1;
-            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag));
-            // 2. (REMOVED) Windows 系统默认的 AFD 自动缓冲缩放能更好地应付爆发型大包数据
-            //    硬编码限制 256KB 反而容易导致发送满溢而触及 libhv 层 max_write_bufsize 断开
-            // 3. Enable TCP keepalive
-            setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&flag), sizeof(flag));
+            ghv_optimize_game_socket(channel->fd());
             self->connected = true;
 
             // M3: 启动应用层心跳定时器（如果已配置间隔）
@@ -264,9 +242,6 @@ static int l_tcp_client_connect(lua_State* L) {
             const uint8_t* incoming = static_cast<const uint8_t*>(buf->data());
             size_t incoming_len = buf->size();
             // 缓冲收到数据
-            if (rb.empty()) {
-                // ... (诊断日志已移除)
-            }
             rb.insert(rb.end(), incoming, incoming + incoming_len);
 
             // P3-1: 循环解包，处理完毕立即从缓冲区截断并丢弃指针，避免 Lua pcall 重入引发的 Iterator Invalidation (UAF) 与内存争用
@@ -470,14 +445,7 @@ static int l_tcp_client_set_unpack(lua_State* L) {
     if (!self->unpack) {
         self->unpack = std::make_unique<unpack_setting_t>();
     }
-    memset(self->unpack.get(), 0, sizeof(unpack_setting_t));
-    self->unpack->mode = UNPACK_BY_LENGTH_FIELD;
-    self->unpack->package_max_length = GHV_MAX_FRAME_SIZE;  // 统一 1MB 限制，防恶意超大包 (C1)
-    self->unpack->body_offset = head_flag_len + len_field_bytes;
-    self->unpack->length_field_offset = head_flag_len;
-    self->unpack->length_field_bytes = len_field_bytes;
-    self->unpack->length_field_coding = ENCODE_BY_LITTEL_ENDIAN;
-    self->unpack->length_adjustment = 0;
+    ghv_init_unpack_setting(self->unpack.get(), head_flag_len, len_field_bytes);
 
     // C6: 已连接时热切换 unpack（支持加密→明文回退）
     if (self->connected && self->client && self->client->channel) {
@@ -486,8 +454,6 @@ static int l_tcp_client_set_unpack(lua_State* L) {
 
     return 0;
 }
-
-
 
 // hv:setEncryptionKey(key_string_32bytes)
 static int l_tcp_client_set_encryption_key(lua_State* L) {
@@ -556,7 +522,6 @@ static int l_tcp_client_derive_and_encrypt(lua_State* L) {
 
     // 2. 设置加密密钥
     self->crypto.SetSessionKey(session_key, GHV_KEY_SIZE);
-    // (诊断日志已移除)
     OPENSSL_cleanse(session_key, sizeof(session_key));  // 立即擦除
 
     // 3. 禁用 libhv unpack — 加密模式由 C++ 手动循环拆帧完全接管

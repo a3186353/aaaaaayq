@@ -220,12 +220,6 @@ static int l_http_run(lua_State* L) {
     return 0;
 }
 
-// requests.thread_count() -- return current thread count for diagnostics
-static int l_http_thread_count(lua_State* L) {
-    lua_pushinteger(L, ghv_get_thread_count());
-    return 1;
-}
-
 // Cleanup sentinel — released when Lua state closes
 static int l_http_cleanup_gc(lua_State* L) {
     // Release any pending callback refs that were never consumed by l_http_run
@@ -253,7 +247,6 @@ GHV_EXPORT int luaopen_ghv_HttpRequests(lua_State* L)
         {"head", l_http_head},
         {"post", l_http_post},
         {"run",  l_http_run},
-        {"thread_count", l_http_thread_count},
         {NULL, NULL},
     };
 
