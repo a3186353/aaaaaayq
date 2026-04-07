@@ -81,25 +81,11 @@ void CryptoProtocol::SetSessionKey(const uint8_t* key, size_t len) {
     memcpy(session_key_, key, GHV_KEY_SIZE);
     key_set_ = true;
     
-    // M7 FIX: One-time context initialization for the entire connection lifetime.
-    // Avoids costly EVP_CIPHER_CTX_reset() / EVP_EncryptInit_ex2() with cipher on every packet,
-    // which caused random internal OpenSSL heap fragmentation and MAC verification fails under load.
-    
-    if (enc_ctx_) {
-        if (EVP_EncryptInit_ex2(enc_ctx_, cipher_, nullptr, nullptr, nullptr) != 1 ||
-            EVP_CIPHER_CTX_ctrl(enc_ctx_, EVP_CTRL_GCM_SET_IVLEN, GHV_NONCE_SIZE, nullptr) != 1 ||
-            EVP_EncryptInit_ex2(enc_ctx_, nullptr, session_key_, nullptr, nullptr) != 1) {
-            fprintf(stderr, "[ghv_crypto] SetSessionKey: failed to init enc_ctx_\n");
-        }
-    }
-    
-    if (dec_ctx_) {
-        if (EVP_DecryptInit_ex2(dec_ctx_, cipher_, nullptr, nullptr, nullptr) != 1 ||
-            EVP_CIPHER_CTX_ctrl(dec_ctx_, EVP_CTRL_GCM_SET_IVLEN, GHV_NONCE_SIZE, nullptr) != 1 ||
-            EVP_DecryptInit_ex2(dec_ctx_, nullptr, session_key_, nullptr, nullptr) != 1) {
-            fprintf(stderr, "[ghv_crypto] SetSessionKey: failed to init dec_ctx_\n");
-        }
-    }
+    // 不再做 M7 风格的一次性 Key Schedule 预加载。
+    // 每次 EncryptAndSeal/DecryptAndVerify 使用 same-cipher reinit 模式：
+    //   EVP_XxxInit_ex2(ctx, cipher_, session_key_, nonce, NULL)
+    // OpenSSL 检测到 cipher == ctx->cipher 时复用 algctx 内存（无堆碎片化），
+    // 同时完全重置 GCM 状态机（清除错误态、AAD 缓存、计数器）。
 }
 
 // ============================================================
@@ -171,13 +157,14 @@ bool CryptoProtocol::EncryptAndSeal(const uint8_t* plaintext, size_t plain_len,
     uint8_t* ciphertext_ptr = frame + GHV_HEADER_SIZE;
     uint8_t* tag_ptr        = frame + GHV_HEADER_SIZE + plain_len;
 
-    // M7 FIX: 复用已经扩充好 Key Schedule 的加密上下文，仅替换 IV (Nonce)
+    // Same-cipher reinit: cipher_ == ctx->cipher 时 OpenSSL 复用 algctx 内存，
+    // 但完全重置 GCM 状态机（含错误态），然后重做 Key Schedule + 设置 IV。
+    // GHV_NONCE_SIZE == 12 == AES-GCM 默认 IV 长度，无需显式 SET_IVLEN。
     EVP_CIPHER_CTX* ctx = enc_ctx_;
 
     bool success = false;
     do {
-        // Fast path: Only supply the IV (OpenSSL skips key expansion + allocations)
-        if (EVP_EncryptInit_ex2(ctx, nullptr, nullptr, hdr->nonce, nullptr) != 1)
+        if (EVP_EncryptInit_ex2(ctx, cipher_, session_key_, hdr->nonce, nullptr) != 1)
             break;
 
         // Feed AAD (first 10 bytes of header: Magic + Length + SeqNo)
@@ -278,13 +265,13 @@ bool CryptoProtocol::DecryptAndVerify(uint8_t* frame, size_t frame_len,
     uint8_t tag_copy[GHV_TAG_SIZE];
     memcpy(tag_copy, tag_ptr, GHV_TAG_SIZE);
 
-    // M7 FIX: 复用解密上下文，走 Fast-path 仅刷新 IV (Nonce)
+    // Same-cipher reinit: cipher_ == ctx->cipher 时 OpenSSL 复用 algctx 内存，
+    // 但完全重置 GCM 状态机（含错误态），然后重做 Key Schedule + 设置 IV。
     EVP_CIPHER_CTX* ctx = dec_ctx_;
 
     bool success = false;
     do {
-        // Fast path: Only supply the IV (OpenSSL skips key expansion + allocations)
-        if (EVP_DecryptInit_ex2(ctx, nullptr, nullptr, hdr->nonce, nullptr) != 1)
+        if (EVP_DecryptInit_ex2(ctx, cipher_, session_key_, hdr->nonce, nullptr) != 1)
             break;
 
         // Feed AAD
