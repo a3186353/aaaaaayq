@@ -2,8 +2,9 @@
 #include "SDL_misc.h"
 
 #ifdef _WIN32
-/* Windows: 支持可选的第二个参数指定工作目录 */
-extern int SDL_SYS_OpenURL_Dir(const char *url, const char *dir);
+#include <windows.h>
+#include <shellapi.h>
+#pragma comment(lib, "shell32.lib")
 #endif
 
 static int LUA_OpenURL(lua_State *L)
@@ -12,7 +13,17 @@ static int LUA_OpenURL(lua_State *L)
 #ifdef _WIN32
     const char *dir = luaL_optstring(L, 2, NULL);
     if (dir) {
-        lua_pushboolean(L, SDL_SYS_OpenURL_Dir(url, dir) == 0);
+        /* 直接调用 ShellExecuteW 指定工作目录 */
+        int wurl_len = MultiByteToWideChar(CP_UTF8, 0, url, -1, NULL, 0);
+        int wdir_len = MultiByteToWideChar(CP_UTF8, 0, dir, -1, NULL, 0);
+        wchar_t *wurl = (wchar_t *)malloc(wurl_len * sizeof(wchar_t));
+        wchar_t *wdir = (wchar_t *)malloc(wdir_len * sizeof(wchar_t));
+        MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, wurl_len);
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, wdir_len);
+        HINSTANCE rc = ShellExecuteW(NULL, L"open", wurl, NULL, wdir, SW_SHOWNORMAL);
+        free(wurl);
+        free(wdir);
+        lua_pushboolean(L, rc > (HINSTANCE)32);
     } else {
         lua_pushboolean(L, SDL_OpenURL(url) == 0);
     }
