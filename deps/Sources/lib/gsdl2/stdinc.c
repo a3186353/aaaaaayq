@@ -393,6 +393,7 @@ static const luaL_Reg mem_funcs[] = {
     {"getpointer", LUA_MemoryGetPointer},
     {"getrwops", LUA_MemoryGetRWops},
     {"getstring", LUA_MemoryGetString},
+    {NULL, NULL}
 };
 
 static const luaL_Reg sdl_funcs[] = {
