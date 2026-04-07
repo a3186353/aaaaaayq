@@ -37,28 +37,39 @@ static void _map_ensure_zone(void)
 void* _map_zone_malloc(size_t sz)
 {
     _map_ensure_zone();
-    return _map_zone ? malloc_zone_malloc(_map_zone, sz) : malloc(sz);
+    os_unfair_lock_lock(&_map_zone_lock);
+    void* p = _map_zone ? malloc_zone_malloc(_map_zone, sz) : malloc(sz);
+    os_unfair_lock_unlock(&_map_zone_lock);
+    return p;
 }
 
 void* _map_zone_calloc(size_t count, size_t sz)
 {
     _map_ensure_zone();
-    return _map_zone ? malloc_zone_calloc(_map_zone, count, sz) : calloc(count, sz);
+    os_unfair_lock_lock(&_map_zone_lock);
+    void* p = _map_zone ? malloc_zone_calloc(_map_zone, count, sz) : calloc(count, sz);
+    os_unfair_lock_unlock(&_map_zone_lock);
+    return p;
 }
 
 void* _map_zone_realloc(void* p, size_t sz)
 {
     _map_ensure_zone();
-    return _map_zone ? malloc_zone_realloc(_map_zone, p, sz) : realloc(p, sz);
+    os_unfair_lock_lock(&_map_zone_lock);
+    void* r = _map_zone ? malloc_zone_realloc(_map_zone, p, sz) : realloc(p, sz);
+    os_unfair_lock_unlock(&_map_zone_lock);
+    return r;
 }
 
 void _map_zone_free(void* p)
 {
     if (!p) return;
+    os_unfair_lock_lock(&_map_zone_lock);
     if (_map_zone)
         malloc_zone_free(_map_zone, p);
     else
         free(p);
+    os_unfair_lock_unlock(&_map_zone_lock);
 }
 #endif /* __APPLE__ */
 
@@ -1324,12 +1335,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
         }
 
         /* 解码地表 → 裸像素（不创建 SDL_Surface） */
-        SDL_Log("[MAP] Timer decode start: id=%u type=%d fb=%p fb_size=%zu",
-                time->id, time->type, fb, fb_size);
         _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw);
-        SDL_Log("[MAP] Timer decode done: id=%u raw=%dx%d ptr=%p",
-                time->id, time->result_raw.width, time->result_raw.height,
-                (void*)time->result_raw.pixels);
         _getmasksinfo(ud, time->id, &time->result_mask, &time->result_masknum, task_rw);
         
         if (fm && time->result_masknum > 0 && time->result_mask)
@@ -1376,9 +1382,9 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
     SDL_RWclose(task_rw);
 
     /* ---- 4. 短暂加锁：更新共享状态 ---- */
+    SDL_LockMutex(ud->mutex);
     _freemem(&time->mem[0]);
     _freemem(&time->mem[1]);
-    SDL_LockMutex(ud->mutex);
     /* ★ loading=0 必须在 ListAdd 之后、mutex 保护内
      *   否则主线程可能在结果入队前就发起新 Timer，导致竞态 */
     if (time->type == TIME_TYPE_MAP) {
