@@ -37,8 +37,16 @@ static void _ggelua_disable_nanozone(void)
 }
 
 /* 在 SDL_main 入口调用，检测默认 zone 健康状态 */
+/* 注意：ASan 模式下跳过，因为 ASan 替换了 malloc zone，
+ * malloc_zone_check 会触发 mi_check 导致误报 abort */
 static void _ggelua_check_zones(void)
 {
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    SDL_Log("[ZONE] ASan active, skipping malloc_zone_check (ASan replaces default zone)");
+    return;
+#endif
+#endif
     /* 仅做最基本的自身 zone 检查，不使用 mach API 枚举以避免编译错误 */
     malloc_zone_t* dz = malloc_default_zone();
     const char* dz_name = malloc_get_zone_name(dz);
