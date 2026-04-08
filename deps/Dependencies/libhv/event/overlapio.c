@@ -328,6 +328,9 @@ int hio_read (hio_t* io) {
 }
 
 static int hio_write4 (hio_t* io, const void* buf, size_t len, struct sockaddr* addr) {
+    // [FIX] Reject writes on closed IO to match nio.c behavior.
+    // Cross-thread sends (e.g. Lua WSS:send) may race with IO-thread close.
+    if (io->closed) return -1;
     int nwrite = 0;
 try_send:
     if (io->io_type == HIO_TYPE_TCP) {

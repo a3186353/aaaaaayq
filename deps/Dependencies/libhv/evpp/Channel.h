@@ -44,10 +44,14 @@ public:
     virtual ~Channel() {
         if (isOpened()) {
             close();
-            // NOTE: Detach after destructor to avoid triggering onclose
-            if (io_ && id_ == hio_id(io_)) {
-                hio_set_context(io_, NULL);
-            }
+        }
+        // [FIX] Always clear context when Channel is destroyed, not just when
+        // still open. In the normal close flow, hio_close runs first making
+        // isOpened() false, but io->ctx still points to this Channel.
+        // Without this, any code accessing hio_context(io) after delete
+        // would hit a dangling pointer.
+        if (io_ && id_ == hio_id(io_)) {
+            hio_set_context(io_, NULL);
         }
     }
 
