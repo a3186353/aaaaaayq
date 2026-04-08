@@ -37,6 +37,7 @@ struct LuaDownload {
         std::string url;
         std::string filepath;   // empty = download to memory
         std::string range;
+        int         timeout{36000}; 
 
         std::atomic<int64_t> current_size{0};
         std::atomic<int64_t> total_size{0};
@@ -84,7 +85,7 @@ struct LuaDownload {
         HttpRequest req;
         req.method = HTTP_GET;
         req.url = state->url;
-        req.timeout = 300; // 5 minutes timeout for downloads
+        req.timeout = state->timeout;
 
         if (!state->range.empty()) {
             req.headers["Range"] = "bytes=" + state->range;
@@ -158,7 +159,7 @@ struct LuaDownload {
 #else
                 remove(state->filepath.c_str());
 #endif
-                state->status = -(resp.status_code ? resp.status_code : ret);
+                state->status = -(ret != 0 ? ret : resp.status_code);
             } else {
                 state->status = 100;
             }
@@ -185,7 +186,7 @@ struct LuaDownload {
             int ret = client.send(&req, &resp);
 
             if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
-                state->status = -(resp.status_code ? resp.status_code : ret);
+                state->status = -(ret != 0 ? ret : resp.status_code);
             } else {
                 if (state->memory_data.empty() && !resp.body.empty()) {
                     std::lock_guard<std::mutex> lock(state->data_mutex);
@@ -284,11 +285,13 @@ static int l_download_new(lua_State* L) {
     const char* url = luaL_checkstring(L, 1);
     const char* filepath = luaL_optstring(L, 2, NULL);
     const char* range = luaL_optstring(L, 3, NULL);
+    int timeout = (int)luaL_optinteger(L, 4, 36000);
 
     LuaDownload* self = new LuaDownload();
     self->core->url = url;
     if (filepath) self->core->filepath = filepath;
     if (range) self->core->range = range;
+    self->core->timeout = timeout;
 
     LuaDownload** ud = (LuaDownload**)lua_newuserdata(L, sizeof(LuaDownload*));
     *ud = self;
