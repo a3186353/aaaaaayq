@@ -378,11 +378,22 @@ void mp_encode_lua_type(lua_State *L, mp_buf *buf, int level);
 
 /* Convert a lua table into a message pack list. */
 void mp_encode_lua_table_as_array(lua_State *L, mp_buf *buf, int level) {
+    size_t len, j;
+
+    /* Prefer t.n (set by table.pack) over lua_rawlen (#t) to correctly
+     * handle arrays with nil holes, e.g. table.pack("a", nil, false).
+     * lua_rawlen is unreliable when nil appears in the middle of an array. */
+    if (lua_getfield(L, -1, "n") == LUA_TNUMBER) {
+        len = (size_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
 #if LUA_VERSION_NUM < 502
-    size_t len = lua_objlen(L,-1), j;
+        len = lua_objlen(L,-1);
 #else
-    size_t len = lua_rawlen(L,-1), j;
+        len = lua_rawlen(L,-1);
 #endif
+    }
 
     mp_encode_array(L,buf,len);
     luaL_checkstack(L, 1, "in function mp_encode_lua_table_as_array");
@@ -392,6 +403,7 @@ void mp_encode_lua_table_as_array(lua_State *L, mp_buf *buf, int level) {
         mp_encode_lua_type(L,buf,level+1);
     }
 }
+
 
 /* Convert a lua table into a message pack key-value map. */
 void mp_encode_lua_table_as_map(lua_State *L, mp_buf *buf, int level) {
@@ -439,6 +451,15 @@ int table_is_an_array(lua_State *L) {
     while(lua_next(L,-2)) {
         /* Stack: ... key value */
         lua_pop(L,1); /* Stack: ... key */
+
+        /* Skip the "n" field set by table.pack — it's a length hint,
+         * not an array element. */
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            const char *key = lua_tostring(L, -1);
+            if (key && key[0] == 'n' && key[1] == '\0')
+                continue;
+        }
+
         /* The <= 0 check is valid here because we're comparing indexes. */
 #if LUA_VERSION_NUM < 503
         if ((LUA_TNUMBER != lua_type(L,-1)) || (n = lua_tonumber(L, -1)) <= 0 ||
