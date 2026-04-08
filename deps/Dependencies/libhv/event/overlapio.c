@@ -429,6 +429,17 @@ int hio_close (hio_t* io) {
     // The hovlp will be freed by iowatcher_poll_events when the stale
     // completion arrives and io->closed is detected.
     io->hovlp = NULL;
+    // [FIX] Clean up all IO timers before invoking close_cb.
+    // nio.c does this in __close_cb, but overlapio.c was missing it entirely.
+    // Without this, heartbeat/keepalive timers survive past handler deletion,
+    // causing use-after-free crashes when they fire and dereference the stale
+    // hio_context pointer (e.g., WebSocket ping timer → deleted ws_channel).
+    hio_del_connect_timer(io);
+    hio_del_close_timer(io);
+    hio_del_read_timer(io);
+    hio_del_write_timer(io);
+    hio_del_keepalive_timer(io);
+    hio_del_heartbeat_timer(io);
     if (io->close_cb) {
         //printd("close_cb------\n");
         io->close_cb(io);
