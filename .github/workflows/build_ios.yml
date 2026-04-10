@@ -115,6 +115,7 @@ jobs:
           --disable-programs --disable-doc \
           --disable-avdevice --disable-avfilter --disable-postproc \
           --disable-debug --disable-symver \
+          --disable-bzlib --disable-iconv \
           --enable-small --enable-pic \
           --enable-videotoolbox \
           --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \

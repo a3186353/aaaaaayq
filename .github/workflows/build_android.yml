@@ -150,6 +150,7 @@ jobs:
           --disable-avdevice --disable-avfilter --disable-postproc \
           --disable-debug --disable-symver \
           --disable-x86asm \
+          --disable-bzlib --disable-iconv \
           --enable-pic \
           --enable-small \
           --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \
