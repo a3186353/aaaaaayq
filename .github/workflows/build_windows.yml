@@ -132,7 +132,7 @@ jobs:
       id: ffmpeg-cache
       with:
         path: deps/Dependencies/ffmpeg
-        key: ffmpeg-${{ env.FFMPEG_VER }}-win-x64-v1
+        key: ffmpeg-${{ env.FFMPEG_VER }}-win-x64-v2
 
     - name: Download FFmpeg ${{ env.FFMPEG_VER }} SDK
       if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
