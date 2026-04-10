@@ -137,6 +137,13 @@ jobs:
         mkdir -p "${INSTALL_DIR}"
         cd "${FFMPEG_SRC}"
 
+        # x86/x86_64: 禁用所有汇编 (仅模拟器用, 避免 PIC 重定位错误)
+        # ARM: 保留汇编优化
+        ASM_FLAGS=""
+        case "${ABI}" in
+          x86|x86_64) ASM_FLAGS="--disable-asm" ;;
+        esac
+
         # 精简构建: 仅编解码器+封装+协议, 禁用不需要的组件
         ./configure \
           --prefix="${INSTALL_DIR}" \
@@ -149,10 +156,10 @@ jobs:
           --disable-programs --disable-doc \
           --disable-avdevice --disable-avfilter --disable-postproc \
           --disable-debug --disable-symver \
-          --disable-x86asm \
           --disable-bzlib --disable-iconv \
           --enable-pic \
           --enable-small \
+          ${ASM_FLAGS} \
           --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \
           --enable-demuxer=mov,flv,rtsp,rtp,mpegts,avi,matroska,mp3,wav,aac,ogg \
           --enable-decoder=h264,hevc,aac,mp3,pcm_s16le,vorbis,opus,flac \
