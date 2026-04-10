@@ -139,10 +139,10 @@ jobs:
       shell: pwsh
       run: |
         $ffVer = "${{ env.FFMPEG_VER }}"
-        # 下载 BtbN 的 FFmpeg shared 预编译包 (包含 DLL + import lib + 头文件)
-        $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffVer}-latest-win64-gpl-shared-${ffVer}.zip"
-        # 备用地址 (gyan.dev)
-        $urlAlt = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${ffVer}-full_build-shared.7z"
+        # BtbN latest master 预编译包 (包含 DLL + import lib + 头文件)
+        $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+        # 备用: BtbN release 分支构建
+        $urlAlt = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffVer}-latest-win64-lgpl-shared-${ffVer}.zip"
         
         $destDir = "deps/Dependencies/ffmpeg"
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
@@ -152,10 +152,8 @@ jobs:
         try {
           Invoke-WebRequest -Uri $url -OutFile $archivePath -MaximumRetryCount 3 -TimeoutSec 120
         } catch {
-          Write-Host "⚠️ BtbN 下载失败, 尝试 gyan.dev"
-          Invoke-WebRequest -Uri $urlAlt -OutFile "ffmpeg-sdk.7z" -MaximumRetryCount 3 -TimeoutSec 120
-          7z x "ffmpeg-sdk.7z" -o"ffmpeg-extracted" -y
-          $archivePath = $null
+          Write-Host "⚠️ master 构建下载失败, 尝试 release 分支"
+          Invoke-WebRequest -Uri $urlAlt -OutFile $archivePath -MaximumRetryCount 3 -TimeoutSec 120
         }
 
         if ($archivePath -and (Test-Path $archivePath)) {
