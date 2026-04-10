@@ -211,6 +211,8 @@ jobs:
           "GGELUAc.exe",     # 主程序 (控制台)
           "lua.exe"          # Lua 解释器
         )
+        # 可选模块 (缺失不阻塞 CI)
+        $optional = @("gffmpeg.dll")
 
         # 搜索 .x64 编译输出目录
         $found = @{}
@@ -231,17 +233,27 @@ jobs:
             $missing += $name
           }
         }
+        foreach ($name in $optional) {
+          if ($found.ContainsKey($name)) {
+            $f = $found[$name]
+            $sizeKB = [math]::Round($f.Length / 1KB, 1)
+            Write-Host "  ✅ $name ($sizeKB KB) [可选]"
+          } else {
+            Write-Host "  ⚠️ $name 未编译 (FFmpeg SDK 缺失) [可选]"
+          }
+        }
 
         # 列出其他意外产物 (不阻塞，仅供参考)
-        $extra = $found.Keys | Where-Object { $_ -notin $required }
+        $allKnown = $required + $optional
+        $extra = $found.Keys | Where-Object { $_ -notin $allKnown }
         if ($extra.Count -gt 0) {
           Write-Host ""
-          Write-Host "⚠️ 意外产物 (未在必须清单中):"
+          Write-Host "⚠️ 意外产物 (未在清单中):"
           $extra | ForEach-Object { Write-Host "  ⚠️ $_" }
         }
 
         Write-Host ""
-        Write-Host "总计: $($found.Count) 个产物, $($missing.Count) 个缺失"
+        Write-Host "总计: $($found.Count) 个产物, $($missing.Count) 个必需缺失"
         if ($missing.Count -gt 0) {
           Write-Error "Build validation failed: missing $($missing -join ', ')"
           exit 1
@@ -261,6 +273,7 @@ jobs:
           "hiredis.dll",
           "lsqlite3.dll",
           "gastar.dll",
+          "gffmpeg.dll",
           "GGELUA.exe",
           "GGELUAc.exe",
           "lua.exe"
