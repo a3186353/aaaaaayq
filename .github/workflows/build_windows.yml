@@ -24,6 +24,7 @@ on:
 env:
   SOLUTION_FILE: deps/Projects/windows/Windows.sln
   OPENSSL_VER: "3.6.1"
+  FFMPEG_VER: "6.1.2"
 
 jobs:
   build-windows:
@@ -123,6 +124,62 @@ jobs:
         if (Test-Path "openssl-win-x64/include/openssl") {
           Copy-Item "openssl-win-x64/include/openssl/*" -Destination "$depsInc/openssl/" -Force -Recurse
           Write-Host "  ✅ OpenSSL 头文件已更新"
+        }
+
+    # ── FFmpeg SDK 下载 (预编译 shared dev 包) ──
+    - name: Cache FFmpeg SDK
+      uses: actions/cache@v4
+      id: ffmpeg-cache
+      with:
+        path: deps/Dependencies/ffmpeg
+        key: ffmpeg-${{ env.FFMPEG_VER }}-win-x64-v1
+
+    - name: Download FFmpeg ${{ env.FFMPEG_VER }} SDK
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $ffVer = "${{ env.FFMPEG_VER }}"
+        # 下载 BtbN 的 FFmpeg shared 预编译包 (包含 DLL + import lib + 头文件)
+        $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffVer}-latest-win64-gpl-shared-${ffVer}.zip"
+        # 备用地址 (gyan.dev)
+        $urlAlt = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${ffVer}-full_build-shared.7z"
+        
+        $destDir = "deps/Dependencies/ffmpeg"
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+        # 尝试 BtbN 下载 
+        $archivePath = "ffmpeg-sdk.zip"
+        try {
+          Invoke-WebRequest -Uri $url -OutFile $archivePath -MaximumRetryCount 3 -TimeoutSec 120
+        } catch {
+          Write-Host "⚠️ BtbN 下载失败, 尝试 gyan.dev"
+          Invoke-WebRequest -Uri $urlAlt -OutFile "ffmpeg-sdk.7z" -MaximumRetryCount 3 -TimeoutSec 120
+          7z x "ffmpeg-sdk.7z" -o"ffmpeg-extracted" -y
+          $archivePath = $null
+        }
+
+        if ($archivePath -and (Test-Path $archivePath)) {
+          Expand-Archive -Path $archivePath -DestinationPath "ffmpeg-extracted" -Force
+        }
+
+        # 找到解压后的根目录 (可能有一层嵌套)
+        $extractedRoot = Get-ChildItem "ffmpeg-extracted" -Directory | Select-Object -First 1
+        if ($extractedRoot) {
+          # 复制 include 和 lib
+          if (Test-Path "$($extractedRoot.FullName)/include") {
+            Copy-Item "$($extractedRoot.FullName)/include" -Destination "$destDir/include" -Recurse -Force
+          }
+          if (Test-Path "$($extractedRoot.FullName)/lib") {
+            Copy-Item "$($extractedRoot.FullName)/lib" -Destination "$destDir/lib" -Recurse -Force
+          }
+          if (Test-Path "$($extractedRoot.FullName)/bin") {
+            Copy-Item "$($extractedRoot.FullName)/bin" -Destination "$destDir/bin" -Recurse -Force
+          }
+        }
+
+        Write-Host "✅ FFmpeg SDK 已就位:"
+        Get-ChildItem $destDir -Recurse -Include "*.lib" | ForEach-Object {
+          Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1KB,1)) KB)"
         }
 
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})

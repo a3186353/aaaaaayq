@@ -1272,6 +1272,59 @@ target_link_libraries(freetype_fw PRIVATE
 )
 
 # ============================================================================
+# F13. libgffmpeg.framework — FFmpeg Lua 绑定 (视频播放/流媒体/录音)
+#      可选模块: 需要提供 iOS 交叉编译的 FFmpeg 静态库
+#      用法: -DFFMPEG_IOS_DIR=/path/to/ffmpeg/ios
+# ============================================================================
+set(FFMPEG_IOS_DIR "${DEPS_DIR}/ffmpeg/ios"
+    CACHE PATH "iOS FFmpeg 静态库目录 (含 include/ 和 lib/)")
+
+if(EXISTS "${FFMPEG_IOS_DIR}/lib/libavcodec.a")
+    message(STATUS "[gffmpeg] 使用 iOS FFmpeg: ${FFMPEG_IOS_DIR}")
+
+    set(GFFMPEG_SRC_DIR "${SOURCES_DIR}/lib/gffmpeg")
+    add_library(gffmpeg_fw SHARED
+        "${GFFMPEG_SRC_DIR}/gffmpeg.c"
+        "${GFFMPEG_SRC_DIR}/gff_player.c"
+        "${GFFMPEG_SRC_DIR}/gff_recorder.c"
+    )
+    add_ios_framework(gffmpeg_fw "libgffmpeg")
+    target_include_directories(gffmpeg_fw PRIVATE
+        "${GFFMPEG_SRC_DIR}"
+        "${FFMPEG_IOS_DIR}/include"
+        "${SDL_INCLUDE_DIR}"
+        "${LUA_SRC_DIR}"
+    )
+    target_compile_definitions(gffmpeg_fw PRIVATE LUA_USE_IOS LUA_COMPAT_APIINTCASTS)
+    target_compile_options(gffmpeg_fw PRIVATE "-fvisibility=default")
+
+    add_dependencies(gffmpeg_fw ggelua_fw SDL2_fw)
+    target_link_libraries(gffmpeg_fw PRIVATE
+        ggelua_fw
+        SDL2_fw
+        # FFmpeg 静态库 (force_load 确保符号不被裁剪)
+        "-Wl,-force_load,${FFMPEG_IOS_DIR}/lib/libavcodec.a"
+        "${FFMPEG_IOS_DIR}/lib/libavformat.a"
+        "${FFMPEG_IOS_DIR}/lib/libavutil.a"
+        "${FFMPEG_IOS_DIR}/lib/libswresample.a"
+        "${FFMPEG_IOS_DIR}/lib/libswscale.a"
+        # FFmpeg 依赖的 iOS 系统框架
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework AudioToolbox"
+        "-framework Security"
+        ${IOS_SYSTEM_FRAMEWORKS}
+    )
+
+    # 注册到安装列表 (后面统一安装)
+    set(GFFMPEG_FW_AVAILABLE TRUE)
+else()
+    message(STATUS "[gffmpeg] iOS FFmpeg 未在 ${FFMPEG_IOS_DIR} 找到, 跳过")
+    set(GFFMPEG_FW_AVAILABLE FALSE)
+endif()
+
+# ============================================================================
 # 主可执行文件 GGELUA — 新增编译配置 (替代旧模板预编译二进制)
 # ============================================================================
 set(APP_SRC_DIR "${SOURCES_DIR}/app/ggelua")
@@ -1344,6 +1397,10 @@ install(TARGETS
     freetype_fw
     FRAMEWORK DESTINATION Frameworks
 )
+# 可选: gffmpeg framework (仅在 FFmpeg 可用时安装)
+if(GFFMPEG_FW_AVAILABLE)
+    install(TARGETS gffmpeg_fw FRAMEWORK DESTINATION Frameworks)
+endif()
 
 # 安装主程序
 install(TARGETS GGELUA

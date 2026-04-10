@@ -541,6 +541,56 @@ target_include_directories(main PRIVATE
 )
 target_link_libraries(main PUBLIC lua54 PRIVATE ggelua log)
 target_link_libraries(main PRIVATE SDL2_prebuilt)
+# ============================================================================
+# 12. libgffmpeg.so — SHARED (FFmpeg Lua 绑定: 视频播放/流媒体/录音)
+#     可选模块: 需要提供 FFmpeg 预编译库, 否则跳过
+#     用法: -DFFMPEG_DIR=/path/to/ffmpeg/android
+# ============================================================================
+set(FFMPEG_DIR "" CACHE PATH "FFmpeg 预编译库根目录 (含 include/ 和 lib/{ABI}/)")
+
+if(FFMPEG_DIR)
+    # 检查指定 ABI 下是否存在 libavcodec.so
+    set(_FFMPEG_LIB_DIR "${FFMPEG_DIR}/lib/${ANDROID_ABI}")
+    if(EXISTS "${_FFMPEG_LIB_DIR}/libavcodec.so")
+        message(STATUS "[gffmpeg] 使用 FFmpeg: ${_FFMPEG_LIB_DIR}")
+
+        # 导入 FFmpeg 共享库
+        foreach(_FFLIB avcodec avformat avutil swresample swscale)
+            add_library(${_FFLIB} SHARED IMPORTED)
+            set_target_properties(${_FFLIB} PROPERTIES
+                IMPORTED_LOCATION "${_FFMPEG_LIB_DIR}/lib${_FFLIB}.so"
+            )
+        endforeach()
+
+        set(GFFMPEG_SRC_DIR "${SOURCES_DIR}/lib/gffmpeg")
+        add_library(gffmpeg SHARED
+            "${GFFMPEG_SRC_DIR}/gffmpeg.c"
+            "${GFFMPEG_SRC_DIR}/gff_player.c"
+            "${GFFMPEG_SRC_DIR}/gff_recorder.c"
+        )
+        target_include_directories(gffmpeg PRIVATE
+            "${GFFMPEG_SRC_DIR}"
+            "${FFMPEG_DIR}/include"
+            "${SDL_INCLUDE_DIR}"
+        )
+        target_link_libraries(gffmpeg PUBLIC lua54
+            PRIVATE avcodec avformat avutil swresample swscale log
+        )
+        target_link_libraries(gffmpeg PRIVATE SDL2_prebuilt)
+
+        # 将 gffmpeg 和 FFmpeg .so 加入安装列表
+        install(TARGETS gffmpeg LIBRARY DESTINATION ${ANDROID_ABI})
+        # 安装 FFmpeg 运行时 .so
+        foreach(_FFLIB avcodec avformat avutil swresample swscale)
+            install(FILES "${_FFMPEG_LIB_DIR}/lib${_FFLIB}.so"
+                    DESTINATION ${ANDROID_ABI})
+        endforeach()
+    else()
+        message(STATUS "[gffmpeg] FFmpeg 库未在 ${_FFMPEG_LIB_DIR} 找到, 跳过")
+    endif()
+else()
+    message(STATUS "[gffmpeg] FFMPEG_DIR 未设置, 跳过 gffmpeg 模块构建")
+endif()
 
 # ============================================================================
 # 安装: 收集 .so 到 {ABI}/ 目录
