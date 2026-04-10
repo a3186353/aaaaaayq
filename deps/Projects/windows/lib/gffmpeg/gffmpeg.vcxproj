@@ -106,7 +106,7 @@
     <ProjectReference Include="..\..\dep\SDL2\SDL2.vcxproj">
       <Project>{81ce8daf-ebb2-4761-8e45-b71abcca8c68}</Project>
     </ProjectReference>
-    <ProjectReference Include="..\..\lua\lua.vcxproj">
+    <ProjectReference Include="..\..\dll\lua\lua.vcxproj">
       <Project>{0ffa55d6-c072-4ba9-a5ea-f08cffe7d641}</Project>
     </ProjectReference>
   </ItemGroup>

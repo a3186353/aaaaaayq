@@ -163,13 +163,16 @@ jobs:
         # 找到解压后的根目录 (可能有一层嵌套)
         $extractedRoot = Get-ChildItem "ffmpeg-extracted" -Directory | Select-Object -First 1
         if ($extractedRoot) {
-          # 复制 include 和 lib
+          # 复制 include
           if (Test-Path "$($extractedRoot.FullName)/include") {
             Copy-Item "$($extractedRoot.FullName)/include" -Destination "$destDir/include" -Recurse -Force
           }
+          # 复制 lib → lib/x64 (vcxproj 引用 lib/$(PlatformTarget))
           if (Test-Path "$($extractedRoot.FullName)/lib") {
-            Copy-Item "$($extractedRoot.FullName)/lib" -Destination "$destDir/lib" -Recurse -Force
+            New-Item -ItemType Directory -Path "$destDir/lib/x64" -Force | Out-Null
+            Copy-Item "$($extractedRoot.FullName)/lib/*" -Destination "$destDir/lib/x64/" -Recurse -Force
           }
+          # 复制 bin (运行时 DLL)
           if (Test-Path "$($extractedRoot.FullName)/bin") {
             Copy-Item "$($extractedRoot.FullName)/bin" -Destination "$destDir/bin" -Recurse -Force
           }
