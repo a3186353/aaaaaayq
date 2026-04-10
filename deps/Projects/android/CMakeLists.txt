@@ -549,9 +549,17 @@ target_link_libraries(main PRIVATE SDL2_prebuilt)
 set(FFMPEG_DIR "" CACHE PATH "FFmpeg 预编译库根目录 (含 include/ 和 lib/{ABI}/)")
 
 if(FFMPEG_DIR)
-    # 检查指定 ABI 下是否存在 libavcodec.so
-    set(_FFMPEG_LIB_DIR "${FFMPEG_DIR}/lib/${ANDROID_ABI}")
-    if(EXISTS "${_FFMPEG_LIB_DIR}/libavcodec.so")
+    # 尝试查找 FFmpeg 库的路径 (支持平铺或按 ABI 划分子目录)
+    # CI 环境: FFMPEG_DIR/lib
+    # 预编译包: FFMPEG_DIR/lib/${ANDROID_ABI}
+    set(_FFMPEG_LIB_DIR "")
+    if(EXISTS "${FFMPEG_DIR}/lib/${ANDROID_ABI}/libavcodec.so")
+        set(_FFMPEG_LIB_DIR "${FFMPEG_DIR}/lib/${ANDROID_ABI}")
+    elseif(EXISTS "${FFMPEG_DIR}/lib/libavcodec.so")
+        set(_FFMPEG_LIB_DIR "${FFMPEG_DIR}/lib")
+    endif()
+
+    if(_FFMPEG_LIB_DIR AND EXISTS "${_FFMPEG_LIB_DIR}/libavcodec.so")
         message(STATUS "[gffmpeg] 使用 FFmpeg: ${_FFMPEG_LIB_DIR}")
 
         # 导入 FFmpeg 共享库
