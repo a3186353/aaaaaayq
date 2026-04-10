@@ -150,6 +150,7 @@ jobs:
           --disable-avdevice --disable-avfilter --disable-postproc \
           --disable-debug --disable-symver \
           --disable-x86asm \
+          --enable-pic \
           --enable-small \
           --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \
           --enable-demuxer=mov,flv,rtsp,rtp,mpegts,avi,matroska,mp3,wav,aac,ogg \
