@@ -476,11 +476,31 @@ int gff_player_open(lua_State *L)
                 SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
                 p->video_width, p->video_height);
 
-            /* 统一使用 sws_scale 将解码帧转为 AV_PIX_FMT_RGBA
-             * (RGBA 字节序 = SDL_PIXELFORMAT_ABGR8888 在小端序平台) */
+            if (!p->texture) {
+                SDL_Log("[gff_player] SDL_CreateTexture ABGR8888 failed: %s, trying ARGB8888", SDL_GetError());
+                /* 回退到 ARGB8888 */
+                p->texture = SDL_CreateTexture(renderer,
+                    SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                    p->video_width, p->video_height);
+            }
+
+            /* 根据实际创建的纹理格式选择对应的 FFmpeg 像素格式 */
+            enum AVPixelFormat target_pix_fmt = AV_PIX_FMT_RGBA;
+            if (p->texture) {
+                Uint32 fmt;
+                SDL_QueryTexture(p->texture, &fmt, NULL, NULL, NULL);
+                if (fmt == SDL_PIXELFORMAT_ARGB8888) {
+                    target_pix_fmt = AV_PIX_FMT_BGRA;
+                }
+                SDL_Log("[gff_player] texture created: %dx%d fmt=0x%X",
+                    p->video_width, p->video_height, fmt);
+            } else {
+                SDL_Log("[gff_player] SDL_CreateTexture failed completely: %s", SDL_GetError());
+            }
+
             p->sws_ctx = sws_getContext(
                 p->video_width, p->video_height, p->video_dec_ctx->pix_fmt,
-                p->video_width, p->video_height, AV_PIX_FMT_RGBA,
+                p->video_width, p->video_height, target_pix_fmt,
                 SWS_BILINEAR, NULL, NULL, NULL);
         }
     }
