@@ -516,6 +516,9 @@ static int LUA_PlayerPlay(lua_State *L)
 
     p->state = GFF_STATE_PLAYING;
 
+    /* 记录播放起始时刻（用于无音频时的墙钟同步） */
+    p->start_ticks = SDL_GetTicks64();
+
     /* 首次播放时创建解码线程 */
     if (!p->decode_thread) {
         p->quit_flag = 0;
@@ -587,20 +590,29 @@ static int LUA_PlayerSetVolume(lua_State *L)
 
 /*
  * player:Update() — 每帧调用，将已解码视频帧更新到 SDL_Texture
- * 使用音频时钟同步：只有当视频帧 PTS <= 音频时钟时才显示
+ * 同步策略：有音频时以音频时钟为基准，无音频时以墙钟为基准
  */
 static int LUA_PlayerUpdate(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
     if (p->state != GFF_STATE_PLAYING || !p->texture) return 0;
 
+    /* 计算当前播放时钟 */
+    double clock;
+    if (p->audio_stream_idx >= 0) {
+        /* 有音频: 以音频回调推进的时钟为准 */
+        clock = p->audio_clock;
+    } else {
+        /* 无音频: 用墙钟计算已播放时长 */
+        clock = (double)(SDL_GetTicks64() - p->start_ticks) / 1000.0;
+    }
+
     AVFrame *frame = NULL;
     double pts = 0;
 
-    /* 尝试弹出所有 PTS <= audio_clock 的帧，保留最后一帧用于显示 */
+    /* 弹出所有 PTS <= clock 的帧，保留最后一帧用于显示 */
     while (fq_peek(&p->video_queue, &frame, &pts) == 0) {
-        /* 若无音频流，直接显示每一帧 */
-        if (p->audio_stream_idx < 0 || pts <= p->audio_clock + 0.05) {
+        if (pts <= clock + 0.04) {
             /* 更新 YUV 纹理 */
             SDL_UpdateYUVTexture(p->texture, NULL,
                 frame->data[0], frame->linesize[0],
