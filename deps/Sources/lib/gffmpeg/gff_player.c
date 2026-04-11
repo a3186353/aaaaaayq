@@ -247,7 +247,8 @@ static int decode_thread_func(void *data)
             if (p->audio_dec_ctx) avcodec_flush_buffers(p->audio_dec_ctx);
             fq_flush(&p->video_queue);
             ring_flush(&p->audio_ring);
-            p->wall_clock_base = 0;  /* 跳转后重置时钟基准 */
+            /* 跳转后重置时钟基准，使 wall clock 从目标位置继续 */
+            p->wall_clock_base = SDL_GetTicks() - (Uint32)(p->seek_target * 1000);
             p->seek_req = 0;
         }
 
@@ -641,11 +642,11 @@ static int LUA_PlayerUpdate(lua_State *L)
 
     /* 确定当前参考时钟 */
     double ref_clock;
-    if (p->audio_stream_idx >= 0) {
-        /* 有音频时以音频时钟为主 */
+    if (p->audio_dev && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
+        /* 音频设备已打开且时钟已启动 → 以音频时钟为主 */
         ref_clock = p->audio_clock;
     } else {
-        /* 无音频时用 wall clock 推进播放 */
+        /* 无音频设备 / 音频时钟未启动 → 用 wall clock 驱动播放 */
         if (p->wall_clock_base == 0)
             p->wall_clock_base = SDL_GetTicks();
         ref_clock = (double)(SDL_GetTicks() - p->wall_clock_base) / 1000.0;
@@ -690,8 +691,14 @@ static int LUA_PlayerGetDuration(lua_State *L)
 static int LUA_PlayerGetPosition(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
-    /* 优先使用音频时钟，无音频则用视频时钟 */
-    double pos = (p->audio_stream_idx >= 0) ? p->audio_clock : p->video_clock;
+    double pos;
+    if (p->audio_dev && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
+        pos = p->audio_clock;
+    } else if (p->wall_clock_base != 0) {
+        pos = (double)(SDL_GetTicks() - p->wall_clock_base) / 1000.0;
+    } else {
+        pos = 0.0;
+    }
     lua_pushnumber(L, pos);
     return 1;
 }
