@@ -133,14 +133,12 @@ typedef struct GFF_Recorder {
 
     /* 编码缓冲 */
     AVFrame            *enc_frame;
-    int                 frame_size;         /* 编码器每帧采样数 */
-    uint8_t            *pcm_buf;            /* PCM 采集缓冲 */
+    int                 frame_size;     /* 每帧采样数 */
+    uint8_t            *pcm_buf;        /* PCM 采集缓冲 */
     int                 pcm_buf_size;
     int                 pcm_buf_used;
-    int                 capture_frame_bytes;  /* 每帧在采集格式下的字节数 */
-    int                 capture_samples;      /* 每帧在采集端的样本数(每通道) */
 
-    /* 采样格式转换 (SDL 实际采集格式 → 编码器格式) */
+    /* 采样格式转换 (SDL S16 → 编码器要求的格式) */
     SwrContext         *swr_ctx;
 
     /* 线程管理 */

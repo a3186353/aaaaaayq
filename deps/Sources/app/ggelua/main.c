@@ -151,21 +151,13 @@ static int GGE_LoadScript(lua_State* L)
 int SDL_main(int argc, char** argv)
 {
 #ifdef _WIN32
-    // 把当前工作目录和 lib/ 子目录加入DLL搜索路径
-    // lib/gffmpeg.dll 的传递依赖 (avcodec-62.dll 等) 也在 lib/ 中
+    // 把当前工作目录加入DLL搜索路径
+    // 当 lib/mygxy.dll 被 LoadLibrary 加载时，它依赖的 ggelua.dll 在根目录
+    // 没有这行的话 LoadLibrary 只搜索 exe目录/system/lib目录，找不到根目录的dll
     {
         wchar_t cwd[MAX_PATH];
         if (GetCurrentDirectoryW(MAX_PATH, cwd)) {
             SetDllDirectoryW(cwd);
-            // 启用 AddDllDirectory 机制，同时保留默认搜索路径
-            SetDefaultDllDirectories(
-                LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
-                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
-                LOAD_LIBRARY_SEARCH_USER_DIRS);
-            // 将 lib/ 加入搜索目录
-            wchar_t libDir[MAX_PATH];
-            swprintf(libDir, MAX_PATH, L"%s\\lib", cwd);
-            AddDllDirectory(libDir);
         }
     }
 
