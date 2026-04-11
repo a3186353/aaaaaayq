@@ -103,12 +103,12 @@ typedef struct GFF_Player {
     volatile int        state;
     volatile int        quit_flag;  /* 通知解码线程退出 */
 
-    /* 时间同步 —— 以音频时钟为主，无音频时用墙钟 */
-    double              audio_clock;
+    /* 时间同步 —— 以音频时钟为主 */
+    double              audio_clock;        /* 实际播放位置(秒)，在音频回调中更新 */
+    double              decoded_audio_pts;  /* 最后解码的音频帧PTS(秒) */
     double              video_clock;
     double              duration;       /* 总时长(秒)，流媒体为 0 */
     int                 is_streaming;   /* 是否为流媒体(无 duration) */
-    Uint64              start_ticks;    /* 播放起始时刻 (SDL_GetTicks64)，用于无音频时同步 */
 
     /* 音量 (0~128, 与 SDL_MixAudioFormat 兼容) */
     int                 volume;

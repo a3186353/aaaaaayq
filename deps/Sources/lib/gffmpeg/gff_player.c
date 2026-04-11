@@ -166,7 +166,10 @@ static void fq_free(GFF_FrameQueue *fq)
 
 /* ==================== 音频回调 ==================== */
 
-/* SDL 音频播放回调：从音频环形缓冲拉取数据 */
+/*
+ * SDL 音频播放回调：从音频环形缓冲拉取数据
+ * 同时更新 audio_clock 为实际播放位置（解码PTS - 缓冲中未播数据时长）
+ */
 static void audio_callback(void *userdata, Uint8 *stream, int len)
 {
     GFF_Player *p = (GFF_Player *)userdata;
@@ -188,6 +191,13 @@ static void audio_callback(void *userdata, Uint8 *stream, int len)
         /* 混合音频（支持音量控制） */
         SDL_MixAudioFormat(stream + filled, tmp, AUDIO_S16SYS, got, p->volume);
         filled += got;
+    }
+
+    /* 计算实际播放位置 = 最后解码PTS - 缓冲中剩余未播数据的时长 */
+    if (filled > 0) {
+        double bytes_per_sec = (double)(GFF_AUDIO_TARGET_FREQ * GFF_AUDIO_TARGET_CH * sizeof(int16_t));
+        double buffered_sec  = (double)p->audio_ring.available / bytes_per_sec;
+        p->audio_clock = p->decoded_audio_pts - buffered_sec;
     }
 }
 
@@ -295,7 +305,7 @@ static int decode_thread_func(void *data)
                 if (ret < 0) break;
 
                 double pts = calc_pts(frame, p->fmt_ctx->streams[p->audio_stream_idx]);
-                p->audio_clock = pts;
+                p->decoded_audio_pts = pts;  /* 记录解码PTS，实际播放位置在回调中计算 */
 
                 if (p->swr_ctx && audio_out_buf) {
                     /* 重采样到目标格式 */
@@ -516,9 +526,6 @@ static int LUA_PlayerPlay(lua_State *L)
 
     p->state = GFF_STATE_PLAYING;
 
-    /* 记录播放起始时刻（用于无音频时的墙钟同步） */
-    p->start_ticks = SDL_GetTicks64();
-
     /* 首次播放时创建解码线程 */
     if (!p->decode_thread) {
         p->quit_flag = 0;
@@ -590,29 +597,20 @@ static int LUA_PlayerSetVolume(lua_State *L)
 
 /*
  * player:Update() — 每帧调用，将已解码视频帧更新到 SDL_Texture
- * 同步策略：有音频时以音频时钟为基准，无音频时以墙钟为基准
+ * 使用音频时钟同步：只有当视频帧 PTS <= 音频时钟时才显示
  */
 static int LUA_PlayerUpdate(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
     if (p->state != GFF_STATE_PLAYING || !p->texture) return 0;
 
-    /* 计算当前播放时钟 */
-    double clock;
-    if (p->audio_stream_idx >= 0) {
-        /* 有音频: 以音频回调推进的时钟为准 */
-        clock = p->audio_clock;
-    } else {
-        /* 无音频: 用墙钟计算已播放时长 */
-        clock = (double)(SDL_GetTicks64() - p->start_ticks) / 1000.0;
-    }
-
     AVFrame *frame = NULL;
     double pts = 0;
 
-    /* 弹出所有 PTS <= clock 的帧，保留最后一帧用于显示 */
+    /* 尝试弹出所有 PTS <= audio_clock 的帧，保留最后一帧用于显示 */
     while (fq_peek(&p->video_queue, &frame, &pts) == 0) {
-        if (pts <= clock + 0.04) {
+        /* 若无音频流，直接显示每一帧 */
+        if (p->audio_stream_idx < 0 || pts <= p->audio_clock + 0.05) {
             /* 更新 YUV 纹理 */
             SDL_UpdateYUVTexture(p->texture, NULL,
                 frame->data[0], frame->linesize[0],
