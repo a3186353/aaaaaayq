@@ -138,6 +138,9 @@ typedef struct GFF_Recorder {
     int                 pcm_buf_size;
     int                 pcm_buf_used;
 
+    /* 采样格式转换 (SDL S16 → 编码器要求的格式) */
+    SwrContext         *swr_ctx;
+
     /* 线程管理 */
     SDL_Thread         *record_thread;
     SDL_mutex          *mutex;

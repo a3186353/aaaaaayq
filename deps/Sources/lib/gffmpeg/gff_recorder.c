@@ -2,7 +2,7 @@
  * gff_recorder.c — 麦克风音频录制模块
  *
  * 功能：通过 SDL 音频采集捕获麦克风输入，使用 FFmpeg 编码器写入文件。
- * 支持输出格式：WAV（PCM）、MP3（libmp3lame）、AAC（aac）
+ * 支持输出格式：WAV（PCM）、MP4/AAC、OGG 等
  * 格式由输出文件扩展名自动推断。
  */
 
@@ -19,7 +19,7 @@ static void capture_callback(void *userdata, Uint8 *stream, int len)
 
     SDL_LockMutex(r->mutex);
     /* 累积 PCM 数据到缓冲区 */
-    int space = r->frame_size * 2 * sizeof(int16_t) - r->pcm_buf_used;
+    int space = r->pcm_buf_size - r->pcm_buf_used;
     int copy_len = (len < space) ? len : space;
     if (copy_len > 0 && r->pcm_buf) {
         memcpy(r->pcm_buf + r->pcm_buf_used, stream, copy_len);
@@ -52,11 +52,11 @@ static int encode_and_write(GFF_Recorder *r, AVFrame *frame)
     return 0;
 }
 
-/* 录制线程：从缓冲区取数据 → 编码 → 写文件 */
+/* 录制线程：从缓冲区取数据 → 可选重采样 → 编码 → 写文件 */
 static int record_thread_func(void *data)
 {
     GFF_Recorder *r = (GFF_Recorder *)data;
-    /* 每帧所需字节数（单声道 S16） */
+    /* SDL 采集格式: S16 单声道, 每帧所需字节数 */
     int frame_bytes = r->frame_size * sizeof(int16_t);
 
     while (!r->quit_flag) {
@@ -68,8 +68,23 @@ static int record_thread_func(void *data)
             continue;
         }
 
-        /* 填充编码帧 */
-        memcpy(r->enc_frame->data[0], r->pcm_buf, frame_bytes);
+        /* 确保编码帧可写 */
+        av_frame_make_writable(r->enc_frame);
+
+        if (r->swr_ctx) {
+            /*
+             * 需要重采样：SDL 采集的是 S16 格式，
+             * 但编码器可能要求 FLTP 等其他格式
+             */
+            const uint8_t *in_data = r->pcm_buf;
+            uint8_t *out_data = r->enc_frame->data[0];
+            swr_convert(r->swr_ctx,
+                &out_data, r->frame_size,
+                &in_data, r->frame_size);
+        } else {
+            /* PCM S16 编码器直接拷贝 */
+            memcpy(r->enc_frame->data[0], r->pcm_buf, frame_bytes);
+        }
 
         /* 移动剩余数据到缓冲区头部 */
         int remain = r->pcm_buf_used - frame_bytes;
@@ -144,7 +159,22 @@ int gff_recorder_open(lua_State *L)
     /* 配置编码器 */
     r->enc_ctx = avcodec_alloc_context3(encoder);
     r->enc_ctx->sample_rate = sample_rate;
-    r->enc_ctx->sample_fmt  = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_S16;
+    r->enc_ctx->time_base   = (AVRational){1, sample_rate};
+
+    /* 选择编码器支持的采样格式 */
+    enum AVSampleFormat enc_fmt = AV_SAMPLE_FMT_S16;
+    if (encoder->sample_fmts) {
+        enc_fmt = encoder->sample_fmts[0];
+        /* 优先选择 S16（如果编码器支持），避免不必要的重采样 */
+        for (int i = 0; encoder->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
+            if (encoder->sample_fmts[i] == AV_SAMPLE_FMT_S16) {
+                enc_fmt = AV_SAMPLE_FMT_S16;
+                break;
+            }
+        }
+    }
+    r->enc_ctx->sample_fmt = enc_fmt;
+
     AVChannelLayout mono_layout = AV_CHANNEL_LAYOUT_MONO;
     av_channel_layout_copy(&r->enc_ctx->ch_layout, &mono_layout);
 
@@ -165,7 +195,7 @@ int gff_recorder_open(lua_State *L)
     }
 
     avcodec_parameters_from_context(r->out_stream->codecpar, r->enc_ctx);
-    r->out_stream->time_base = (AVRational){1, sample_rate};
+    r->out_stream->time_base = r->enc_ctx->time_base;
 
     /* 打开输出文件 */
     if (!(r->out_ctx->oformat->flags & AVFMT_NOFILE)) {
@@ -188,8 +218,26 @@ int gff_recorder_open(lua_State *L)
     av_channel_layout_copy(&r->enc_frame->ch_layout, &r->enc_ctx->ch_layout);
     av_frame_get_buffer(r->enc_frame, 0);
 
-    /* 分配 PCM 缓冲区（2 倍帧大小） */
-    r->pcm_buf_size = r->frame_size * 2 * sizeof(int16_t);
+    /*
+     * 如果编码器要求的格式不是 S16，需要创建重采样器
+     * SDL 采集: S16 / mono / 44100Hz
+     * 编码器: enc_fmt / mono / 44100Hz
+     */
+    r->swr_ctx = NULL;
+    if (enc_fmt != AV_SAMPLE_FMT_S16) {
+        r->swr_ctx = swr_alloc();
+        av_opt_set_chlayout(r->swr_ctx, "in_chlayout",  &mono_layout, 0);
+        av_opt_set_int(r->swr_ctx,      "in_sample_rate",  sample_rate, 0);
+        av_opt_set_sample_fmt(r->swr_ctx, "in_sample_fmt",  AV_SAMPLE_FMT_S16, 0);
+
+        av_opt_set_chlayout(r->swr_ctx, "out_chlayout", &mono_layout, 0);
+        av_opt_set_int(r->swr_ctx,      "out_sample_rate", sample_rate, 0);
+        av_opt_set_sample_fmt(r->swr_ctx, "out_sample_fmt", enc_fmt, 0);
+        swr_init(r->swr_ctx);
+    }
+
+    /* 分配 PCM 缓冲区（4 倍帧大小，留充足余量） */
+    r->pcm_buf_size = r->frame_size * 4 * sizeof(int16_t);
     r->pcm_buf      = (uint8_t *)SDL_calloc(1, r->pcm_buf_size);
 
     /* ---- 打开 SDL 采集设备 ---- */
@@ -209,6 +257,7 @@ int gff_recorder_open(lua_State *L)
     r->capture_dev = SDL_OpenAudioDevice(dev_name, 1, &wanted, &r->capture_spec, 0);
     if (!r->capture_dev) {
         /* 清理已分配资源 */
+        if (r->swr_ctx) swr_free(&r->swr_ctx);
         av_frame_free(&r->enc_frame);
         avcodec_free_context(&r->enc_ctx);
         if (r->out_ctx && r->out_ctx->pb) avio_closep(&r->out_ctx->pb);
@@ -241,7 +290,7 @@ static int LUA_RecorderStart(lua_State *L)
     return 0;
 }
 
-/* recorder:Stop() — 停止录制 */
+/* recorder:Stop() — 停止录制并写入文件尾 */
 static int LUA_RecorderStop(lua_State *L)
 {
     GFF_Recorder *r = (GFF_Recorder *)luaL_checkudata(L, 1, GFF_RECORDER_MT);
@@ -257,6 +306,12 @@ static int LUA_RecorderStop(lua_State *L)
         r->record_thread = NULL;
     }
     r->recording = 0;
+
+    /* 写文件尾（WAV 需要此步写入正确的 RIFF 大小） */
+    if (r->out_ctx) {
+        av_write_trailer(r->out_ctx);
+        if (r->out_ctx->pb) avio_closep(&r->out_ctx->pb);
+    }
 
     return 0;
 }
@@ -285,16 +340,18 @@ static int LUA_RecorderClose(lua_State *L)
         r->recording = 0;
     }
 
-    /* 写文件尾 */
+    /* 写文件尾（如果 Stop 没有调用过） */
     if (r->out_ctx) {
         av_write_trailer(r->out_ctx);
         if (r->out_ctx->pb) avio_closep(&r->out_ctx->pb);
+        avformat_free_context(r->out_ctx);
+        r->out_ctx = NULL;
     }
 
     /* 释放 FFmpeg */
+    if (r->swr_ctx)   swr_free(&r->swr_ctx);
     if (r->enc_frame) av_frame_free(&r->enc_frame);
     if (r->enc_ctx)   avcodec_free_context(&r->enc_ctx);
-    if (r->out_ctx)   { avformat_free_context(r->out_ctx); r->out_ctx = NULL; }
 
     /* 释放 SDL */
     if (r->capture_dev) { SDL_CloseAudioDevice(r->capture_dev); r->capture_dev = 0; }
