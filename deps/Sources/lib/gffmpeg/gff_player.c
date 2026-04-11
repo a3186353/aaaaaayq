@@ -95,12 +95,12 @@ static int fq_init(GFF_FrameQueue *fq)
     return 0;
 }
 
-/* 推入一帧（解码线程调用），队列满时阻塞等待 */
+/* 推入一帧（解码线程调用），队列满时短暂等待 */
 static int fq_push(GFF_FrameQueue *fq, AVFrame *frame, double pts, volatile int *quit)
 {
     SDL_LockMutex(fq->mutex);
     while (fq->count >= GFF_FRAME_QUEUE_SIZE && !(*quit)) {
-        SDL_CondWaitTimeout(fq->not_full, fq->mutex, 50);
+        SDL_CondWaitTimeout(fq->not_full, fq->mutex, 10); /* 10ms 快速响应退出 */
     }
     if (*quit) { SDL_UnlockMutex(fq->mutex); return -1; }
 
@@ -335,16 +335,31 @@ static int decode_thread_func(void *data)
 
 /* ==================== 播放器生命周期 ==================== */
 
+/* FFmpeg IO 中断回调：quit_flag 为 1 时中止 av_read_frame 等阻塞操作 */
+static int decode_interrupt_cb(void *opaque)
+{
+    GFF_Player *p = (GFF_Player *)opaque;
+    return p->quit_flag;
+}
+
 /* 释放播放器所有资源 */
 static void player_destroy(GFF_Player *p)
 {
     if (!p) return;
 
-    /* 通知解码线程退出并等待 */
+    /* 通知解码线程退出 */
     p->quit_flag = 1;
+
+    /* 设置 FFmpeg 中断回调，让 av_read_frame 立即返回 */
+    if (p->fmt_ctx) {
+        p->fmt_ctx->interrupt_callback.callback = decode_interrupt_cb;
+        p->fmt_ctx->interrupt_callback.opaque   = p;
+    }
+
     if (p->decode_thread) {
-        /* 唤醒可能阻塞在帧队列上的线程 */
-        SDL_CondBroadcast(p->video_queue.not_full);
+        /* 唤醒所有可能阻塞在条件变量上的线程 */
+        if (p->video_queue.not_full)  SDL_CondBroadcast(p->video_queue.not_full);
+        if (p->video_queue.not_empty) SDL_CondBroadcast(p->video_queue.not_empty);
         SDL_WaitThread(p->decode_thread, NULL);
         p->decode_thread = NULL;
     }
