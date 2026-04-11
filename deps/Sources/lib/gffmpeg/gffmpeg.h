@@ -137,7 +137,8 @@ typedef struct GFF_Recorder {
     uint8_t            *pcm_buf;            /* PCM 采集缓冲 */
     int                 pcm_buf_size;
     int                 pcm_buf_used;
-    int                 capture_frame_bytes; /* 每帧在采集格式下的字节数 */
+    int                 capture_frame_bytes;  /* 每帧在采集格式下的字节数 */
+    int                 capture_samples;      /* 每帧在采集端的样本数(每通道) */
 
     /* 采样格式转换 (SDL 实际采集格式 → 编码器格式) */
     SwrContext         *swr_ctx;

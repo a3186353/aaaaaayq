@@ -100,7 +100,7 @@ static int record_thread_func(void *data)
 
         swr_convert(r->swr_ctx,
             out_ptrs, r->frame_size,
-            &in_data, r->frame_size);
+            &in_data, r->capture_samples);
 
         /* 移除已消费的数据 */
         int remain = r->pcm_buf_used - cfb;
@@ -275,6 +275,7 @@ int gff_recorder_open(lua_State *L)
     if (cap_freq != sample_rate) {
         cap_samples_per_frame = (int)((int64_t)r->frame_size * cap_freq / sample_rate) + 1;
     }
+    r->capture_samples     = cap_samples_per_frame;
     r->capture_frame_bytes = cap_samples_per_frame * cap_ch * sdl_bytes_per_sample(r->capture_spec.format);
 
     /* 构建重采样器: 采集格式 → 编码器格式 */
