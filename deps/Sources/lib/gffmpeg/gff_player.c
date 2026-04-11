@@ -525,16 +525,31 @@ int gff_player_open(lua_State *L)
             av_opt_set_sample_fmt(p->swr_ctx,"out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
             swr_init(p->swr_ctx);
 
-            /* 打开 SDL 音频输出设备 */
+            /* 确保 SDL 音频子系统已初始化 */
+            if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+                if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+                    SDL_Log("[gff_player] SDL_InitSubSystem(AUDIO) failed: %s", SDL_GetError());
+                }
+            }
+
+            /* 打开 SDL 音频输出设备（移动端用 2048 缓冲更稳定） */
             SDL_AudioSpec wanted;
             SDL_zero(wanted);
             wanted.freq     = GFF_AUDIO_TARGET_FREQ;
             wanted.format   = AUDIO_S16SYS;
             wanted.channels = GFF_AUDIO_TARGET_CH;
-            wanted.samples  = 1024;
+            wanted.samples  = 2048;
             wanted.callback = audio_callback;
             wanted.userdata = p;
-            p->audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &p->audio_spec, 0);
+            p->audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &p->audio_spec,
+                SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
+
+            if (p->audio_dev) {
+                SDL_Log("[gff_player] audio device opened: id=%u freq=%d ch=%d samples=%d",
+                    p->audio_dev, p->audio_spec.freq, p->audio_spec.channels, p->audio_spec.samples);
+            } else {
+                SDL_Log("[gff_player] SDL_OpenAudioDevice failed: %s", SDL_GetError());
+            }
         }
     }
 
