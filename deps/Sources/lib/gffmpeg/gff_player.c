@@ -347,14 +347,8 @@ static void player_destroy(GFF_Player *p)
 {
     if (!p) return;
 
-    /* 通知解码线程退出 */
+    /* 通知解码线程退出（中断回调已在 open 时注册，会自动生效） */
     p->quit_flag = 1;
-
-    /* 设置 FFmpeg 中断回调，让 av_read_frame 立即返回 */
-    if (p->fmt_ctx) {
-        p->fmt_ctx->interrupt_callback.callback = decode_interrupt_cb;
-        p->fmt_ctx->interrupt_callback.opaque   = p;
-    }
 
     if (p->decode_thread) {
         /* 唤醒所有可能阻塞在条件变量上的线程 */
@@ -445,6 +439,11 @@ int gff_player_open(lua_State *L)
     av_dict_set(&opts, "stimeout", "5000000", 0);       /* RTSP 超时 5s */
     av_dict_set(&opts, "reconnect", "1", 0);             /* HTTP 自动重连 */
     av_dict_set(&opts, "reconnect_streamed", "1", 0);
+
+    /* 注册 FFmpeg IO 中断回调（必须在 avformat_open_input 之前） */
+    p->fmt_ctx = avformat_alloc_context();
+    p->fmt_ctx->interrupt_callback.callback = decode_interrupt_cb;
+    p->fmt_ctx->interrupt_callback.opaque   = p;
 
     int ret = avformat_open_input(&p->fmt_ctx, url, NULL, &opts);
     av_dict_free(&opts);
