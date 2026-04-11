@@ -69,7 +69,8 @@ static int ring_read(GFF_AudioRing *ring, uint8_t *dst, int len)
 
 static void ring_free(GFF_AudioRing *ring)
 {
-    if (ring->mutex) { SDL_DestroyMutex(ring->mutex); ring->mutex = NULL; }
+    if (ring->mutex && SDL_WasInit(0)) { SDL_DestroyMutex(ring->mutex); }
+    ring->mutex = NULL;
     if (ring->data)  { SDL_free(ring->data); ring->data = NULL; }
 }
 
@@ -95,12 +96,12 @@ static int fq_init(GFF_FrameQueue *fq)
     return 0;
 }
 
-/* 推入一帧（解码线程调用），队列满时短暂等待 */
+/* 推入一帧（解码线程调用），队列满时阻塞等待 */
 static int fq_push(GFF_FrameQueue *fq, AVFrame *frame, double pts, volatile int *quit)
 {
     SDL_LockMutex(fq->mutex);
     while (fq->count >= GFF_FRAME_QUEUE_SIZE && !(*quit)) {
-        SDL_CondWaitTimeout(fq->not_full, fq->mutex, 10); /* 10ms 快速响应退出 */
+        SDL_CondWaitTimeout(fq->not_full, fq->mutex, 50);
     }
     if (*quit) { SDL_UnlockMutex(fq->mutex); return -1; }
 
@@ -159,9 +160,14 @@ static void fq_free(GFF_FrameQueue *fq)
     for (int i = 0; i < GFF_FRAME_QUEUE_SIZE; i++) {
         if (fq->frames[i]) { av_frame_free(&fq->frames[i]); }
     }
-    if (fq->mutex)     SDL_DestroyMutex(fq->mutex);
-    if (fq->not_full)  SDL_DestroyCond(fq->not_full);
-    if (fq->not_empty) SDL_DestroyCond(fq->not_empty);
+    if (SDL_WasInit(0)) {
+        if (fq->mutex)     SDL_DestroyMutex(fq->mutex);
+        if (fq->not_full)  SDL_DestroyCond(fq->not_full);
+        if (fq->not_empty) SDL_DestroyCond(fq->not_empty);
+    }
+    fq->mutex = NULL;
+    fq->not_full = NULL;
+    fq->not_empty = NULL;
 }
 
 /* ==================== 音频回调 ==================== */
@@ -335,40 +341,32 @@ static int decode_thread_func(void *data)
 
 /* ==================== 播放器生命周期 ==================== */
 
-/* FFmpeg IO 中断回调：quit_flag 为 1 时中止 av_read_frame 等阻塞操作 */
-static int decode_interrupt_cb(void *opaque)
-{
-    GFF_Player *p = (GFF_Player *)opaque;
-    return p->quit_flag;
-}
-
 /* 释放播放器所有资源 */
 static void player_destroy(GFF_Player *p)
 {
     if (!p) return;
 
-    /* 通知解码线程退出（中断回调已在 open 时注册，会自动生效） */
+    /* 通知解码线程退出并等待 */
     p->quit_flag = 1;
-
     if (p->decode_thread) {
-        /* 唤醒所有可能阻塞在条件变量上的线程 */
-        if (p->video_queue.not_full)  SDL_CondBroadcast(p->video_queue.not_full);
-        if (p->video_queue.not_empty) SDL_CondBroadcast(p->video_queue.not_empty);
+        /* 唤醒可能阻塞在帧队列上的线程 */
+        if (p->video_queue.not_full)
+            SDL_CondBroadcast(p->video_queue.not_full);
         SDL_WaitThread(p->decode_thread, NULL);
         p->decode_thread = NULL;
     }
 
-    /* 关闭 SDL 音频设备 */
-    if (p->audio_dev) {
+    /* 关闭 SDL 音频设备（仅在 SDL 子系统仍活跃时） */
+    if (p->audio_dev && SDL_WasInit(SDL_INIT_AUDIO)) {
         SDL_CloseAudioDevice(p->audio_dev);
-        p->audio_dev = 0;
     }
+    p->audio_dev = 0;
 
-    /* 释放 SDL 纹理（通过 GGE_Texture 引用计数） */
-    if (p->texture) {
+    /* 释放 SDL 纹理（仅在 SDL 视频子系统仍活跃时） */
+    if (p->texture && SDL_WasInit(SDL_INIT_VIDEO)) {
         SDL_DestroyTexture(p->texture);
-        p->texture = NULL;
     }
+    p->texture = NULL;
 
     /* 释放 FFmpeg 上下文 */
     if (p->sws_ctx) { sws_freeContext(p->sws_ctx); p->sws_ctx = NULL; }
@@ -380,7 +378,8 @@ static void player_destroy(GFF_Player *p)
     /* 释放队列和缓冲 */
     fq_free(&p->video_queue);
     ring_free(&p->audio_ring);
-    if (p->state_mutex) { SDL_DestroyMutex(p->state_mutex); p->state_mutex = NULL; }
+    if (p->state_mutex && SDL_WasInit(0)) { SDL_DestroyMutex(p->state_mutex); }
+    p->state_mutex = NULL;
 }
 
 /* 打开指定音/视频流的解码器 */
@@ -439,11 +438,6 @@ int gff_player_open(lua_State *L)
     av_dict_set(&opts, "stimeout", "5000000", 0);       /* RTSP 超时 5s */
     av_dict_set(&opts, "reconnect", "1", 0);             /* HTTP 自动重连 */
     av_dict_set(&opts, "reconnect_streamed", "1", 0);
-
-    /* 注册 FFmpeg IO 中断回调（必须在 avformat_open_input 之前） */
-    p->fmt_ctx = avformat_alloc_context();
-    p->fmt_ctx->interrupt_callback.callback = decode_interrupt_cb;
-    p->fmt_ctx->interrupt_callback.opaque   = p;
 
     int ret = avformat_open_input(&p->fmt_ctx, url, NULL, &opts);
     av_dict_free(&opts);
