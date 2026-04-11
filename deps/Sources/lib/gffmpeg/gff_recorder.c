@@ -307,10 +307,12 @@ static int LUA_RecorderStop(lua_State *L)
     }
     r->recording = 0;
 
-    /* 写文件尾（WAV 需要此步写入正确的 RIFF 大小） */
+    /* 写文件尾 + 关闭文件（WAV 需要此步写入正确的 RIFF 大小） */
     if (r->out_ctx) {
         av_write_trailer(r->out_ctx);
         if (r->out_ctx->pb) avio_closep(&r->out_ctx->pb);
+        avformat_free_context(r->out_ctx);
+        r->out_ctx = NULL;  /* 防止 Close/GC 重复操作 */
     }
 
     return 0;
