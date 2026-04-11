@@ -52,49 +52,57 @@ static int encode_and_write(GFF_Recorder *r, AVFrame *frame)
     return 0;
 }
 
-/* 录制线程：从缓冲区取数据 → 可选重采样 → 编码 → 写文件 */
+/*
+ * 录制线程：从缓冲区取数据 → 可选重采样 → 编码 → 写文件
+ * 关键：mutex 只保护 pcm_buf 拷贝操作，编码在锁外进行
+ *       避免阻塞 SDL 采集回调导致音频丢失
+ */
 static int record_thread_func(void *data)
 {
     GFF_Recorder *r = (GFF_Recorder *)data;
     /* SDL 采集格式: S16 单声道, 每帧所需字节数 */
     int frame_bytes = r->frame_size * sizeof(int16_t);
 
-    while (!r->quit_flag) {
-        SDL_Delay(5); /* 避免空转消耗 CPU */
+    /* 线程本地缓冲，用于从 pcm_buf 快速拷出数据后立即释放锁 */
+    uint8_t *local_buf = (uint8_t *)SDL_malloc(frame_bytes);
+    if (!local_buf) return -1;
 
+    while (!r->quit_flag) {
+        SDL_Delay(2); /* 降低延迟，更频繁检查数据 */
+
+        /* ---- 临界区：最小化锁持有时间 ---- */
         SDL_LockMutex(r->mutex);
         if (r->pcm_buf_used < frame_bytes) {
             SDL_UnlockMutex(r->mutex);
             continue;
         }
+        /* 快速拷贝到本地缓冲 */
+        memcpy(local_buf, r->pcm_buf, frame_bytes);
+        /* 移动剩余数据 */
+        int remain = r->pcm_buf_used - frame_bytes;
+        if (remain > 0)
+            memmove(r->pcm_buf, r->pcm_buf + frame_bytes, remain);
+        r->pcm_buf_used = remain;
+        SDL_UnlockMutex(r->mutex);
+        /* ---- 临界区结束：以下操作不持锁 ---- */
 
-        /* 确保编码帧可写，并清零缓冲以消除对齐填充造成的杂音 */
-        if (av_frame_make_writable(r->enc_frame) < 0) {
-            SDL_UnlockMutex(r->mutex);
+        /* 准备编码帧 */
+        if (av_frame_make_writable(r->enc_frame) < 0)
             continue;
-        }
-        memset(r->enc_frame->data[0], 0, r->enc_frame->linesize[0]);
 
         if (r->swr_ctx) {
-            /* 重采样：SDL 采集 S16 → 编码器要求的格式（如 FLTP） */
-            const uint8_t *in_data = r->pcm_buf;
+            /* 重采样：SDL S16 → 编码器格式（如 FLTP） */
+            const uint8_t *in_data = local_buf;
             uint8_t *out_data = r->enc_frame->data[0];
             swr_convert(r->swr_ctx,
                 &out_data, r->frame_size,
                 &in_data, r->frame_size);
         } else {
             /* PCM S16 编码器直接拷贝 */
-            memcpy(r->enc_frame->data[0], r->pcm_buf, frame_bytes);
+            memcpy(r->enc_frame->data[0], local_buf, frame_bytes);
         }
 
-        /* 移动剩余数据到缓冲区头部 */
-        int remain = r->pcm_buf_used - frame_bytes;
-        if (remain > 0)
-            memmove(r->pcm_buf, r->pcm_buf + frame_bytes, remain);
-        r->pcm_buf_used = remain;
-        SDL_UnlockMutex(r->mutex);
-
-        /* 设置 PTS */
+        /* 设置 PTS 并编码写入 */
         r->enc_frame->pts = r->samples_written;
         r->samples_written += r->frame_size;
         r->duration = (double)r->samples_written / r->enc_ctx->sample_rate;
@@ -104,6 +112,7 @@ static int record_thread_func(void *data)
 
     /* 刷新编码器残留数据 */
     encode_and_write(r, NULL);
+    SDL_free(local_buf);
     return 0;
 }
 
@@ -237,8 +246,8 @@ int gff_recorder_open(lua_State *L)
         swr_init(r->swr_ctx);
     }
 
-    /* 分配 PCM 缓冲区（4 倍帧大小，留充足余量） */
-    r->pcm_buf_size = r->frame_size * 4 * sizeof(int16_t);
+    /* 分配 PCM 缓冲区（约 1 秒音频，充分吸收编码延迟） */
+    r->pcm_buf_size = sample_rate * 1 * sizeof(int16_t);  /* 1秒 mono S16 */
     r->pcm_buf      = (uint8_t *)SDL_calloc(1, r->pcm_buf_size);
 
     /* ---- 打开 SDL 采集设备 ---- */
