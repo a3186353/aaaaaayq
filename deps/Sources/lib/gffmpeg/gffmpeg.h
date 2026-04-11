@@ -87,7 +87,8 @@ typedef struct GFF_Player {
     /* 音频重采样 (解码格式 → S16/44100Hz/Stereo) */
     SwrContext         *swr_ctx;
     SDL_AudioSpec       audio_spec;
-    SDL_AudioDeviceID   audio_dev;
+    SDL_AudioDeviceID   audio_dev;       /* 保留兼容，桌面端仍可使用独立设备 */
+    int                 audio_hooked;    /* Mix_HookMusic 是否已安装 */
 
     /* SDL 渲染 */
     SDL_Renderer       *renderer;   /* 外部传入，不由播放器销毁 */

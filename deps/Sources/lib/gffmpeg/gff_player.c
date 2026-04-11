@@ -9,6 +9,7 @@
 
 #include "gffmpeg.h"
 #include <string.h>
+#include <SDL_mixer.h>
 
 /* ==================== 音频环形缓冲操作 ==================== */
 
@@ -173,20 +174,21 @@ static void fq_free(GFF_FrameQueue *fq)
 /* ==================== 音频回调 ==================== */
 
 /*
- * SDL 音频播放回调：从音频环形缓冲拉取数据
- * 同时更新 audio_clock 为实际播放位置（解码PTS - 缓冲中未播数据时长）
+ * Mix_HookMusic 回调：从音频环形缓冲拉取视频音频数据
+ * 直接写入 stream（HookMusic 替代音乐通道输出）
+ * 同时更新 audio_clock 为实际播放位置
  */
-static void audio_callback(void *userdata, Uint8 *stream, int len)
+static void SDLCALL audio_hook_callback(void *userdata, Uint8 *stream, int len)
 {
     GFF_Player *p = (GFF_Player *)userdata;
     int filled = 0;
 
-    /* 先用静音填充，避免数据不足时出现噪音 */
+    /* 先用静音填充 */
     SDL_memset(stream, 0, len);
 
     if (p->state != GFF_STATE_PLAYING) return;
 
-    /* 从环形缓冲读取实际音频数据 */
+    /* 从环形缓冲读取音频数据并混合（支持音量控制） */
     uint8_t tmp[8192];
     while (filled < len) {
         int chunk = len - filled;
@@ -194,12 +196,11 @@ static void audio_callback(void *userdata, Uint8 *stream, int len)
         int got = ring_read(&p->audio_ring, tmp, chunk);
         if (got <= 0) break;
 
-        /* 混合音频（支持音量控制） */
         SDL_MixAudioFormat(stream + filled, tmp, AUDIO_S16SYS, got, p->volume);
         filled += got;
     }
 
-    /* 计算实际播放位置 = 最后解码PTS - 缓冲中剩余未播数据的时长 */
+    /* 更新播放位置 = 最后解码PTS - 缓冲中剩余未播数据的时长 */
     if (filled > 0) {
         double bytes_per_sec = (double)(GFF_AUDIO_TARGET_FREQ * GFF_AUDIO_TARGET_CH * sizeof(int16_t));
         double buffered_sec  = (double)p->audio_ring.available / bytes_per_sec;
@@ -359,11 +360,11 @@ static void player_destroy(GFF_Player *p)
         p->decode_thread = NULL;
     }
 
-    /* 关闭 SDL 音频设备（仅在 SDL 子系统仍活跃时） */
-    if (p->audio_dev && SDL_WasInit(SDL_INIT_AUDIO)) {
-        SDL_CloseAudioDevice(p->audio_dev);
+    /* 卸载 Mix_HookMusic（停止向 SDL_mixer 注入视频音频） */
+    if (p->audio_hooked) {
+        Mix_HookMusic(NULL, NULL);
+        p->audio_hooked = 0;
     }
-    p->audio_dev = 0;
 
     /* 释放 SDL 纹理（仅在 SDL 视频子系统仍活跃时） */
     if (p->texture && SDL_WasInit(SDL_INIT_VIDEO)) {
@@ -525,31 +526,9 @@ int gff_player_open(lua_State *L)
             av_opt_set_sample_fmt(p->swr_ctx,"out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
             swr_init(p->swr_ctx);
 
-            /* 确保 SDL 音频子系统已初始化 */
-            if (!SDL_WasInit(SDL_INIT_AUDIO)) {
-                if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
-                    SDL_Log("[gff_player] SDL_InitSubSystem(AUDIO) failed: %s", SDL_GetError());
-                }
-            }
-
-            /* 打开 SDL 音频输出设备（移动端用 2048 缓冲更稳定） */
-            SDL_AudioSpec wanted;
-            SDL_zero(wanted);
-            wanted.freq     = GFF_AUDIO_TARGET_FREQ;
-            wanted.format   = AUDIO_S16SYS;
-            wanted.channels = GFF_AUDIO_TARGET_CH;
-            wanted.samples  = 2048;
-            wanted.callback = audio_callback;
-            wanted.userdata = p;
-            p->audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &p->audio_spec,
-                SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
-
-            if (p->audio_dev) {
-                SDL_Log("[gff_player] audio device opened: id=%u freq=%d ch=%d samples=%d",
-                    p->audio_dev, p->audio_spec.freq, p->audio_spec.channels, p->audio_spec.samples);
-            } else {
-                SDL_Log("[gff_player] SDL_OpenAudioDevice failed: %s", SDL_GetError());
-            }
+            /* 音频将通过 Mix_HookMusic 注入 SDL_mixer 管线（Play 时安装） */
+            p->audio_hooked = 0;
+            SDL_Log("[gff_player] audio stream ready, will hook into SDL_mixer on Play()");
         }
     }
 
@@ -578,9 +557,12 @@ static int LUA_PlayerPlay(lua_State *L)
         p->decode_thread = SDL_CreateThread(decode_thread_func, "gff_decode", p);
     }
 
-    /* 恢复音频设备播放 */
-    if (p->audio_dev)
-        SDL_PauseAudioDevice(p->audio_dev, 0);
+    /* 安装 Mix_HookMusic 将视频音频注入 SDL_mixer 管线 */
+    if (p->swr_ctx && !p->audio_hooked) {
+        Mix_HookMusic(audio_hook_callback, p);
+        p->audio_hooked = 1;
+        SDL_Log("[gff_player] Mix_HookMusic installed");
+    }
 
     return 0;
 }
@@ -590,7 +572,7 @@ static int LUA_PlayerPause(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
     p->state = GFF_STATE_PAUSED;
-    if (p->audio_dev) SDL_PauseAudioDevice(p->audio_dev, 1);
+    /* audio_hook_callback 内部检查 state，暂停时自动输出静音 */
     return 0;
 }
 
@@ -605,7 +587,11 @@ static int LUA_PlayerStop(lua_State *L)
         SDL_WaitThread(p->decode_thread, NULL);
         p->decode_thread = NULL;
     }
-    if (p->audio_dev) SDL_PauseAudioDevice(p->audio_dev, 1);
+    /* 卸载音乐 hook */
+    if (p->audio_hooked) {
+        Mix_HookMusic(NULL, NULL);
+        p->audio_hooked = 0;
+    }
 
     fq_flush(&p->video_queue);
     ring_flush(&p->audio_ring);
@@ -657,7 +643,7 @@ static int LUA_PlayerUpdate(lua_State *L)
 
     /* 确定当前参考时钟 */
     double ref_clock;
-    if (p->audio_dev && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
+    if (p->audio_hooked && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
         /* 音频设备已打开且时钟已启动 → 以音频时钟为主 */
         ref_clock = p->audio_clock;
     } else {
@@ -707,7 +693,7 @@ static int LUA_PlayerGetPosition(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
     double pos;
-    if (p->audio_dev && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
+    if (p->audio_hooked && p->audio_stream_idx >= 0 && p->audio_clock > 0.01) {
         pos = p->audio_clock;
     } else if (p->wall_clock_base != 0) {
         pos = (double)(SDL_GetTicks() - p->wall_clock_base) / 1000.0;

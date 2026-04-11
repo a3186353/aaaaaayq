@@ -580,11 +580,12 @@ if(FFMPEG_DIR)
             "${GFFMPEG_SRC_DIR}"
             "${FFMPEG_DIR}/include"
             "${SDL_INCLUDE_DIR}"
+            "${DEPS_DIR}/SDL_Mixer_X/include"
         )
         target_link_libraries(gffmpeg PUBLIC lua54
             PRIVATE avcodec avformat avutil swresample swscale log
         )
-        target_link_libraries(gffmpeg PRIVATE SDL2_prebuilt)
+        target_link_libraries(gffmpeg PRIVATE SDL2_prebuilt SDL_mixer_prebuilt)
 
         # 将 gffmpeg 和 FFmpeg .so 加入安装列表
         install(TARGETS gffmpeg LIBRARY DESTINATION ${ANDROID_ABI})
