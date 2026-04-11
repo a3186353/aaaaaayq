@@ -278,8 +278,8 @@ jobs:
         ENGINE_SO=(liblua54.so libggelua.so libgsdl2.so libmygxy.so libgastar.so liblsqlite3.so libmain.so)
 
         echo "=== 合并引擎 SO 到 jniLibs ==="
-        # 预编译 SDL .so 白名单 (仅这4个来自 git, 其余必须全部由 CI 新编译)
-        SDL_KEEP=(libSDL2.so libSDL_image.so libSDL_mixer.so libSDL_ttf.so)
+        # 预编译 .so 白名单 (来自 git 仓库, 不由 CI 编译, 需保留)
+        SDL_KEEP=(libSDL2.so libSDL_image.so libSDL_mixer.so libSDL_ttf.so libvgmstream.so)
 
         for abi in "${ABIS[@]}"; do
           echo ""

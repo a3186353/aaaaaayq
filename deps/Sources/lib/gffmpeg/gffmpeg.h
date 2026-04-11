@@ -116,6 +116,9 @@ typedef struct GFF_Player {
     /* 跳转请求 */
     volatile int        seek_req;
     double              seek_target;    /* 目标时间(秒) */
+
+    /* 无音频流时的时钟源 (SDL_GetTicks 基准, 毫秒) */
+    Uint32              wall_clock_base;
 } GFF_Player;
 
 /* ==================== 录音器上下文 ==================== */

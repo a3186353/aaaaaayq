@@ -247,6 +247,7 @@ static int decode_thread_func(void *data)
             if (p->audio_dec_ctx) avcodec_flush_buffers(p->audio_dec_ctx);
             fq_flush(&p->video_queue);
             ring_flush(&p->audio_ring);
+            p->wall_clock_base = 0;  /* 跳转后重置时钟基准 */
             p->seek_req = 0;
         }
 
@@ -280,10 +281,10 @@ static int decode_thread_func(void *data)
                 double pts = calc_pts(frame, p->fmt_ctx->streams[p->video_stream_idx]);
                 p->video_clock = pts;
 
-                /* 如需格式转换则在此处进行（目标: YUV420P） */
+                /* 转换为 BGRA 格式（对应 SDL ARGB8888 纹理） */
                 if (p->sws_ctx) {
                     AVFrame *conv = av_frame_alloc();
-                    conv->format = AV_PIX_FMT_YUV420P;
+                    conv->format = AV_PIX_FMT_BGRA;
                     conv->width  = p->video_width;
                     conv->height = p->video_height;
                     av_frame_get_buffer(conv, 0);
@@ -296,6 +297,7 @@ static int decode_thread_func(void *data)
                     fq_push(&p->video_queue, conv, pts, &p->quit_flag);
                     av_frame_free(&conv);
                 } else {
+                    /* 解码格式恰好是 BGRA 时直接入队 */
                     fq_push(&p->video_queue, frame, pts, &p->quit_flag);
                 }
                 av_frame_unref(frame);
@@ -468,18 +470,18 @@ int gff_player_open(lua_State *L)
             p->video_width  = p->video_dec_ctx->width;
             p->video_height = p->video_dec_ctx->height;
 
-            /* 创建 YUV420P 纹理用于视频渲染 */
+            /* 使用 ARGB8888 纹理：兼容所有移动端 OpenGL ES 后端
+             * IYUV (YUV420P) 在 Android/iOS 的 GLES 驱动上常有兼容问题 */
             p->texture = SDL_CreateTexture(renderer,
-                SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,
+                SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                 p->video_width, p->video_height);
 
-            /* 如果解码输出格式不是 YUV420P，则需要格式转换 */
-            if (p->video_dec_ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
-                p->sws_ctx = sws_getContext(
-                    p->video_width, p->video_height, p->video_dec_ctx->pix_fmt,
-                    p->video_width, p->video_height, AV_PIX_FMT_YUV420P,
-                    SWS_BILINEAR, NULL, NULL, NULL);
-            }
+            /* 统一使用 sws_scale 将解码帧转为 AV_PIX_FMT_BGRA
+             * (BGRA 字节序 = SDL_PIXELFORMAT_ARGB8888 在小端序平台) */
+            p->sws_ctx = sws_getContext(
+                p->video_width, p->video_height, p->video_dec_ctx->pix_fmt,
+                p->video_width, p->video_height, AV_PIX_FMT_BGRA,
+                SWS_BILINEAR, NULL, NULL, NULL);
         }
     }
 
@@ -574,6 +576,7 @@ static int LUA_PlayerStop(lua_State *L)
     p->state = GFF_STATE_STOPPED;
     p->audio_clock = 0;
     p->video_clock = 0;
+    p->wall_clock_base = 0;  /* 重置时钟基准 */
     return 0;
 }
 
@@ -605,7 +608,8 @@ static int LUA_PlayerSetVolume(lua_State *L)
 
 /*
  * player:Update() — 每帧调用，将已解码视频帧更新到 SDL_Texture
- * 使用音频时钟同步：只有当视频帧 PTS <= 音频时钟时才显示
+ * 有音频流：使用音频时钟同步
+ * 无音频流：使用 SDL_GetTicks 作为时钟源
  */
 static int LUA_PlayerUpdate(lua_State *L)
 {
@@ -615,15 +619,24 @@ static int LUA_PlayerUpdate(lua_State *L)
     AVFrame *frame = NULL;
     double pts = 0;
 
-    /* 尝试弹出所有 PTS <= audio_clock 的帧，保留最后一帧用于显示 */
+    /* 确定当前参考时钟 */
+    double ref_clock;
+    if (p->audio_stream_idx >= 0) {
+        /* 有音频时以音频时钟为主 */
+        ref_clock = p->audio_clock;
+    } else {
+        /* 无音频时用 wall clock 推进播放 */
+        if (p->wall_clock_base == 0)
+            p->wall_clock_base = SDL_GetTicks();
+        ref_clock = (double)(SDL_GetTicks() - p->wall_clock_base) / 1000.0;
+    }
+
+    /* 弹出所有 PTS <= 参考时钟的帧，保留最后一帧用于显示 */
     while (fq_peek(&p->video_queue, &frame, &pts) == 0) {
-        /* 若无音频流，直接显示每一帧 */
-        if (p->audio_stream_idx < 0 || pts <= p->audio_clock + 0.05) {
-            /* 更新 YUV 纹理 */
-            SDL_UpdateYUVTexture(p->texture, NULL,
-                frame->data[0], frame->linesize[0],
-                frame->data[1], frame->linesize[1],
-                frame->data[2], frame->linesize[2]);
+        if (pts <= ref_clock + 0.05) {
+            /* 更新 ARGB8888 纹理（BGRA 像素数据，data[0] 包含完整 RGBA 行） */
+            SDL_UpdateTexture(p->texture, NULL,
+                frame->data[0], frame->linesize[0]);
             fq_pop(&p->video_queue);
         } else {
             break; /* 帧还太早，等下一次 Update */
