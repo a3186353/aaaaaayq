@@ -586,6 +586,7 @@ if(FFMPEG_DIR)
             PRIVATE avcodec avformat avutil swresample swscale log
         )
         target_link_libraries(gffmpeg PRIVATE SDL2_prebuilt SDL_mixer_prebuilt)
+        target_compile_definitions(gffmpeg PRIVATE GFF_USE_MIXER_HOOK=1)
 
         # 将 gffmpeg 和 FFmpeg .so 加入安装列表
         install(TARGETS gffmpeg LIBRARY DESTINATION ${ANDROID_ABI})
