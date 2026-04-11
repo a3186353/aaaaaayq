@@ -281,10 +281,10 @@ static int decode_thread_func(void *data)
                 double pts = calc_pts(frame, p->fmt_ctx->streams[p->video_stream_idx]);
                 p->video_clock = pts;
 
-                /* 转换为 BGRA 格式（对应 SDL ARGB8888 纹理） */
+                /* 转换为 RGBA 格式（对应 SDL ABGR8888 纹理） */
                 if (p->sws_ctx) {
                     AVFrame *conv = av_frame_alloc();
-                    conv->format = AV_PIX_FMT_BGRA;
+                    conv->format = AV_PIX_FMT_RGBA;
                     conv->width  = p->video_width;
                     conv->height = p->video_height;
                     av_frame_get_buffer(conv, 0);
@@ -297,7 +297,7 @@ static int decode_thread_func(void *data)
                     fq_push(&p->video_queue, conv, pts, &p->quit_flag);
                     av_frame_free(&conv);
                 } else {
-                    /* 解码格式恰好是 BGRA 时直接入队 */
+                    /* 解码格式恰好是 RGBA 时直接入队 */
                     fq_push(&p->video_queue, frame, pts, &p->quit_flag);
                 }
                 av_frame_unref(frame);
@@ -470,17 +470,17 @@ int gff_player_open(lua_State *L)
             p->video_width  = p->video_dec_ctx->width;
             p->video_height = p->video_dec_ctx->height;
 
-            /* 使用 ARGB8888 纹理：兼容所有移动端 OpenGL ES 后端
-             * IYUV (YUV420P) 在 Android/iOS 的 GLES 驱动上常有兼容问题 */
+            /* 使用 ABGR8888 纹理 (即 GLES 的 GL_RGBA)：兼容所有移动端 OpenGL ES 后端
+             * ARGB8888 在有些 Android/iOS 的 GLES 驱动上不支持或会黑屏 */
             p->texture = SDL_CreateTexture(renderer,
-                SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
                 p->video_width, p->video_height);
 
-            /* 统一使用 sws_scale 将解码帧转为 AV_PIX_FMT_BGRA
-             * (BGRA 字节序 = SDL_PIXELFORMAT_ARGB8888 在小端序平台) */
+            /* 统一使用 sws_scale 将解码帧转为 AV_PIX_FMT_RGBA
+             * (RGBA 字节序 = SDL_PIXELFORMAT_ABGR8888 在小端序平台) */
             p->sws_ctx = sws_getContext(
                 p->video_width, p->video_height, p->video_dec_ctx->pix_fmt,
-                p->video_width, p->video_height, AV_PIX_FMT_BGRA,
+                p->video_width, p->video_height, AV_PIX_FMT_RGBA,
                 SWS_BILINEAR, NULL, NULL, NULL);
         }
     }
@@ -634,7 +634,7 @@ static int LUA_PlayerUpdate(lua_State *L)
     /* 弹出所有 PTS <= 参考时钟的帧，保留最后一帧用于显示 */
     while (fq_peek(&p->video_queue, &frame, &pts) == 0) {
         if (pts <= ref_clock + 0.05) {
-            /* 更新 ARGB8888 纹理（BGRA 像素数据，data[0] 包含完整 RGBA 行） */
+            /* 更新 ABGR8888 纹理（RGBA 像素数据，data[0] 包含完整 RGBA 行） */
             SDL_UpdateTexture(p->texture, NULL,
                 frame->data[0], frame->linesize[0]);
             fq_pop(&p->video_queue);
