@@ -815,8 +815,13 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
 
     for (;;) {
         MAP_BlockInfo info = { 0, 0 };
-        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
+        /* 已拿到图像数据后，若流结束或无下一块头（常见于图像即末块、无 flag==0 结束标记），
+         * 不得 return 0，否则整 tile 解码失败 → 地表全黑。旧逻辑是读到第一块图就停。 */
+        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1) {
+            if (have_image)
+                goto tile_blocks_done;
             return 0;
+        }
 
         switch (info.flag) {
         case MAP_BLOCK_GIRB: {
