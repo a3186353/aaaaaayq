@@ -865,7 +865,9 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 return 0;
             img_info = info;
             have_image = 1;
-            break;
+            /* 与历史行为一致：第一块地表图后即停止解析本 tile，避免 JPEG 尾被误读成块头导致解码失败。
+             * GIRB 若在图前已处理；若在图后由 GetBrigFactor / _scan_tile_girb 另扫。 */
+            goto tile_blocks_done;
         }
         case MAP_BLOCK_JPEG:
         {
@@ -888,6 +890,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 }//大话普通
                 img_info = info;
                 have_image = 1;
+                goto tile_blocks_done;
             }
             else {//MAPX 
                 if (!(mem0 = _getmem(&m[0], ud->jpeh.size + info.size)))
@@ -940,16 +943,22 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 mem0 = NULL;
                 img_info = info;
                 have_image = 1;
+                goto tile_blocks_done;
             }
-            break;
         }
         case 0://结束
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+                if (have_image)
+                    goto tile_blocks_done;
                 return 0;
+            }
             goto tile_blocks_done;
         default: //跳过
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+                if (have_image)
+                    goto tile_blocks_done;
                 return 0;
+            }
             break;
         }
     }
