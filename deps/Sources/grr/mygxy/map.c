@@ -1,6 +1,7 @@
 #include "sdl_proxy.h"
 #include "map.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include "../../../Dependencies/SDL_image/external/libwebp-1.3.2/src/webp/decode.h"
 
@@ -719,11 +720,68 @@ eof_found:
 #undef LZO_CHECK_MPOS
     return (int)(op - (Uint8*)out);
 }
+
+/* 仅解析 GIRB（40x60 亮度格，LZO 解压 2400 字节）；成功则 *out_alloc 指向新分配缓冲 */
+static int _scan_tile_girb(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, Uint8** out_alloc)
+{
+    if (!out_alloc)
+        return 0;
+    *out_alloc = NULL;
+    if (id >= ud->mapnum)
+        return 0;
+
+    MAP_Mem* m = tmem ? tmem : ud->mem;
+
+    if (SDL_RWseek(rw, ud->maplist[id], RW_SEEK_SET) == -1)
+        return 0;
+
+    Uint32 masknum;
+    if (SDL_RWread(rw, &masknum, sizeof(Uint32), 1) != 1)
+        return 0;
+    if (masknum > 65535)
+        return 0;
+    if (masknum > 0 && ud->flag == MAP_FLAG_M10 &&
+        SDL_RWseek(rw, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
+        return 0;
+
+    for (;;) {
+        MAP_BlockInfo info = { 0, 0 };
+        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
+            return 0;
+
+        if (info.flag == MAP_BLOCK_GIRB) {
+            void* gmem;
+            if (!(gmem = _getmem(&m[0], info.size)))
+                return 0;
+            if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
+                return 0;
+            Uint8* dec = (Uint8*)MAP_MALLOC(2400);
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+                if (dec)
+                    MAP_FREE(dec);
+                return 0;
+            }
+            *out_alloc = dec;
+            return 1;
+        }
+
+        if (info.flag == 0) {
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+                return 0;
+            return 0;
+        }
+
+        if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            return 0;
+    }
+}
+
 //取地表（tmem: 临时缓冲区，传 NULL 使用 ud->mem；rw: 文件句柄）
 // ★ 0x9527 不缓存模式：不读/写 ud->map[id].sf，避免 Timer 线程竞态
 // ★ out_raw: 后台线程模式（tmem != NULL）时，输出裸像素到此指针。
 //   主线程（out_raw == NULL）仍返回 SDL_Surface*。
-static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, MAP_RawPixels* out_raw)
+// ★ out_brig: 异步且非 NULL 时写入 GIRB 解压数据（2400 字节）；Timer 专用。
+static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, MAP_RawPixels* out_raw, Uint8** out_brig)
 {
     MAP_Mem* m = tmem ? tmem : ud->mem;
     int no_cache = (ud->mode == 0x9527);
@@ -751,17 +809,46 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
         SDL_RWseek(rw, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
         return 0;
 
-    MAP_BlockInfo info = { 0, 0 };
-
+    MAP_BlockInfo img_info = { 0, 0 };
     void* mem0 = NULL, * mem1 = NULL;
-    int loop = 1;
-    while (loop)
-    {
+    int have_image = 0;
+
+    for (;;) {
+        MAP_BlockInfo info = { 0, 0 };
         if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
             return 0;
 
-        switch (info.flag)
-        {
+        switch (info.flag) {
+        case MAP_BLOCK_GIRB: {
+            if (is_async && !out_brig) {
+                if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+                    return 0;
+                break;
+            }
+            void* gmem;
+            if (!(gmem = _getmem(&m[0], info.size)))
+                return 0;
+            if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
+                return 0;
+            Uint8* dec = (Uint8*)MAP_MALLOC(2400);
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+                if (dec)
+                    MAP_FREE(dec);
+                break;
+            }
+            if (is_async && out_brig) {
+                if (*out_brig)
+                    MAP_FREE(*out_brig);
+                *out_brig = dec;
+            } else if (!is_async) {
+                if (ud->map[id].brig)
+                    MAP_FREE(ud->map[id].brig);
+                ud->map[id].brig = dec;
+            } else {
+                MAP_FREE(dec);
+            }
+            break;
+        }
         case MAP_BLOCK_JPG2: //梦幻普通JPG
         case MAP_BLOCK_PNG1: //梦幻
         case MAP_BLOCK_WEBP: //梦幻
@@ -771,8 +858,8 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 return 0;
             if (SDL_RWread(rw, mem0, sizeof(Uint8), info.size) != info.size)
                 return 0;
-
-            loop = 0;
+            img_info = info;
+            have_image = 1;
             break;
         }
         case MAP_BLOCK_JPEG:
@@ -794,6 +881,8 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                         return 0; /* fixjpeg 解码失败，跳过该图块 */
                     mem0 = mem1;
                 }//大话普通
+                img_info = info;
+                have_image = 1;
             }
             else {//MAPX 
                 if (!(mem0 = _getmem(&m[0], ud->jpeh.size + info.size)))
@@ -844,19 +933,15 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                     ujFree(img);
                 }
                 mem0 = NULL;
+                img_info = info;
+                have_image = 1;
             }
-            loop = 0;
             break;
-
         }
         case 0://结束
-        {
             if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
                 return 0;
-            info.size = 0;
-            loop = 0;
-            break;
-        }
+            goto tile_blocks_done;
         default: //跳过
             if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
                 return 0;
@@ -864,24 +949,29 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
         }
     }
 
-    if (mem0 && info.size) {
+tile_blocks_done:
+
+    if (!have_image)
+        return 0;
+
+    if (mem0 && img_info.size) {
         /* 单图块大小上限防护（防止损坏数据导致超大分配） */
-        if (info.size > 16 * 1024 * 1024)
+        if (img_info.size > 16 * 1024 * 1024)
             return 0;
 
         /* 1. WEBP 裸像素解码（libwebp 纯 C，无 SDL API） */
-        if (!raw.pixels && info.size >= 12) {
+        if (!raw.pixels && img_info.size >= 12) {
             const Uint8* hdr = (const Uint8*)mem0;
             if (hdr[0]=='R' && hdr[1]=='I' && hdr[2]=='F' && hdr[3]=='F' &&
                 hdr[8]=='W' && hdr[9]=='E' && hdr[10]=='B' && hdr[11]=='P')
             {
-                raw = _webp_raw_decode(hdr, info.size);
+                raw = _webp_raw_decode(hdr, img_info.size);
             }
         }
 
         /* 2. JPEG/PNG 裸像素解码（stb_image 纯 C，无 SDL API） */
         if (!raw.pixels) {
-            raw = _stbi_raw_decode((const Uint8*)mem0, info.size);
+            raw = _stbi_raw_decode((const Uint8*)mem0, img_info.size);
         }
 
         if (is_async) {
@@ -898,7 +988,7 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
             sf = _raw_to_surface(&raw, SDL_PIXELFORMAT_ARGB8888);
         } else {
             /* 主线程最终 fallback：使用 IMG_Load_RW */
-            SDL_RWops* src = SDL_RWFromMem(mem0, (int)info.size);
+            SDL_RWops* src = SDL_RWFromMem(mem0, (int)img_info.size);
             sf = IMG_Load_RW(src, SDL_TRUE);
         }
 
@@ -1181,7 +1271,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         for (int y = sfy; y < rect->h; y += 240) {
             for (int x = sfx; x < rect->w; x += 320) {
                 MAP_RawPixels tile = { NULL, 0, 0 };
-                _getmapsf(ud, curid++, tmem, rw, &tile);
+                _getmapsf(ud, curid++, tmem, rw, &tile, NULL);
                 if (tile.pixels) {
                     _blit_raw_tile(&tile, canvas, rect->w, rect->h, x, y);
                     MAP_FREE(tile.pixels);
@@ -1231,7 +1321,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 
     for (int y = sfy; y < msf->h; y += 240) {
         for (int x = sfx; x < msf->w; x += 320) {
-            SDL_Surface* sf = _getmapsf(ud, curid++, NULL, rw, NULL);
+            SDL_Surface* sf = _getmapsf(ud, curid++, NULL, rw, NULL, NULL);
             SDL_Rect xy = { x,y };
             if (sf) {
                 SDL_BlitSurface(sf, NULL, msf, &xy);
@@ -1331,7 +1421,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
         }
 
         /* 解码地表 → 裸像素（不创建 SDL_Surface） */
-        _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw);
+        _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw, &time->result_brig);
         _getmasksinfo(ud, time->id, &time->result_mask, &time->result_masknum, task_rw);
         
         if (fm && time->result_masknum > 0 && time->result_mask)
@@ -1431,6 +1521,10 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
+                }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
@@ -1498,6 +1592,13 @@ static int LUA_Run(lua_State* L)
             /* ★ 主线程：裸像素→SDL_Surface（ARGB8888）
              *   从 time->result_* 读取（Timer线程私有输出），不从 map-> 读取 */
             SDL_Surface* map_sf = _raw_to_surface(&time->result_raw, SDL_PIXELFORMAT_ARGB8888);
+
+            if (time->result_brig) {
+                if (map->brig)
+                    MAP_FREE(map->brig);
+                map->brig = time->result_brig;
+                time->result_brig = NULL;
+            }
 
             if (!map_sf)
             {
@@ -1673,7 +1774,7 @@ static int LUA_GetMap(lua_State* L)
         if (!ud->closing && ud->file)
         {
             if (!map->sf)
-                map->sf = _getmapsf(ud, id, NULL, ud->file, NULL);
+                map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
 
             if (map->sf)
             {
@@ -1806,7 +1907,7 @@ static int LUA_GetMapInfo(lua_State* L)
     if (!ud->closing && ud->file)
     {
         if (!map->sf)
-            map->sf = _getmapsf(ud, id, NULL, ud->file, NULL);
+            map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
 
         if (map->sf)
         {
@@ -2408,6 +2509,10 @@ static int LUA_Clear(lua_State* L)
     for (Uint32 n = 0; n < ud->mapnum; n++) {
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
+        if (ud->map[n].brig) {
+            MAP_FREE(ud->map[n].brig);
+            ud->map[n].brig = NULL;
+        }
         if (ud->map[n].mask)
             MAP_FREE(ud->map[n].mask);
     }
@@ -2447,6 +2552,10 @@ static int LUA_Clear(lua_State* L)
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
+                }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
@@ -2467,6 +2576,10 @@ static int LUA_Clear(lua_State* L)
                 if (time->result_raw.pixels) {
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
+                }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
                 }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
@@ -2528,6 +2641,9 @@ static int LUA_GC(lua_State* L)
         {
             if (ud->map[n].sf)
                 SDL_FreeSurface(ud->map[n].sf);
+
+            if (ud->map[n].brig)
+                MAP_FREE(ud->map[n].brig);
 
             if (ud->map[n].mask)
                 MAP_FREE(ud->map[n].mask);
@@ -2595,6 +2711,123 @@ static int LUA_SetMode(lua_State* L)
     return 0;
 }
 
+/* 须在 ud->mutex 已加锁、且 ud->file 有效时调用。
+ * (bx,by) 为整张地图上的全局 BRIG 格索引（每格 8x4 像素）。 */
+static float _brig_factor_global_cell(MAP_UserData* ud, int bx, int by, int maxBx, int maxBy)
+{
+    if (bx < 0) bx = 0;
+    if (by < 0) by = 0;
+    if (bx > maxBx) bx = maxBx;
+    if (by > maxBy) by = maxBy;
+
+    int bCol = bx / 40;
+    int bRow = by / 60;
+    Uint32 tId = (Uint32)(bRow * (int)ud->colnum + bCol);
+    if (tId >= ud->mapnum || ud->colnum == 0)
+        return 1.0f;
+
+    MAP_Data* map = &ud->map[tId];
+    if (!map->brig) {
+        Uint8* dec = NULL;
+        if (_scan_tile_girb(ud, tId, NULL, ud->file, &dec))
+            map->brig = dec;
+    }
+    if (!map->brig)
+        return 1.0f;
+
+    int localBx = bx - bCol * 40;
+    int localBy = by - bRow * 60;
+    Uint8 val = map->brig[localBy * 40 + localBx];
+    float f = (float)val / 119.0f;
+    if (f > 1.0f)
+        f = 1.0f;
+    return f;
+}
+
+/* 地图像素坐标 (wx,wy) 处 GIRB 亮度因子，约 0~1；无数据或越界为 1。
+ * 与 brig_visualize.py 一致：0x77 为基准 1.0，更小为阴影变暗；更大压到 1 不额外提亮角色。 */
+static int LUA_GetBrigFactor(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    int wx = (int)luaL_checkinteger(L, 2);
+    int wy = (int)luaL_checkinteger(L, 3);
+
+    if (wx < 0 || wy < 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    if (ud->colnum == 0 || ud->rownum == 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    Uint32 col = (Uint32)(wx / 320);
+    Uint32 row = (Uint32)(wy / 240);
+    if (col >= ud->colnum || row >= ud->rownum) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    int maxBx = (int)ud->colnum * 40 - 1;
+    int maxBy = (int)ud->rownum * 60 - 1;
+    int gbx = wx / 8;
+    int gby = wy / 4;
+
+    lua_Number factor = 1.0;
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file)
+        factor = (lua_Number)_brig_factor_global_cell(ud, gbx, gby, maxBx, maxBy);
+    SDL_UnlockMutex(ud->mutex);
+
+    lua_pushnumber(L, factor);
+    return 1;
+}
+
+/* 与 Godot MapReader.GetBrightnessAt 一致：格心偏移 (4,2) + 双线性插值，单次加锁、适合每帧调用。 */
+static int LUA_GetBrigFactorSmooth(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    float pixelX = (float)luaL_checknumber(L, 2);
+    float pixelY = (float)luaL_checknumber(L, 3);
+
+    if (ud->colnum == 0 || ud->rownum == 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    int maxBx = (int)ud->colnum * 40 - 1;
+    int maxBy = (int)ud->rownum * 60 - 1;
+
+    float cx = (pixelX - 4.0f) / 8.0f;
+    float cy = (pixelY - 2.0f) / 4.0f;
+    int gx0 = (int)floorf(cx);
+    int gy0 = (int)floorf(cy);
+    int gx1 = gx0 + 1;
+    int gy1 = gy0 + 1;
+    float tx = cx - (float)gx0;
+    float ty = cy - (float)gy0;
+
+    lua_Number factor = 1.0;
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file) {
+        float c00 = _brig_factor_global_cell(ud, gx0, gy0, maxBx, maxBy);
+        float c10 = _brig_factor_global_cell(ud, gx1, gy0, maxBx, maxBy);
+        float c01 = _brig_factor_global_cell(ud, gx0, gy1, maxBx, maxBy);
+        float c11 = _brig_factor_global_cell(ud, gx1, gy1, maxBx, maxBy);
+        float c0 = c00 + (c10 - c00) * tx;
+        float c1 = c01 + (c11 - c01) * tx;
+        float f = c0 + (c1 - c0) * ty;
+        if (f > 1.0f)
+            f = 1.0f;
+        factor = (lua_Number)f;
+    }
+    SDL_UnlockMutex(ud->mutex);
+
+    lua_pushnumber(L, factor);
+    return 1;
+}
+
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
     const luaL_Reg funcs[] = {
@@ -2609,6 +2842,8 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
         {"GetBlock", LUA_GetBlock},
         {"Clear", LUA_Clear},
         {"SetMode", LUA_SetMode},
+        {"GetBrigFactor", LUA_GetBrigFactor},
+        {"GetBrigFactorSmooth", LUA_GetBrigFactorSmooth},
         {"Run", LUA_Run},
         {NULL, NULL},
     };
