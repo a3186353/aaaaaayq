@@ -77,6 +77,7 @@ typedef struct
 {
     Uint32 id;
     SDL_Surface* sf;       /* 主线程缓存（同步路径） */
+    Uint8* brig;           /* GIRB 解压后 2400 字节（40x60x1），无则 NULL */
     MAP_MaskInfo* mask;    /* 主线程消费后的遮罩信息 */
     Uint32 masknum;
     int loading;
@@ -138,6 +139,7 @@ typedef struct
 #define MAP_BLOCK_JPEG  0x4A504547   /* 'JPEG' */
 #define MAP_BLOCK_MASK  0x4D41534B   /* 'MASK' */
 #define MAP_BLOCK_CELL  0x43454C4C   /* 'CELL' */
+#define MAP_BLOCK_GIRB  0x42524947   /* 'GIRB' 地表明暗格（LZO→2400） */
 
 typedef struct
 {
@@ -149,6 +151,7 @@ typedef struct
     MAP_Mem mem[2];        /* 异步任务独立缓冲区，不复用 ud->mem[] */
     /* ---- 异步解码结果（Timer线程写入，主线程消费） ---- */
     MAP_RawPixels result_raw;       /* 地表裸像素 */
+    Uint8* result_brig;             /* GIRB 解压缓冲 2400 字节，无则 NULL */
     MAP_MaskInfo* result_mask;      /* 遮罩信息数组 */
     Uint32 result_masknum;          /* 遮罩数量 */
 } TIME_Data;
