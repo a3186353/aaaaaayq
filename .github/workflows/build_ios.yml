@@ -76,6 +76,63 @@ jobs:
         key: ios-iphoneos
         max-size: 500M
 
+    # ── FFmpeg iOS 交叉编译 (带缓存, 精简构建) ──
+    - name: Cache FFmpeg (iphoneos)
+      uses: actions/cache@v4
+      id: ffmpeg-cache
+      with:
+        path: ffmpeg-ios-iphoneos
+        key: ffmpeg-6.1.2-iphoneos-v1
+
+    - name: Build FFmpeg 6.1.2 for iOS (iphoneos)
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      run: |
+        FFMPEG_VER="6.1.2"
+        INSTALL_DIR="${{ github.workspace }}/ffmpeg-ios-iphoneos"
+        FFMPEG_SRC="${{ github.workspace }}/ffmpeg-ios-src"
+
+        curl -sL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VER}.tar.xz" -o /tmp/ffmpeg.tar.xz
+        mkdir -p "${FFMPEG_SRC}"
+        tar xf /tmp/ffmpeg.tar.xz -C "${FFMPEG_SRC}" --strip-components=1
+
+        cd "${FFMPEG_SRC}"
+
+        # iOS 交叉编译参数
+        XCRUN_SDK="iphoneos"
+        CC="xcrun -sdk ${XCRUN_SDK} clang"
+        ARCH="arm64"
+        DEPLOYMENT_TARGET="15.0"
+        SYSROOT=$(xcrun --sdk ${XCRUN_SDK} --show-sdk-path)
+
+        # 精简静态构建: 仅编解码器+封装+协议
+        ./configure \
+          --prefix="${INSTALL_DIR}" \
+          --enable-cross-compile \
+          --cc="${CC}" \
+          --sysroot="${SYSROOT}" \
+          --target-os=darwin --arch="${ARCH}" \
+          --enable-static --disable-shared \
+          --disable-programs --disable-doc \
+          --disable-avdevice --disable-avfilter --disable-postproc \
+          --disable-debug --disable-symver \
+          --disable-bzlib --disable-iconv \
+          --enable-small --enable-pic \
+          --enable-videotoolbox \
+          --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \
+          --enable-demuxer=mov,flv,rtsp,rtp,mpegts,avi,matroska,mp3,wav,aac,ogg \
+          --enable-decoder=h264,hevc,aac,mp3,pcm_s16le,vorbis,opus,flac,h264_videotoolbox,hevc_videotoolbox \
+          --enable-encoder=aac,pcm_s16le \
+          --enable-muxer=wav,mp4,adts \
+          --enable-parser=h264,hevc,aac,mpegaudio \
+          --extra-cflags="-arch ${ARCH} -miphoneos-version-min=${DEPLOYMENT_TARGET} -fembed-bitcode" \
+          --extra-ldflags="-arch ${ARCH} -miphoneos-version-min=${DEPLOYMENT_TARGET}"
+
+        make -j$(sysctl -n hw.logicalcpu)
+        make install
+
+        echo "✅ FFmpeg ${FFMPEG_VER} for iOS iphoneos 编译完成"
+        ls -la "${INSTALL_DIR}/lib/"*.a 2>/dev/null || echo "⚠️ .a 未生成"
+
     - name: Configure CMake (iphoneos)
       run: |
         IOS_DIR="${{ github.workspace }}/${{ env.IOS_PROJECT_DIR }}"
@@ -103,6 +160,7 @@ jobs:
           -DOPENSSL_CRYPTO_LIB="${CRYPTO_LIB}" \
           -DOPENSSL_SSL_LIB="${SSL_LIB}" \
           -DOPENSSL_ROOT_DIR="${OPENSSL_INSTALL}" \
+          -DFFMPEG_IOS_DIR="${{ github.workspace }}/ffmpeg-ios-iphoneos" \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \

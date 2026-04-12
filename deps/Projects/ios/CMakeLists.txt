@@ -1272,6 +1272,119 @@ target_link_libraries(freetype_fw PRIVATE
 )
 
 # ============================================================================
+# F13. libgffmpeg.framework — FFmpeg Lua 绑定 (视频播放/流媒体/录音)
+#      可选模块: 需要提供 iOS 交叉编译的 FFmpeg 静态库
+#      用法: -DFFMPEG_IOS_DIR=/path/to/ffmpeg/ios
+# ============================================================================
+set(FFMPEG_IOS_DIR "${DEPS_DIR}/ffmpeg/ios"
+    CACHE PATH "iOS FFmpeg 静态库目录 (含 include/ 和 lib/)")
+
+if(EXISTS "${FFMPEG_IOS_DIR}/lib/libavcodec.a")
+    message(STATUS "[gffmpeg] 使用 iOS FFmpeg: ${FFMPEG_IOS_DIR}")
+
+    set(GFFMPEG_SRC_DIR "${SOURCES_DIR}/lib/gffmpeg")
+    add_library(gffmpeg_fw SHARED
+        "${GFFMPEG_SRC_DIR}/gffmpeg.c"
+        "${GFFMPEG_SRC_DIR}/gff_player.c"
+        "${GFFMPEG_SRC_DIR}/gff_recorder.c"
+    )
+    add_ios_framework(gffmpeg_fw "libgffmpeg")
+    target_include_directories(gffmpeg_fw PRIVATE
+        "${GFFMPEG_SRC_DIR}"
+        "${FFMPEG_IOS_DIR}/include"
+        "${SDL_INCLUDE_DIR}"
+        "${LUA_SRC_DIR}"
+    )
+    target_compile_definitions(gffmpeg_fw PRIVATE LUA_USE_IOS LUA_COMPAT_APIINTCASTS)
+    target_compile_options(gffmpeg_fw PRIVATE "-fvisibility=default")
+
+    add_dependencies(gffmpeg_fw ggelua_fw SDL2_fw)
+    target_link_libraries(gffmpeg_fw PRIVATE
+        ggelua_fw
+        SDL2_fw
+        # FFmpeg 静态库 (force_load 确保符号不被裁剪)
+        "-Wl,-force_load,${FFMPEG_IOS_DIR}/lib/libavcodec.a"
+        "${FFMPEG_IOS_DIR}/lib/libavformat.a"
+        "${FFMPEG_IOS_DIR}/lib/libavutil.a"
+        "${FFMPEG_IOS_DIR}/lib/libswresample.a"
+        "${FFMPEG_IOS_DIR}/lib/libswscale.a"
+        # FFmpeg 依赖的 iOS 系统框架
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework AudioToolbox"
+        "-framework Security"
+        ${IOS_SYSTEM_FRAMEWORKS}
+    )
+
+    # 注册到安装列表 (后面统一安装)
+    set(GFFMPEG_FW_AVAILABLE TRUE)
+else()
+    message(STATUS "[gffmpeg] iOS FFmpeg 未在 ${FFMPEG_IOS_DIR} 找到, 跳过")
+    set(GFFMPEG_FW_AVAILABLE FALSE)
+endif()
+
+# ============================================================================
+# F14. libvgmstream.framework — FSB 音频解码库
+#      mygxy_fw 的 fsb.c 通过 dlopen 动态加载此 framework
+#      仅启用内建解码器 (G7221 等), 不依赖外部库 (FFmpeg/MPEG/Vorbis)
+# ============================================================================
+set(VGMSTREAM_DIR "${ENGINE_ROOT}/external/vgmstream")
+set(VGM_SRC_DIR   "${VGMSTREAM_DIR}/src")
+
+# 使用 file(GLOB) 收集源文件 (与 vgmstream 自带 CMakeLists.txt 方式一致)
+file(GLOB VGM_BASE_SOURCES    "${VGM_SRC_DIR}/base/*.c")
+file(GLOB VGM_CODING_SOURCES  "${VGM_SRC_DIR}/coding/*.c")
+file(GLOB VGM_CLIBS_SOURCES   "${VGM_SRC_DIR}/coding/libs/*.c")
+file(GLOB VGM_LAYOUT_SOURCES  "${VGM_SRC_DIR}/layout/*.c")
+file(GLOB VGM_META_SOURCES    "${VGM_SRC_DIR}/meta/*.c")
+file(GLOB VGM_UTIL_SOURCES    "${VGM_SRC_DIR}/util/*.c")
+file(GLOB VGM_MAIN_SOURCES    "${VGM_SRC_DIR}/*.c")
+
+set(VGM_ALL_SOURCES
+    ${VGM_BASE_SOURCES}
+    ${VGM_CODING_SOURCES}
+    ${VGM_CLIBS_SOURCES}
+    ${VGM_LAYOUT_SOURCES}
+    ${VGM_META_SOURCES}
+    ${VGM_UTIL_SOURCES}
+    ${VGM_MAIN_SOURCES}
+)
+
+add_library(vgmstream_fw SHARED ${VGM_ALL_SOURCES})
+add_ios_framework(vgmstream_fw "libvgmstream")
+target_include_directories(vgmstream_fw PRIVATE
+    "${VGM_SRC_DIR}"
+    "${VGM_SRC_DIR}/base"
+    "${VGM_SRC_DIR}/coding"
+    "${VGM_SRC_DIR}/layout"
+    "${VGM_SRC_DIR}/meta"
+    "${VGM_SRC_DIR}/util"
+    "${VGMSTREAM_DIR}/ext_includes"   # pstdint.h 等兼容头文件
+)
+target_compile_definitions(vgmstream_fw PRIVATE
+    VGM_USE_G7221               # 内建 G.722.1 解码器 (FSB 常用)
+    VGM_LOG_OUTPUT              # 日志输出 (与上游默认一致)
+    # 不定义 LIBVGMSTREAM_EXPORT: -fvisibility=default 已确保所有符号可见
+    # __declspec(dllexport) 在 Apple Clang 上不必要
+    # 不定义以下宏，禁用外部依赖:
+    # VGM_USE_MPEG    — 需要 libmpg123
+    # VGM_USE_VORBIS  — 需要 libvorbis
+    # VGM_USE_FFMPEG  — 需要 FFmpeg
+    # VGM_USE_ATRAC9  — 需要 libatrac9
+    # VGM_USE_CELT    — 需要 libcelt
+    # VGM_USE_SPEEX   — 需要 libspeex
+    # VGM_USE_G719    — 需要 libg719
+)
+# iOS Mach-O 不自动识别 ELF visibility 属性，显式覆盖确保公共 API 可 dlsym
+target_compile_options(vgmstream_fw PRIVATE "-fvisibility=default")
+# vgmstream 纯 C 库，无外部 framework 依赖
+target_link_libraries(vgmstream_fw PRIVATE
+    "-lm"   # math 库 (vgmstream 内部使用)
+    ${IOS_SYSTEM_FRAMEWORKS}
+)
+
+# ============================================================================
 # 主可执行文件 GGELUA — 新增编译配置 (替代旧模板预编译二进制)
 # ============================================================================
 set(APP_SRC_DIR "${SOURCES_DIR}/app/ggelua")
@@ -1341,9 +1454,13 @@ target_link_libraries(GGELUA PRIVATE
 install(TARGETS
     ggelua_fw gsdl2_fw mygxy_fw gastar_fw lsqlite3_fw hiredis_fw gimgui_fw
     SDL2_fw SDL2_image_fw SDL2_ttf_fw SDL_Mixer_X_fw openssl_fw
-    freetype_fw
+    freetype_fw vgmstream_fw
     FRAMEWORK DESTINATION Frameworks
 )
+# 可选: gffmpeg framework (仅在 FFmpeg 可用时安装)
+if(GFFMPEG_FW_AVAILABLE)
+    install(TARGETS gffmpeg_fw FRAMEWORK DESTINATION Frameworks)
+endif()
 
 # 安装主程序
 install(TARGETS GGELUA
@@ -1357,5 +1474,5 @@ message(STATUS " Platform:    ${IOS_PLATFORM}")
 message(STATUS " Arch:        ${CMAKE_OSX_ARCHITECTURES}")
 message(STATUS " iOS Target:  ${CMAKE_OSX_DEPLOYMENT_TARGET}")
 message(STATUS " Build Type:  ${CMAKE_BUILD_TYPE}")
-message(STATUS " Frameworks:  13 个动态库 (含 gimgui)")
+message(STATUS " Frameworks:  14 个动态库 (含 gimgui + vgmstream)")
 message(STATUS "==============================================")

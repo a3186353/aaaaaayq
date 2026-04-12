@@ -24,10 +24,15 @@
 *.FileListAbsolute.txt
 
 # ── IDE 和编辑器 ──
+.agent/
 .vscode/
 .vs/
 *.user
 *.aps
+# ── 引擎 ──
+deps/GGELUA/
+GGELUA/
+*.code-workspace
 
 # ── OS ──
 .DS_Store
@@ -77,6 +82,7 @@ deps/Projects/GGELUA/
 !deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_image.so
 !deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_mixer.so
 !deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libSDL_ttf.so
+!deps/Projects/android-vs/app/GGELUA/app/src/main/jniLibs/**/libvgmstream.so
 
 # Android APK 模板的 assets (ggelua.com 脚本包)
 !deps/Projects/android-vs/app/GGELUA/app/src/main/assets/ggelua.com

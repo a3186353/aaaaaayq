@@ -26,6 +26,7 @@ env:
   GRADLE_PROJECT_DIR: deps/Projects/android-vs/app/GGELUA
   BUILD_CONFIG: ${{ github.event_name == 'workflow_dispatch' && inputs.configuration || 'Release' }}
   OPENSSL_VER: "3.6.1"
+  FFMPEG_VER: "6.1.2"
 
 jobs:
   # ====================================================================
@@ -98,6 +99,82 @@ jobs:
         ls -la "${INSTALL_DIR}/lib64/libcrypto.a" 2>/dev/null || \
         echo "⚠️ libcrypto.a 路径需要检查"
 
+    # ── FFmpeg 交叉编译 (per ABI, 带缓存, 精简构建) ──
+    - name: Cache FFmpeg (${{ matrix.abi }})
+      uses: actions/cache@v4
+      id: ffmpeg-cache
+      with:
+        path: ffmpeg-android-${{ matrix.abi }}
+        key: ffmpeg-${{ env.FFMPEG_VER }}-android-${{ matrix.abi }}-v1
+
+    - name: Build FFmpeg ${{ env.FFMPEG_VER }} for Android (${{ matrix.abi }})
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      run: |
+        INSTALL_DIR="${{ github.workspace }}/ffmpeg-android-${{ matrix.abi }}"
+        NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+        ABI="${{ matrix.abi }}"
+        FFMPEG_SRC="${{ github.workspace }}/ffmpeg-src"
+
+        # 下载 FFmpeg 源码
+        curl -sL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VER}.tar.xz" -o /tmp/ffmpeg.tar.xz
+        mkdir -p "${FFMPEG_SRC}"
+        tar xf /tmp/ffmpeg.tar.xz -C "${FFMPEG_SRC}" --strip-components=1
+
+        # 确定交叉编译参数
+        TOOLCHAIN="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+        API=24
+        case "${ABI}" in
+          arm64-v8a)   ARCH=aarch64; TARGET=aarch64-linux-android ;;
+          armeabi-v7a) ARCH=arm;     TARGET=armv7a-linux-androideabi ;;
+          x86_64)      ARCH=x86_64;  TARGET=x86_64-linux-android ;;
+          x86)         ARCH=i686;    TARGET=i686-linux-android ;;
+        esac
+
+        CC="${TOOLCHAIN}/bin/${TARGET}${API}-clang"
+        CXX="${TOOLCHAIN}/bin/${TARGET}${API}-clang++"
+        SYSROOT="${TOOLCHAIN}/sysroot"
+
+        mkdir -p "${INSTALL_DIR}"
+        cd "${FFMPEG_SRC}"
+
+        # x86/x86_64: 禁用所有汇编 (仅模拟器用, 避免 PIC 重定位错误)
+        # ARM: 保留汇编优化
+        ASM_FLAGS=""
+        case "${ABI}" in
+          x86|x86_64) ASM_FLAGS="--disable-asm" ;;
+        esac
+
+        # 精简构建: 仅编解码器+封装+协议, 禁用不需要的组件
+        ./configure \
+          --prefix="${INSTALL_DIR}" \
+          --enable-cross-compile \
+          --cross-prefix="${TOOLCHAIN}/bin/llvm-" \
+          --cc="${CC}" --cxx="${CXX}" \
+          --sysroot="${SYSROOT}" \
+          --target-os=android --arch="${ARCH}" \
+          --enable-shared --disable-static \
+          --disable-programs --disable-doc \
+          --disable-avdevice --disable-avfilter --disable-postproc \
+          --disable-debug --disable-symver \
+          --disable-bzlib --disable-iconv \
+          --enable-pic \
+          --enable-small \
+          ${ASM_FLAGS} \
+          --enable-protocol=file,http,https,tcp,udp,rtmp,rtsp \
+          --enable-demuxer=mov,flv,rtsp,rtp,mpegts,avi,matroska,mp3,wav,aac,ogg \
+          --enable-decoder=h264,hevc,aac,mp3,pcm_s16le,vorbis,opus,flac \
+          --enable-encoder=aac,pcm_s16le \
+          --enable-muxer=wav,mp4,adts \
+          --enable-parser=h264,hevc,aac,mpegaudio \
+          --extra-cflags="-fPIC" \
+          --extra-ldflags="-Wl,--gc-sections"
+
+        make -j$(nproc)
+        make install
+
+        echo "=== FFmpeg ${FFMPEG_VER} for ${ABI} ==="
+        ls -la "${INSTALL_DIR}/lib/"*.so 2>/dev/null || echo "⚠️ .so 未生成"
+
     # ── CMake 配置 ──
     - name: Configure CMake (${{ matrix.abi }})
       run: |
@@ -119,6 +196,16 @@ jobs:
         # 预编译 SDL .so 路径 (用于正确生成 DT_NEEDED 依赖)
         SDL_PREBUILT="${{ github.workspace }}/${{ env.GRADLE_PROJECT_DIR }}/app/src/main/jniLibs/${{ matrix.abi }}"
 
+        # FFmpeg 预编译路径
+        FFMPEG_INSTALL="${{ github.workspace }}/ffmpeg-android-${{ matrix.abi }}"
+        FFMPEG_ARGS=""
+        if [ -d "${FFMPEG_INSTALL}/lib" ]; then
+          FFMPEG_ARGS="-DFFMPEG_DIR=${FFMPEG_INSTALL}"
+          echo "FFmpeg found: ${FFMPEG_INSTALL}"
+        else
+          echo "⚠️ FFmpeg not available, gffmpeg will be skipped"
+        fi
+
         cmake -B build-android \
           -S ${{ env.ANDROID_PROJECT_DIR }} \
           -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
@@ -129,6 +216,7 @@ jobs:
           -DOPENSSL_SSL_LIB="${SSL_LIB}" \
           -DPREBUILT_SDL_DIR="${SDL_PREBUILT}" \
           -DCMAKE_INSTALL_PREFIX=install-android \
+          ${FFMPEG_ARGS} \
           -G Ninja
 
     - name: Build ${{ matrix.abi }} (${{ env.BUILD_CONFIG }})
@@ -190,8 +278,8 @@ jobs:
         ENGINE_SO=(liblua54.so libggelua.so libgsdl2.so libmygxy.so libgastar.so liblsqlite3.so libmain.so)
 
         echo "=== 合并引擎 SO 到 jniLibs ==="
-        # 预编译 SDL .so 白名单 (仅这4个来自 git, 其余必须全部由 CI 新编译)
-        SDL_KEEP=(libSDL2.so libSDL_image.so libSDL_mixer.so libSDL_ttf.so)
+        # 预编译 .so 白名单 (来自 git 仓库, 不由 CI 编译, 需保留)
+        SDL_KEEP=(libSDL2.so libSDL_image.so libSDL_mixer.so libSDL_ttf.so libvgmstream.so)
 
         for abi in "${ABIS[@]}"; do
           echo ""
