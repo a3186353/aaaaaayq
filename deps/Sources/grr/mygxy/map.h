@@ -141,6 +141,10 @@ typedef struct
 #define MAP_BLOCK_CELL  0x43454C4C   /* 'CELL' */
 #define MAP_BLOCK_GIRB  0x42524947   /* 'GIRB' 地表明暗格（LZO→2400） */
 
+/* MAP_UserData.mode 运行模式位 */
+#define MAP_MODE_NO_CACHE   0x00009527u
+#define MAP_MODE_AUTO_BRIG  0x10000000u
+
 typedef struct
 {
     Uint32 type;

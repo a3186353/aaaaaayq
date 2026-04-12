@@ -224,6 +224,58 @@ static void _blit_raw_tile(const MAP_RawPixels* tile,
     }
 }
 
+/* 无 GIRB 旧地图的运行时兜底：按地表图块亮度自动生成 40x60 BRIG。
+ * 仅生成一次并缓存到 map->brig，后续仍复用现有双线性采样逻辑。 */
+static Uint8* _build_auto_brig_from_argb(const Uint32* pixels, int width, int height)
+{
+    if (!pixels || width <= 0 || height <= 0)
+        return NULL;
+
+    Uint8* brig = (Uint8*)MAP_MALLOC(2400);
+    if (!brig)
+        return NULL;
+
+    for (int gy = 0; gy < 60; gy++) {
+        int y0 = (gy * height) / 60;
+        int y1 = ((gy + 1) * height) / 60;
+        if (y1 <= y0) y1 = y0 + 1;
+        if (y1 > height) y1 = height;
+
+        for (int gx = 0; gx < 40; gx++) {
+            int x0 = (gx * width) / 40;
+            int x1 = ((gx + 1) * width) / 40;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (x1 > width) x1 = width;
+
+            Uint64 sum = 0;
+            Uint32 count = 0;
+            for (int y = y0; y < y1; y++) {
+                const Uint32* row = pixels + y * width;
+                for (int x = x0; x < x1; x++) {
+                    Uint32 px = row[x];
+                    Uint8 r = (Uint8)((px >> 16) & 0xFF);
+                    Uint8 g = (Uint8)((px >> 8) & 0xFF);
+                    Uint8 b = (Uint8)(px & 0xFF);
+                    sum += (Uint64)(r * 77 + g * 150 + b * 29);
+                    count++;
+                }
+            }
+
+            float luma = count ? (float)(sum / count) / 256.0f : 255.0f;
+            float n = luma / 255.0f;
+            n = 0.55f + n * 0.45f; /* 更柔和：暗部抬高，亮部保留 */
+            if (n < 0.35f) n = 0.35f;
+            if (n > 1.0f) n = 1.0f;
+            int v = (int)(n * 119.0f + 0.5f);
+            if (v < 42) v = 42;
+            if (v > 119) v = 119;
+            brig[gy * 40 + gx] = (Uint8)v;
+        }
+    }
+
+    return brig;
+}
+
 #if defined(_WIN32)
 #define MYGXY_API __declspec(dllexport)
 #else
@@ -784,7 +836,8 @@ static int _scan_tile_girb(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops
 static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, MAP_RawPixels* out_raw, Uint8** out_brig)
 {
     MAP_Mem* m = tmem ? tmem : ud->mem;
-    int no_cache = (ud->mode == 0x9527);
+    int no_cache = (ud->mode & MAP_MODE_NO_CACHE) == MAP_MODE_NO_CACHE;
+    int allow_auto_brig = (ud->mode & MAP_MODE_AUTO_BRIG) == MAP_MODE_AUTO_BRIG;
     int is_async = (tmem != NULL && out_raw != NULL);
 
     if (id >= ud->mapnum)
@@ -993,11 +1046,17 @@ tile_blocks_done:
              * SDL_CreateRGBSurfaceWithFormat 内部的 SDL_AllocFormat()
              * 操作全局格式缓存链表（无锁），与主线程竞态导致堆损坏。
              * 后台线程只产出裸 ARGB8888 像素，主线程消费时再创建 Surface。 */
+            if (allow_auto_brig && out_brig && !*out_brig) {
+                *out_brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+            }
             *out_raw = raw;
             return NULL;
         }
 
         /* ---- 主线程路径 ---- */
+        if (allow_auto_brig && !ud->map[id].brig && raw.pixels) {
+            ud->map[id].brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+        }
         if (raw.pixels) {
             sf = _raw_to_surface(&raw, SDL_PIXELFORMAT_ARGB8888);
         } else {
@@ -1021,6 +1080,9 @@ tile_blocks_done:
     else if (is_async && raw.pixels) {
         /* MAPX ujImage 路径已产出 raw，返回给后台线程 */
         *out_raw = raw;
+        if (out_brig && !*out_brig) {
+            *out_brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+        }
         return NULL;
     }
 
