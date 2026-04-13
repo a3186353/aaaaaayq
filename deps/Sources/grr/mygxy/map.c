@@ -530,7 +530,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
     }
     return (Uint32)(op - outbuf);
 }
-//解压遮罩数据（带输入/输出边界保护，防止损坏数据导致堆溢出）
+//解压遮罩数据（与 gxy2/lzo.cpp 一致的标准 LZO1X 解压，无中间边界检查）
 static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 {
     unsigned char* op;
@@ -538,32 +538,17 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
     unsigned t;
     unsigned char* m_pos;
 
-    unsigned char* op_end;
-    unsigned char* ip_end;
-    unsigned char* out_base;
-
-    if (in_size == 0 || out_size == 0)
-        return -1;
+    (void)in_size;  /* 保留参数兼容性，不做中间检查 */
+    (void)out_size;
 
     op = (unsigned char*)out;
     ip = (unsigned char*)in;
-    op_end = op + out_size;
-    ip_end = ip + in_size;
-    out_base = op;
 
-/* 安全宏：检查输入/输出/回溯指针边界 */
-#define LZO_CHECK_IP(need) do { if ((size_t)(ip_end - ip) < (size_t)(need)) return -1; } while(0)
-#define LZO_CHECK_OP(need) do { if ((size_t)(op_end - op) < (size_t)(need)) return -1; } while(0)
-#define LZO_CHECK_MPOS(p)  do { if ((p) < out_base || (p) >= op) return -1; } while(0)
-
-    LZO_CHECK_IP(1);
     if (*ip > 17)
     {
         t = *ip++ - 17;
         if (t < 4)
             goto match_next;
-        LZO_CHECK_OP(t);
-        LZO_CHECK_IP(t);
         do
             *op++ = *ip++;
         while (--t > 0);
@@ -572,26 +557,20 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 
     while (1)
     {
-        LZO_CHECK_IP(1);
         t = *ip++;
         if (t >= 16)
             goto match;
         if (t == 0)
         {
-            LZO_CHECK_IP(1);
             while (*ip == 0)
             {
                 t += 255;
                 ip++;
-                LZO_CHECK_IP(1);
-                if (t > out_size) return -1; /* 防止 t 溢出导致超大拷贝 */
             }
             t += 15 + *ip++;
         }
 
-        /* t 为 literal run 长度减3，实际需要复制 t+1 组 4 字节 */
-        LZO_CHECK_OP(t + 4);
-        LZO_CHECK_IP(t + 4);
+        /* literal run：先复制4字节，再复制剩余 */
         SDL_memcpy(op, ip, 4);
         op += 4;
         ip += 4;
@@ -619,18 +598,14 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 
     first_literal_run:
 
-        LZO_CHECK_IP(1);
         t = *ip++;
         if (t >= 16)
             goto match;
 
-        LZO_CHECK_IP(1);
         m_pos = op - 0x0801;
         m_pos -= t >> 2;
         m_pos -= *ip++ << 2;
-        LZO_CHECK_MPOS(m_pos);
 
-        LZO_CHECK_OP(3);
         *op++ = *m_pos++;
         *op++ = *m_pos++;
         *op++ = *m_pos;
@@ -642,12 +617,10 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
         match:
             if (t >= 64)
             {
-                LZO_CHECK_IP(1);
                 m_pos = op - 1;
                 m_pos -= (t >> 2) & 7;
                 m_pos -= *ip++ << 3;
                 t = (t >> 5) - 1;
-                LZO_CHECK_MPOS(m_pos);
 
                 goto copy_match;
             }
@@ -656,26 +629,21 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 t &= 31;
                 if (t == 0)
                 {
-                    LZO_CHECK_IP(1);
                     while (*ip == 0)
                     {
                         t += 255;
                         ip++;
-                        LZO_CHECK_IP(1);
-                        if (t > out_size) return -1;
                     }
                     t += 31 + *ip++;
                 }
 
                 m_pos = op - 1;
-                LZO_CHECK_IP(2);
                 {
                     unsigned short tmp;
                     SDL_memcpy(&tmp, ip, 2);
                     m_pos -= tmp >> 2;
                 }
                 ip += 2;
-                LZO_CHECK_MPOS(m_pos);
             }
             else if (t >= 16)
             {
@@ -684,17 +652,13 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 t &= 7;
                 if (t == 0)
                 {
-                    LZO_CHECK_IP(1);
                     while (*ip == 0)
                     {
                         t += 255;
                         ip++;
-                        LZO_CHECK_IP(1);
-                        if (t > out_size) return -1;
                     }
                     t += 7 + *ip++;
                 }
-                LZO_CHECK_IP(2);
                 {
                     unsigned short tmp;
                     SDL_memcpy(&tmp, ip, 2);
@@ -704,24 +668,20 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 if (m_pos == op)
                     goto eof_found;
                 m_pos -= 0x4000;
-                LZO_CHECK_MPOS(m_pos);
             }
             else
             {
-                LZO_CHECK_IP(1);
                 m_pos = op - 1;
                 m_pos -= t >> 2;
                 m_pos -= *ip++ << 2;
-                LZO_CHECK_MPOS(m_pos);
-                LZO_CHECK_OP(2);
                 *op++ = *m_pos++;
                 *op++ = *m_pos;
                 goto match_done;
             }
 
+            /* match 复制 */
             if (t >= 6 && (op - m_pos) >= 4)
             {
-                LZO_CHECK_OP(t + 2);
                 SDL_memcpy(op, m_pos, 4);
                 op += 4;
                 m_pos += 4;
@@ -741,7 +701,6 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
             else
             {
             copy_match:
-                LZO_CHECK_OP(t + 2);
                 *op++ = *m_pos++;
                 *op++ = *m_pos++;
                 do
@@ -756,20 +715,14 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 break;
 
         match_next:
-            LZO_CHECK_OP(t);
-            LZO_CHECK_IP(t);
             do
                 *op++ = *ip++;
             while (--t > 0);
-            LZO_CHECK_IP(1);
             t = *ip++;
         }
     }
 
 eof_found:
-#undef LZO_CHECK_IP
-#undef LZO_CHECK_OP
-#undef LZO_CHECK_MPOS
     return (int)(op - (Uint8*)out);
 }
 
