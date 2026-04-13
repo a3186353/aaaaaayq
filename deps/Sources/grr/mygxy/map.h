@@ -73,6 +73,18 @@ typedef struct
     Uint32 mode;
 } MAP_MaskInfo;
 
+/* 全局遮罩信息（Z排序用，仅 M1.0 格式）
+ * 在加载时预解析所有 mask 的 rect/size
+ * dec_cache 按需 LZO 解压 2bpp alpha 数据 */
+typedef struct
+{
+    SDL_Rect rect;       /* 遮罩在地图中的像素坐标和尺寸 */
+    Uint32 data_size;    /* LZO 压缩数据大小 */
+    Uint32 file_offset;  /* 压缩数据在文件缓冲中的偏移 */
+    Uint8* dec_cache;    /* 懒加载解压缓冲 */
+    int    dec_len;      /* 解压后数据长度 */
+} MAP_GlobalMask;
+
 typedef struct
 {
     Uint32 id;
@@ -107,6 +119,9 @@ typedef struct
 
     Uint32 masknum;// M1.0
     Uint32* masklist; //M1.0 遮罩偏移 
+
+    MAP_GlobalMask* gmasks;   /* 全局遮罩信息缓存（GetZBoostAt 用） */
+    Uint32 gmask_count;       /* 全局遮罩数量 */
 
     MAP_Mem mem[2];
     MAP_Data* map;   //缓存
