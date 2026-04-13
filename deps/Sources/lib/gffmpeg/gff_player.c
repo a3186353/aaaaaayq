@@ -564,7 +564,48 @@ int gff_player_open(lua_State *L)
 static int LUA_PlayerPlay(lua_State *L)
 {
     GFF_Player *p = (GFF_Player *)luaL_checkudata(L, 1, GFF_PLAYER_MT);
-    if (p->state == GFF_STATE_FINISHED) return 0;
+
+    /* 视频已结束时：回到开头重新启动解码线程，实现循环播放 */
+    if (p->state == GFF_STATE_FINISHED) {
+        /* 等待旧解码线程退出 */
+        if (p->decode_thread) {
+            SDL_CondBroadcast(p->video_queue.not_full);
+            SDL_WaitThread(p->decode_thread, NULL);
+            p->decode_thread = NULL;
+        }
+
+        /* Seek 到文件开头 */
+        av_seek_frame(p->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+        if (p->video_dec_ctx) avcodec_flush_buffers(p->video_dec_ctx);
+        if (p->audio_dec_ctx) avcodec_flush_buffers(p->audio_dec_ctx);
+
+        /* 清空帧队列和音频缓冲 */
+        fq_flush(&p->video_queue);
+        ring_flush(&p->audio_ring);
+
+        /* 重置时钟 */
+        p->audio_clock = 0;
+        p->video_clock = 0;
+        p->decoded_audio_pts = 0;
+        p->wall_clock_base = 0;
+        p->seek_req = 0;
+
+        /* 创建新的解码线程 */
+        p->quit_flag = 0;
+        p->state = GFF_STATE_PLAYING;
+        p->decode_thread = SDL_CreateThread(decode_thread_func, "gff_decode", p);
+
+#ifdef GFF_USE_MIXER_HOOK
+        if (p->swr_ctx && !p->audio_hooked) {
+            Mix_HookMusic(audio_fill_callback, p);
+            p->audio_hooked = 1;
+        }
+#else
+        if (p->audio_dev)
+            SDL_PauseAudioDevice(p->audio_dev, 0);
+#endif
+        return 0;
+    }
 
     p->state = GFF_STATE_PLAYING;
 
