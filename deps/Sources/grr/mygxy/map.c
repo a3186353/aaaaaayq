@@ -2456,6 +2456,35 @@ static int MAP_NEW(lua_State* L)
             ud->masklist = (Uint32*)MAP_MALLOC(ud->masknum * sizeof(Uint32));  //遮罩偏移
             if (SDL_RWread(rw, ud->masklist, sizeof(Uint32), ud->masknum) != ud->masknum)
                 goto openerr;
+
+            /* 预解析全局遮罩信息（GetZBoostAt 用） */
+            ud->gmasks = (MAP_GlobalMask*)MAP_CALLOC(ud->masknum, sizeof(MAP_GlobalMask));
+            if (ud->gmasks) {
+                Uint32 valid = 0;
+                Sint64 saved_pos = SDL_RWtell(rw);
+                for (Uint32 mi = 0; mi < ud->masknum; mi++) {
+                    Uint32 moff = ud->masklist[mi];
+                    if (SDL_RWseek(rw, moff, RW_SEEK_SET) == -1)
+                        continue;
+                    /* mask header: x(4) + y(4) + w(4) + h(4) + data_size(4) = 20 字节 */
+                    SDL_Rect r;
+                    Uint32 raw_size = 0;
+                    if (SDL_RWread(rw, &r, sizeof(SDL_Rect), 1) != 1)
+                        continue;
+                    if (SDL_RWread(rw, &raw_size, sizeof(Uint32), 1) != 1)
+                        continue;
+                    if (r.w <= 0 || r.h <= 0 || r.w > 8192 || r.h > 8192)
+                        continue;
+                    ud->gmasks[valid].rect = r;
+                    ud->gmasks[valid].data_size = raw_size;
+                    ud->gmasks[valid].file_offset = moff + 20;
+                    ud->gmasks[valid].dec_cache = NULL;
+                    ud->gmasks[valid].dec_len = 0;
+                    valid++;
+                }
+                ud->gmask_count = valid;
+                SDL_RWseek(rw, saved_pos, RW_SEEK_SET);
+            }
         }
 
         lua_createtable(L, 0, 7);
@@ -2741,6 +2770,18 @@ static int LUA_GC(lua_State* L)
         ud->masklist = NULL;
     }
 
+    /* 释放全局遮罩缓存（含懒加载解压缓冲） */
+    if (ud->gmasks)
+    {
+        for (Uint32 n = 0; n < ud->gmask_count; n++) {
+            if (ud->gmasks[n].dec_cache)
+                MAP_FREE(ud->gmasks[n].dec_cache);
+        }
+        MAP_FREE(ud->gmasks);
+        ud->gmasks = NULL;
+        ud->gmask_count = 0;
+    }
+
     if (ud->jpeh.mem)
     {
         MAP_FREE(ud->jpeh.mem);
@@ -2904,6 +2945,83 @@ static int LUA_GetBrigFactorSmooth(lua_State* L)
     return 1;
 }
 
+/* ── GetZBoostAt(x, y) ─── 移植自 Godot 版 map_reader.cpp ─────────────
+ * 检测角色脚底坐标是否处于遮罩排序区域内（2bpp flag=1/2），
+ * 若命中则返回遮罩底边对应的排序 Z 值，用于将角色排到遮罩后方。
+ * 未命中返回 -1。 */
+static int LUA_GetZBoostAt(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    int cx = (int)luaL_checkinteger(L, 2);
+    int cy = (int)luaL_checkinteger(L, 3);
+
+    if (!ud->gmasks || ud->gmask_count == 0 || !ud->filebuf) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    int max_z = -1;
+    int radius = 12; /* 容错半径（适应 20x20 行走格子的锚点越界问题） */
+
+    for (Uint32 mi = 0; mi < ud->gmask_count; mi++) {
+        MAP_GlobalMask* gm = &ud->gmasks[mi];
+
+        /* 包围盒粗筛 */
+        if (gm->data_size == 0) continue;
+        if (cx + radius < gm->rect.x || cx - radius >= gm->rect.x + gm->rect.w) continue;
+        if (cy + radius < gm->rect.y || cy - radius >= gm->rect.y + gm->rect.h) continue;
+
+        /* 懒加载 LZO 解压 2bpp alpha 数据 */
+        if (!gm->dec_cache) {
+            if (gm->file_offset + gm->data_size > ud->filebuf_size) continue;
+            int align_w = (gm->rect.w + 3) / 4;
+            int dec_size = align_w * gm->rect.h;
+            if (dec_size <= 0 || dec_size > 16 * 1024 * 1024) continue;
+            Uint8* dec = (Uint8*)MAP_CALLOC(1, dec_size);
+            if (!dec) continue;
+            int result = _lzodecompress(
+                (Uint8*)ud->filebuf + gm->file_offset,
+                gm->data_size, dec, dec_size);
+            if (result != dec_size) {
+                MAP_FREE(dec);
+                continue;
+            }
+            gm->dec_cache = dec;
+            gm->dec_len = dec_size;
+        }
+
+        /* 圆形范围检测 2bpp flag */
+        int hit = 0;
+        int align_w = (gm->rect.w + 3) / 4;
+        for (int dy = -radius; dy <= radius && !hit; dy++) {
+            for (int dx = -radius; dx <= radius && !hit; dx++) {
+                if (dx * dx + dy * dy > radius * radius) continue;
+                int px = cx + dx;
+                int py = cy + dy;
+                int lx = px - gm->rect.x;
+                int ly = py - gm->rect.y;
+                if (lx >= 0 && lx < gm->rect.w && ly >= 0 && ly < gm->rect.h) {
+                    int byte_idx = ly * align_w + (lx / 4);
+                    if (byte_idx >= 0 && byte_idx < gm->dec_len) {
+                        Uint8 flag = (gm->dec_cache[byte_idx] >> ((lx % 4) * 2)) & 3;
+                        if (flag == 1 || flag == 2) {
+                            hit = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hit) {
+            int mask_z = (gm->rect.y + gm->rect.h) / 20;
+            if (mask_z + 1 > max_z) max_z = mask_z + 1;
+        }
+    }
+
+    lua_pushinteger(L, max_z);
+    return 1;
+}
+
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
     const luaL_Reg funcs[] = {
@@ -2920,6 +3038,7 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
         {"SetMode", LUA_SetMode},
         {"GetBrigFactor", LUA_GetBrigFactor},
         {"GetBrigFactorSmooth", LUA_GetBrigFactorSmooth},
+        {"GetZBoostAt", LUA_GetZBoostAt},
         {"Run", LUA_Run},
         {NULL, NULL},
     };
