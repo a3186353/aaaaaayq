@@ -1376,22 +1376,15 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
             curid = mapid;
         }
 
-        /* 填充透明通道 */
+        /* 填充透明通道（与 gxy2 一致：仅修改 alpha，不改 RGB） */
         Uint8* palpha = alpha;
         for (int y = 0; y < rect->h; y++) {
             Uint32* row = canvas + y * rect->w;
             for (int x = 0; x < rect->w; x++) {
-                Uint8 code = *palpha++;
-                Uint8 out_a = code;
-                if (code == 2)
-                    out_a = 255;
-                else if (code == 3)
-                    out_a = 150;
-
-                Uint32 px = row[x];
-                px = (px & 0xFFFFFFFCu) | (code & 3u);
-                px = (px & 0x00FFFFFFu) | ((Uint32)out_a << 24);
-                row[x] = px;
+                int a = *palpha++;
+                if (a == 3)
+                    a = 150;
+                row[x] = (row[x] & 0x00FFFFFFu) | ((Uint32)a << 24);
             }
         }
 
@@ -1428,23 +1421,17 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         curid = mapid;
     }
 
-    //填充透明通道
+    //填充透明通道（与 gxy2 一致：仅修改 alpha，不改 RGB）
     Uint8* pixels = (Uint8*)msf->pixels;
     Uint8* palpha = alpha;
     for (int y = 0; y < msf->h; y++) {
-        Uint32* row = (Uint32*)pixels;
+        SDL_Color* color = (SDL_Color*)pixels;
         for (int x = 0; x < msf->w; x++) {
-            Uint8 code = *palpha++;
-            Uint8 out_a = code;
-            if (code == 2)
-                out_a = 255;
-            else if (code == 3)
-                out_a = 150;
-
-            Uint32 px = row[x];
-            px = (px & 0xFFFFFFFCu) | (code & 3u);
-            px = (px & 0x00FFFFFFu) | ((Uint32)out_a << 24);
-            row[x] = px;
+            int a = *palpha++;
+            if (a == 3)
+                a = 150;
+            color[0].a = a;
+            color++;
         }
         pixels += msf->pitch;
     }
