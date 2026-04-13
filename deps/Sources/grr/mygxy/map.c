@@ -803,12 +803,15 @@ static int _scan_tile_girb(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops
 
         if (info.flag == MAP_BLOCK_GIRB) {
             void* gmem;
-            if (!(gmem = _getmem(&m[0], info.size)))
+            /* LZO 容错余量 */
+            Uint32 girb_alloc = info.size + 16;
+            if (!(gmem = _getmem(&m[0], girb_alloc)))
                 return 0;
+            SDL_memset((Uint8*)gmem + info.size, 0, 16);
             if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
                 return 0;
             Uint8* dec = (Uint8*)MAP_MALLOC(2400);
-            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+            if (!dec || _lzodecompress(gmem, (size_t)(info.size + 16), dec, 2400) != 2400) {
                 if (dec)
                     MAP_FREE(dec);
                 return 0;
@@ -884,12 +887,15 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 break;
             }
             void* gmem;
-            if (!(gmem = _getmem(&m[0], info.size)))
+            /* LZO 容错余量 */
+            Uint32 girb_alloc = info.size + 16;
+            if (!(gmem = _getmem(&m[0], girb_alloc)))
                 return 0;
+            SDL_memset((Uint8*)gmem + info.size, 0, 16);
             if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
                 return 0;
             Uint8* dec = (Uint8*)MAP_MALLOC(2400);
-            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+            if (!dec || _lzodecompress(gmem, (size_t)(info.size + 16), dec, 2400) != 2400) {
                 if (dec)
                     MAP_FREE(dec);
                 break;
@@ -1270,7 +1276,13 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
     if (!(mem1 = _getmem(&m[1], len)))
         return 0;
 
-    if (!(mem0 = _getmem(&m[0], size)))
+    /* LZO 容错余量：地图文件的 size 字段可能与 LZO 流实际结束位置有微小偏差
+     * （如尾部填充、结束标记字节被少算等），gxy2 无边界检查所以无感知，
+     * mygxy 的 LZO_CHECK_IP 会提前返回 -1 导致整个遮罩丢失。
+     * 分配额外 16 字节并清零，LZO 即使多读几字节也不会越界。 */
+    #define LZO_INPUT_PADDING 16
+    Uint32 alloc_size = size + LZO_INPUT_PADDING;
+    if (!(mem0 = _getmem(&m[0], alloc_size)))
         return 0;
 
     int ok = 0;
@@ -1285,11 +1297,18 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
             continue;
         if (SDL_RWseek(rw, mask->info.offset + h, RW_SEEK_SET) == -1)
             continue;
+
+        /* 清零尾部余量，防止残留数据被 LZO 误解码 */
+        SDL_memset((Uint8*)mem0 + s, 0, LZO_INPUT_PADDING);
+
         if (SDL_RWread(rw, mem0, sizeof(Uint8), s) != s)
             continue;
-        if (_lzodecompress(mem0, (size_t)s, mem1, (size_t)len) == len)
+
+        /* 传入 s + padding 作为 in_size，给 LZO 边界检查留出容错空间 */
+        if (_lzodecompress(mem0, (size_t)(s + LZO_INPUT_PADDING), mem1, (size_t)len) == len)
             ok = 1;
     }
+    #undef LZO_INPUT_PADDING
 
     if (!ok)
         return 0;
@@ -2979,9 +2998,13 @@ static int LUA_GetZBoostAt(lua_State* L)
             if (dec_size <= 0 || dec_size > 16 * 1024 * 1024) continue;
             Uint8* dec = (Uint8*)MAP_CALLOC(1, dec_size);
             if (!dec) continue;
+            /* LZO 容错余量：利用 filebuf 已有空间，in_size 多给 16 字节 */
+            size_t safe_in = gm->data_size;
+            if (gm->file_offset + safe_in + 16 <= ud->filebuf_size)
+                safe_in += 16;
             int result = _lzodecompress(
                 (Uint8*)ud->filebuf + gm->file_offset,
-                gm->data_size, dec, dec_size);
+                safe_in, dec, dec_size);
             if (result != dec_size) {
                 MAP_FREE(dec);
                 continue;
