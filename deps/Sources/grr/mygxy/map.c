@@ -756,15 +756,12 @@ static int _scan_tile_girb(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops
 
         if (info.flag == MAP_BLOCK_GIRB) {
             void* gmem;
-            /* LZO 容错余量 */
-            Uint32 girb_alloc = info.size + 16;
-            if (!(gmem = _getmem(&m[0], girb_alloc)))
+            if (!(gmem = _getmem(&m[0], info.size)))
                 return 0;
-            SDL_memset((Uint8*)gmem + info.size, 0, 16);
             if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
                 return 0;
             Uint8* dec = (Uint8*)MAP_MALLOC(2400);
-            if (!dec || _lzodecompress(gmem, (size_t)(info.size + 16), dec, 2400) != 2400) {
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
                 if (dec)
                     MAP_FREE(dec);
                 return 0;
@@ -840,15 +837,12 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 break;
             }
             void* gmem;
-            /* LZO 容错余量 */
-            Uint32 girb_alloc = info.size + 16;
-            if (!(gmem = _getmem(&m[0], girb_alloc)))
+            if (!(gmem = _getmem(&m[0], info.size)))
                 return 0;
-            SDL_memset((Uint8*)gmem + info.size, 0, 16);
             if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
                 return 0;
             Uint8* dec = (Uint8*)MAP_MALLOC(2400);
-            if (!dec || _lzodecompress(gmem, (size_t)(info.size + 16), dec, 2400) != 2400) {
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
                 if (dec)
                     MAP_FREE(dec);
                 break;
@@ -1210,30 +1204,18 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
     MAP_Mem* m = tmem ? tmem : ud->mem;
     Uint32 width, height, size;
 
-    int info_ok = _getmaskinfo(ud, id, &mask->info, rw);
+    if (!_getmaskinfo(ud, id, &mask->info, rw))
+        return 0;
 
     width = mask->info.rect.w;
     height = mask->info.rect.h;
     size = mask->info.size;
 
-    fprintf(stderr, "[MASK] id=%u offset=%u info_ok=%d rect=(%d,%d,%u,%u) size=%u\n",
-            id, mask->info.offset, info_ok,
-            mask->info.rect.x, mask->info.rect.y, width, height, size);
-
-    if (!info_ok) {
-        fprintf(stderr, "[MASK] FAIL: _getmaskinfo returned 0\n");
+    /* 遮罩尺寸合理性校验 */
+    if (width == 0 || height == 0 || width > 8192 || height > 8192)
         return 0;
-    }
-
-    /* 遮罩尺寸合理性校验：防止损坏元数据导致超大分配或溢出 */
-    if (width == 0 || height == 0 || width > 8192 || height > 8192) {
-        fprintf(stderr, "[MASK] FAIL: dimension check w=%u h=%u\n", width, height);
+    if (size == 0 || size > 16 * 1024 * 1024)
         return 0;
-    }
-    if (size == 0 || size > 16 * 1024 * 1024) {
-        fprintf(stderr, "[MASK] FAIL: size check size=%u\n", size);
-        return 0;
-    }
 
     void* mem0, * mem1;
     int len = ((width + 3) >> 2) * height;// 4对齐>>2等于除以4
@@ -1242,10 +1224,7 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
     if (!(mem1 = _getmem(&m[1], len)))
         return 0;
 
-    /* LZO 容错余量 */
-    #define LZO_INPUT_PADDING 16
-    Uint32 alloc_size = size + LZO_INPUT_PADDING;
-    if (!(mem0 = _getmem(&m[0], alloc_size)))
+    if (!(mem0 = _getmem(&m[0], size)))
         return 0;
 
     int ok = 0;
@@ -1258,35 +1237,16 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
         Uint32 s = size_try[i];
         if (s == 0)
             continue;
-        Sint64 seek_pos = mask->info.offset + h;
-        if (SDL_RWseek(rw, seek_pos, RW_SEEK_SET) == -1) {
-            fprintf(stderr, "[MASK] try%d: seek to %lld FAILED\n", i, (long long)seek_pos);
+        if (SDL_RWseek(rw, mask->info.offset + h, RW_SEEK_SET) == -1)
             continue;
-        }
-
-        /* 清零尾部余量 */
-        SDL_memset((Uint8*)mem0 + s, 0, LZO_INPUT_PADDING);
-
-        size_t read_n = SDL_RWread(rw, mem0, sizeof(Uint8), s);
-        if (read_n != s) {
-            fprintf(stderr, "[MASK] try%d: read %u bytes, got %zu FAILED\n", i, s, read_n);
+        if (SDL_RWread(rw, mem0, sizeof(Uint8), s) != s)
             continue;
-        }
-
-        int lzo_result = _lzodecompress(mem0, (size_t)(s + LZO_INPUT_PADDING), mem1, (size_t)len);
-        if (lzo_result == len) {
+        if (_lzodecompress(mem0, (size_t)s, mem1, (size_t)len) == len)
             ok = 1;
-            fprintf(stderr, "[MASK] try%d: LZO OK (in=%u+%d out=%d)\n", i, s, LZO_INPUT_PADDING, len);
-        } else {
-            fprintf(stderr, "[MASK] try%d: LZO FAIL (in=%u+%d expected=%d got=%d)\n", i, s, LZO_INPUT_PADDING, len, lzo_result);
-        }
     }
-    #undef LZO_INPUT_PADDING
 
-    if (!ok) {
-        fprintf(stderr, "[MASK] FAIL: all LZO tries failed\n");
+    if (!ok)
         return 0;
-    }
 
     Uint8* data = (Uint8*)mem1;
     Uint8* dedata = (Uint8*)MAP_MALLOC(width * height);
@@ -2960,13 +2920,9 @@ static int LUA_GetZBoostAt(lua_State* L)
             if (dec_size <= 0 || dec_size > 16 * 1024 * 1024) continue;
             Uint8* dec = (Uint8*)MAP_CALLOC(1, dec_size);
             if (!dec) continue;
-            /* LZO 容错余量：利用 filebuf 已有空间，in_size 多给 16 字节 */
-            size_t safe_in = gm->data_size;
-            if (gm->file_offset + safe_in + 16 <= ud->filebuf_size)
-                safe_in += 16;
             int result = _lzodecompress(
                 (Uint8*)ud->filebuf + gm->file_offset,
-                safe_in, dec, dec_size);
+                gm->data_size, dec, dec_size);
             if (result != dec_size) {
                 MAP_FREE(dec);
                 continue;
