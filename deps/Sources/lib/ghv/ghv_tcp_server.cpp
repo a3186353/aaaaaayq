@@ -131,6 +131,9 @@ static int l_tcp_server_start(lua_State* L) {
 
         if (channel->isConnected()) {
             ghv_optimize_game_socket(channel->fd());
+            // Application-layer keepalive: close connection if no data received for 60s
+            // This complements TCP keepalive as a second detection layer
+            hio_set_keepalive_timeout(channel->io(), 60000);
             if (push_server_userdata(L, self)) {
                 int ud_idx = lua_gettop(L);
                 if (ghv_get_lua_ref(L, ud_idx, "on_connect")) {
