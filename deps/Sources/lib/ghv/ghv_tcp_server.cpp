@@ -131,11 +131,12 @@ static int l_tcp_server_start(lua_State* L) {
 
         if (channel->isConnected()) {
             ghv_optimize_game_socket(channel->fd());
-            // Application-layer keepalive: close connection if no data received for 120s
-            // Client sends heartbeat every 30s, so 120s = 4 missed heartbeats before disconnect.
-            // Previous 60s value was too aggressive — main-loop stalls or network jitter
-            // could cause false-positive disconnects even with 30s heartbeat.
-            hio_set_keepalive_timeout(channel->io(), 120000);
+            // Dead connection detection is handled by two other layers:
+            //   1. TCP KeepAlive (ghv_optimize_game_socket): 30s idle + 5s*3 probes = 45s
+            //   2. Lua-layer _最后活跃 timeout: 120s (in RPCServer)
+            // DO NOT use hio_set_keepalive_timeout here — it caused false-positive
+            // disconnects because client heartbeat packets were not always resetting
+            // the timer in the single-threaded polling model.
             if (push_server_userdata(L, self)) {
                 int ud_idx = lua_gettop(L);
                 if (ghv_get_lua_ref(L, ud_idx, "on_connect")) {
