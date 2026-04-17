@@ -126,6 +126,29 @@ inline void ghv_optimize_game_socket(int fd) {
     // Enable TCP keepalive (detect dead connections)
     setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,
                reinterpret_cast<const char*>(&flag), sizeof(flag));
+
+    // Configure aggressive keepalive parameters for game server:
+    // Start probing after 30s idle, probe every 5s, give up after 3 failures
+    // Total detection time: 30 + 5*3 = 45 seconds (vs OS default ~2 hours)
+#ifdef _WIN32
+    struct tcp_keepalive ka;
+    ka.onoff = 1;
+    ka.keepalivetime = 30000;      // 30s idle before first probe
+    ka.keepaliveinterval = 5000;   // 5s between probes
+    DWORD dwBytesReturned = 0;
+    WSAIoctl(static_cast<SOCKET>(fd), SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+             NULL, 0, &dwBytesReturned, NULL, NULL);
+#else
+    int idle = 30;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,
+               reinterpret_cast<const char*>(&idle), sizeof(idle));
+    int interval = 5;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL,
+               reinterpret_cast<const char*>(&interval), sizeof(interval));
+    int count = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,
+               reinterpret_cast<const char*>(&count), sizeof(count));
+#endif
 }
 
 // Initialize an unpack_setting_t for length-field-based defragmentation.
