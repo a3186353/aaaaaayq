@@ -1,6 +1,7 @@
 #include "sdl_proxy.h"
 #include "map.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include "../../../Dependencies/SDL_image/external/libwebp-1.3.2/src/webp/decode.h"
 
@@ -221,6 +222,58 @@ static void _blit_raw_tile(const MAP_RawPixels* tile,
         const Uint32* s = tile->pixels + (src_y + y) * tile->width + src_x;
         SDL_memcpy(d, s, (size_t)copy_w * sizeof(Uint32));
     }
+}
+
+/* 无 GIRB 旧地图的运行时兜底：按地表图块亮度自动生成 40x60 BRIG。
+ * 仅生成一次并缓存到 map->brig，后续仍复用现有双线性采样逻辑。 */
+static Uint8* _build_auto_brig_from_argb(const Uint32* pixels, int width, int height)
+{
+    if (!pixels || width <= 0 || height <= 0)
+        return NULL;
+
+    Uint8* brig = (Uint8*)MAP_MALLOC(2400);
+    if (!brig)
+        return NULL;
+
+    for (int gy = 0; gy < 60; gy++) {
+        int y0 = (gy * height) / 60;
+        int y1 = ((gy + 1) * height) / 60;
+        if (y1 <= y0) y1 = y0 + 1;
+        if (y1 > height) y1 = height;
+
+        for (int gx = 0; gx < 40; gx++) {
+            int x0 = (gx * width) / 40;
+            int x1 = ((gx + 1) * width) / 40;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (x1 > width) x1 = width;
+
+            Uint64 sum = 0;
+            Uint32 count = 0;
+            for (int y = y0; y < y1; y++) {
+                const Uint32* row = pixels + y * width;
+                for (int x = x0; x < x1; x++) {
+                    Uint32 px = row[x];
+                    Uint8 r = (Uint8)((px >> 16) & 0xFF);
+                    Uint8 g = (Uint8)((px >> 8) & 0xFF);
+                    Uint8 b = (Uint8)(px & 0xFF);
+                    sum += (Uint64)(r * 77 + g * 150 + b * 29);
+                    count++;
+                }
+            }
+
+            float luma = count ? (float)(sum / count) / 256.0f : 255.0f;
+            float n = luma / 255.0f;
+            n = 0.55f + n * 0.45f; /* 更柔和：暗部抬高，亮部保留 */
+            if (n < 0.35f) n = 0.35f;
+            if (n > 1.0f) n = 1.0f;
+            int v = (int)(n * 119.0f + 0.5f);
+            if (v < 42) v = 42;
+            if (v > 119) v = 119;
+            brig[gy * 40 + gx] = (Uint8)v;
+        }
+    }
+
+    return brig;
 }
 
 #if defined(_WIN32)
@@ -477,7 +530,7 @@ static Uint32 _fixjpeg(unsigned char* inbuf, Uint32 insize, unsigned char* outbu
     }
     return (Uint32)(op - outbuf);
 }
-//解压遮罩数据（带输入/输出边界保护，防止损坏数据导致堆溢出）
+//解压遮罩数据（与 gxy2/lzo.cpp 一致的标准 LZO1X 解压，无中间边界检查）
 static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 {
     unsigned char* op;
@@ -485,32 +538,17 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
     unsigned t;
     unsigned char* m_pos;
 
-    unsigned char* op_end;
-    unsigned char* ip_end;
-    unsigned char* out_base;
-
-    if (in_size == 0 || out_size == 0)
-        return -1;
+    (void)in_size;  /* 保留参数兼容性，不做中间检查 */
+    (void)out_size;
 
     op = (unsigned char*)out;
     ip = (unsigned char*)in;
-    op_end = op + out_size;
-    ip_end = ip + in_size;
-    out_base = op;
 
-/* 安全宏：检查输入/输出/回溯指针边界 */
-#define LZO_CHECK_IP(need) do { if ((size_t)(ip_end - ip) < (size_t)(need)) return -1; } while(0)
-#define LZO_CHECK_OP(need) do { if ((size_t)(op_end - op) < (size_t)(need)) return -1; } while(0)
-#define LZO_CHECK_MPOS(p)  do { if ((p) < out_base || (p) >= op) return -1; } while(0)
-
-    LZO_CHECK_IP(1);
     if (*ip > 17)
     {
         t = *ip++ - 17;
         if (t < 4)
             goto match_next;
-        LZO_CHECK_OP(t);
-        LZO_CHECK_IP(t);
         do
             *op++ = *ip++;
         while (--t > 0);
@@ -519,26 +557,20 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 
     while (1)
     {
-        LZO_CHECK_IP(1);
         t = *ip++;
         if (t >= 16)
             goto match;
         if (t == 0)
         {
-            LZO_CHECK_IP(1);
             while (*ip == 0)
             {
                 t += 255;
                 ip++;
-                LZO_CHECK_IP(1);
-                if (t > out_size) return -1; /* 防止 t 溢出导致超大拷贝 */
             }
             t += 15 + *ip++;
         }
 
-        /* t 为 literal run 长度减3，实际需要复制 t+1 组 4 字节 */
-        LZO_CHECK_OP(t + 4);
-        LZO_CHECK_IP(t + 4);
+        /* literal run：先复制4字节，再复制剩余 */
         SDL_memcpy(op, ip, 4);
         op += 4;
         ip += 4;
@@ -566,18 +598,14 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
 
     first_literal_run:
 
-        LZO_CHECK_IP(1);
         t = *ip++;
         if (t >= 16)
             goto match;
 
-        LZO_CHECK_IP(1);
         m_pos = op - 0x0801;
         m_pos -= t >> 2;
         m_pos -= *ip++ << 2;
-        LZO_CHECK_MPOS(m_pos);
 
-        LZO_CHECK_OP(3);
         *op++ = *m_pos++;
         *op++ = *m_pos++;
         *op++ = *m_pos;
@@ -589,12 +617,10 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
         match:
             if (t >= 64)
             {
-                LZO_CHECK_IP(1);
                 m_pos = op - 1;
                 m_pos -= (t >> 2) & 7;
                 m_pos -= *ip++ << 3;
                 t = (t >> 5) - 1;
-                LZO_CHECK_MPOS(m_pos);
 
                 goto copy_match;
             }
@@ -603,26 +629,21 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 t &= 31;
                 if (t == 0)
                 {
-                    LZO_CHECK_IP(1);
                     while (*ip == 0)
                     {
                         t += 255;
                         ip++;
-                        LZO_CHECK_IP(1);
-                        if (t > out_size) return -1;
                     }
                     t += 31 + *ip++;
                 }
 
                 m_pos = op - 1;
-                LZO_CHECK_IP(2);
                 {
                     unsigned short tmp;
                     SDL_memcpy(&tmp, ip, 2);
                     m_pos -= tmp >> 2;
                 }
                 ip += 2;
-                LZO_CHECK_MPOS(m_pos);
             }
             else if (t >= 16)
             {
@@ -631,17 +652,13 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 t &= 7;
                 if (t == 0)
                 {
-                    LZO_CHECK_IP(1);
                     while (*ip == 0)
                     {
                         t += 255;
                         ip++;
-                        LZO_CHECK_IP(1);
-                        if (t > out_size) return -1;
                     }
                     t += 7 + *ip++;
                 }
-                LZO_CHECK_IP(2);
                 {
                     unsigned short tmp;
                     SDL_memcpy(&tmp, ip, 2);
@@ -651,24 +668,20 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 if (m_pos == op)
                     goto eof_found;
                 m_pos -= 0x4000;
-                LZO_CHECK_MPOS(m_pos);
             }
             else
             {
-                LZO_CHECK_IP(1);
                 m_pos = op - 1;
                 m_pos -= t >> 2;
                 m_pos -= *ip++ << 2;
-                LZO_CHECK_MPOS(m_pos);
-                LZO_CHECK_OP(2);
                 *op++ = *m_pos++;
                 *op++ = *m_pos;
                 goto match_done;
             }
 
+            /* match 复制 */
             if (t >= 6 && (op - m_pos) >= 4)
             {
-                LZO_CHECK_OP(t + 2);
                 SDL_memcpy(op, m_pos, 4);
                 op += 4;
                 m_pos += 4;
@@ -688,7 +701,6 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
             else
             {
             copy_match:
-                LZO_CHECK_OP(t + 2);
                 *op++ = *m_pos++;
                 *op++ = *m_pos++;
                 do
@@ -703,30 +715,82 @@ static int _lzodecompress(void* in, size_t in_size, void* out, size_t out_size)
                 break;
 
         match_next:
-            LZO_CHECK_OP(t);
-            LZO_CHECK_IP(t);
             do
                 *op++ = *ip++;
             while (--t > 0);
-            LZO_CHECK_IP(1);
             t = *ip++;
         }
     }
 
 eof_found:
-#undef LZO_CHECK_IP
-#undef LZO_CHECK_OP
-#undef LZO_CHECK_MPOS
     return (int)(op - (Uint8*)out);
 }
+
+/* 仅解析 GIRB（40x60 亮度格，LZO 解压 2400 字节）；成功则 *out_alloc 指向新分配缓冲 */
+static int _scan_tile_girb(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, Uint8** out_alloc)
+{
+    if (!out_alloc)
+        return 0;
+    *out_alloc = NULL;
+    if (id >= ud->mapnum)
+        return 0;
+
+    MAP_Mem* m = tmem ? tmem : ud->mem;
+
+    if (SDL_RWseek(rw, ud->maplist[id], RW_SEEK_SET) == -1)
+        return 0;
+
+    Uint32 masknum;
+    if (SDL_RWread(rw, &masknum, sizeof(Uint32), 1) != 1)
+        return 0;
+    if (masknum > 65535)
+        return 0;
+    if (masknum > 0 && ud->flag == MAP_FLAG_M10 &&
+        SDL_RWseek(rw, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
+        return 0;
+
+    for (;;) {
+        MAP_BlockInfo info = { 0, 0 };
+        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
+            return 0;
+
+        if (info.flag == MAP_BLOCK_GIRB) {
+            void* gmem;
+            if (!(gmem = _getmem(&m[0], info.size)))
+                return 0;
+            if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
+                return 0;
+            Uint8* dec = (Uint8*)MAP_MALLOC(2400);
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+                if (dec)
+                    MAP_FREE(dec);
+                return 0;
+            }
+            *out_alloc = dec;
+            return 1;
+        }
+
+        if (info.flag == 0) {
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+                return 0;
+            return 0;
+        }
+
+        if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            return 0;
+    }
+}
+
 //取地表（tmem: 临时缓冲区，传 NULL 使用 ud->mem；rw: 文件句柄）
 // ★ 0x9527 不缓存模式：不读/写 ud->map[id].sf，避免 Timer 线程竞态
 // ★ out_raw: 后台线程模式（tmem != NULL）时，输出裸像素到此指针。
 //   主线程（out_raw == NULL）仍返回 SDL_Surface*。
-static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, MAP_RawPixels* out_raw)
+// ★ out_brig: 异步且非 NULL 时写入 GIRB 解压数据（2400 字节）；Timer 专用。
+static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw, MAP_RawPixels* out_raw, Uint8** out_brig)
 {
     MAP_Mem* m = tmem ? tmem : ud->mem;
-    int no_cache = (ud->mode == 0x9527);
+    int no_cache = (ud->mode & MAP_MODE_NO_CACHE) == MAP_MODE_NO_CACHE;
+    int allow_auto_brig = (ud->mode & MAP_MODE_AUTO_BRIG) == MAP_MODE_AUTO_BRIG;
     int is_async = (tmem != NULL && out_raw != NULL);
 
     if (id >= ud->mapnum)
@@ -751,17 +815,51 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
         SDL_RWseek(rw, sizeof(Uint32) * masknum, RW_SEEK_CUR) == -1)
         return 0;
 
-    MAP_BlockInfo info = { 0, 0 };
-
+    MAP_BlockInfo img_info = { 0, 0 };
     void* mem0 = NULL, * mem1 = NULL;
-    int loop = 1;
-    while (loop)
-    {
-        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1)
-            return 0;
+    int have_image = 0;
 
-        switch (info.flag)
-        {
+    for (;;) {
+        MAP_BlockInfo info = { 0, 0 };
+        /* 已拿到图像数据后，若流结束或无下一块头（常见于图像即末块、无 flag==0 结束标记），
+         * 不得 return 0，否则整 tile 解码失败 → 地表全黑。旧逻辑是读到第一块图就停。 */
+        if (SDL_RWread(rw, &info, sizeof(MAP_BlockInfo), 1) != 1) {
+            if (have_image)
+                goto tile_blocks_done;
+            return 0;
+        }
+
+        switch (info.flag) {
+        case MAP_BLOCK_GIRB: {
+            if (is_async && !out_brig) {
+                if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+                    return 0;
+                break;
+            }
+            void* gmem;
+            if (!(gmem = _getmem(&m[0], info.size)))
+                return 0;
+            if (SDL_RWread(rw, gmem, sizeof(Uint8), info.size) != info.size)
+                return 0;
+            Uint8* dec = (Uint8*)MAP_MALLOC(2400);
+            if (!dec || _lzodecompress(gmem, info.size, dec, 2400) != 2400) {
+                if (dec)
+                    MAP_FREE(dec);
+                break;
+            }
+            if (is_async && out_brig) {
+                if (*out_brig)
+                    MAP_FREE(*out_brig);
+                *out_brig = dec;
+            } else if (!is_async) {
+                if (ud->map[id].brig)
+                    MAP_FREE(ud->map[id].brig);
+                ud->map[id].brig = dec;
+            } else {
+                MAP_FREE(dec);
+            }
+            break;
+        }
         case MAP_BLOCK_JPG2: //梦幻普通JPG
         case MAP_BLOCK_PNG1: //梦幻
         case MAP_BLOCK_WEBP: //梦幻
@@ -771,9 +869,11 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                 return 0;
             if (SDL_RWread(rw, mem0, sizeof(Uint8), info.size) != info.size)
                 return 0;
-
-            loop = 0;
-            break;
+            img_info = info;
+            have_image = 1;
+            /* 与历史行为一致：第一块地表图后即停止解析本 tile，避免 JPEG 尾被误读成块头导致解码失败。
+             * GIRB 若在图前已处理；若在图后由 GetBrigFactor / _scan_tile_girb 另扫。 */
+            goto tile_blocks_done;
         }
         case MAP_BLOCK_JPEG:
         {
@@ -794,6 +894,9 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                         return 0; /* fixjpeg 解码失败，跳过该图块 */
                     mem0 = mem1;
                 }//大话普通
+                img_info = info;
+                have_image = 1;
+                goto tile_blocks_done;
             }
             else {//MAPX 
                 if (!(mem0 = _getmem(&m[0], ud->jpeh.size + info.size)))
@@ -844,44 +947,51 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
                     ujFree(img);
                 }
                 mem0 = NULL;
+                img_info = info;
+                have_image = 1;
+                goto tile_blocks_done;
             }
-            loop = 0;
-            break;
-
         }
         case 0://结束
-        {
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+                if (have_image)
+                    goto tile_blocks_done;
                 return 0;
-            info.size = 0;
-            loop = 0;
-            break;
-        }
+            }
+            goto tile_blocks_done;
         default: //跳过
-            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1)
+            if (SDL_RWseek(rw, info.size, RW_SEEK_CUR) == -1) {
+                if (have_image)
+                    goto tile_blocks_done;
                 return 0;
+            }
             break;
         }
     }
 
-    if (mem0 && info.size) {
+tile_blocks_done:
+
+    if (!have_image)
+        return 0;
+
+    if (mem0 && img_info.size) {
         /* 单图块大小上限防护（防止损坏数据导致超大分配） */
-        if (info.size > 16 * 1024 * 1024)
+        if (img_info.size > 16 * 1024 * 1024)
             return 0;
 
         /* 1. WEBP 裸像素解码（libwebp 纯 C，无 SDL API） */
-        if (!raw.pixels && info.size >= 12) {
+        if (!raw.pixels && img_info.size >= 12) {
             const Uint8* hdr = (const Uint8*)mem0;
             if (hdr[0]=='R' && hdr[1]=='I' && hdr[2]=='F' && hdr[3]=='F' &&
                 hdr[8]=='W' && hdr[9]=='E' && hdr[10]=='B' && hdr[11]=='P')
             {
-                raw = _webp_raw_decode(hdr, info.size);
+                raw = _webp_raw_decode(hdr, img_info.size);
             }
         }
 
         /* 2. JPEG/PNG 裸像素解码（stb_image 纯 C，无 SDL API） */
         if (!raw.pixels) {
-            raw = _stbi_raw_decode((const Uint8*)mem0, info.size);
+            raw = _stbi_raw_decode((const Uint8*)mem0, img_info.size);
         }
 
         if (is_async) {
@@ -889,16 +999,22 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
              * SDL_CreateRGBSurfaceWithFormat 内部的 SDL_AllocFormat()
              * 操作全局格式缓存链表（无锁），与主线程竞态导致堆损坏。
              * 后台线程只产出裸 ARGB8888 像素，主线程消费时再创建 Surface。 */
+            if (allow_auto_brig && out_brig && !*out_brig) {
+                *out_brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+            }
             *out_raw = raw;
             return NULL;
         }
 
         /* ---- 主线程路径 ---- */
+        if (allow_auto_brig && !ud->map[id].brig && raw.pixels) {
+            ud->map[id].brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+        }
         if (raw.pixels) {
             sf = _raw_to_surface(&raw, SDL_PIXELFORMAT_ARGB8888);
         } else {
             /* 主线程最终 fallback：使用 IMG_Load_RW */
-            SDL_RWops* src = SDL_RWFromMem(mem0, (int)info.size);
+            SDL_RWops* src = SDL_RWFromMem(mem0, (int)img_info.size);
             sf = IMG_Load_RW(src, SDL_TRUE);
         }
 
@@ -917,6 +1033,9 @@ static SDL_Surface* _getmapsf(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RW
     else if (is_async && raw.pixels) {
         /* MAPX ujImage 路径已产出 raw，返回给后台线程 */
         *out_raw = raw;
+        if (out_brig && !*out_brig) {
+            *out_brig = _build_auto_brig_from_argb(raw.pixels, raw.width, raw.height);
+        }
         return NULL;
     }
 
@@ -1085,16 +1204,17 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
     MAP_Mem* m = tmem ? tmem : ud->mem;
     Uint32 width, height, size;
 
-    _getmaskinfo(ud, id, &mask->info, rw);
+    if (!_getmaskinfo(ud, id, &mask->info, rw))
+        return 0;
 
     width = mask->info.rect.w;
     height = mask->info.rect.h;
     size = mask->info.size;
 
-    /* 遮罩尺寸合理性校验：防止损坏元数据导致超大分配或溢出 */
+    /* 遮罩尺寸合理性校验 */
     if (width == 0 || height == 0 || width > 8192 || height > 8192)
         return 0;
-    if (size == 0 || size > 16 * 1024 * 1024)  /* 单个遮罩压缩数据不应超过 16MB */
+    if (size == 0 || size > 16 * 1024 * 1024)
         return 0;
 
     void* mem0, * mem1;
@@ -1181,7 +1301,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         for (int y = sfy; y < rect->h; y += 240) {
             for (int x = sfx; x < rect->w; x += 320) {
                 MAP_RawPixels tile = { NULL, 0, 0 };
-                _getmapsf(ud, curid++, tmem, rw, &tile);
+                _getmapsf(ud, curid++, tmem, rw, &tile, NULL);
                 if (tile.pixels) {
                     _blit_raw_tile(&tile, canvas, rect->w, rect->h, x, y);
                     MAP_FREE(tile.pixels);
@@ -1191,22 +1311,15 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
             curid = mapid;
         }
 
-        /* 填充透明通道 */
+        /* 填充透明通道（与 gxy2 一致：仅修改 alpha，不改 RGB） */
         Uint8* palpha = alpha;
         for (int y = 0; y < rect->h; y++) {
             Uint32* row = canvas + y * rect->w;
             for (int x = 0; x < rect->w; x++) {
-                Uint8 code = *palpha++;
-                Uint8 out_a = code;
-                if (code == 2)
-                    out_a = 255;
-                else if (code == 3)
-                    out_a = 150;
-
-                Uint32 px = row[x];
-                px = (px & 0xFFFFFFFCu) | (code & 3u);
-                px = (px & 0x00FFFFFFu) | ((Uint32)out_a << 24);
-                row[x] = px;
+                int a = *palpha++;
+                if (a == 3)
+                    a = 150;
+                row[x] = (row[x] & 0x00FFFFFFu) | ((Uint32)a << 24);
             }
         }
 
@@ -1231,7 +1344,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 
     for (int y = sfy; y < msf->h; y += 240) {
         for (int x = sfx; x < msf->w; x += 320) {
-            SDL_Surface* sf = _getmapsf(ud, curid++, NULL, rw, NULL);
+            SDL_Surface* sf = _getmapsf(ud, curid++, NULL, rw, NULL, NULL);
             SDL_Rect xy = { x,y };
             if (sf) {
                 SDL_BlitSurface(sf, NULL, msf, &xy);
@@ -1243,23 +1356,17 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         curid = mapid;
     }
 
-    //填充透明通道
+    //填充透明通道（与 gxy2 一致：仅修改 alpha，不改 RGB）
     Uint8* pixels = (Uint8*)msf->pixels;
     Uint8* palpha = alpha;
     for (int y = 0; y < msf->h; y++) {
-        Uint32* row = (Uint32*)pixels;
+        SDL_Color* color = (SDL_Color*)pixels;
         for (int x = 0; x < msf->w; x++) {
-            Uint8 code = *palpha++;
-            Uint8 out_a = code;
-            if (code == 2)
-                out_a = 255;
-            else if (code == 3)
-                out_a = 150;
-
-            Uint32 px = row[x];
-            px = (px & 0xFFFFFFFCu) | (code & 3u);
-            px = (px & 0x00FFFFFFu) | ((Uint32)out_a << 24);
-            row[x] = px;
+            int a = *palpha++;
+            if (a == 3)
+                a = 150;
+            color[0].a = a;
+            color++;
         }
         pixels += msf->pitch;
     }
@@ -1331,7 +1438,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
         }
 
         /* 解码地表 → 裸像素（不创建 SDL_Surface） */
-        _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw);
+        _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw, &time->result_brig);
         _getmasksinfo(ud, time->id, &time->result_mask, &time->result_masknum, task_rw);
         
         if (fm && time->result_masknum > 0 && time->result_mask)
@@ -1431,6 +1538,10 @@ static void MAP_DrainPendingNoCallback(lua_State* L, MAP_UserData* ud)
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
+                }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
@@ -1498,6 +1609,13 @@ static int LUA_Run(lua_State* L)
             /* ★ 主线程：裸像素→SDL_Surface（ARGB8888）
              *   从 time->result_* 读取（Timer线程私有输出），不从 map-> 读取 */
             SDL_Surface* map_sf = _raw_to_surface(&time->result_raw, SDL_PIXELFORMAT_ARGB8888);
+
+            if (time->result_brig) {
+                if (map->brig)
+                    MAP_FREE(map->brig);
+                map->brig = time->result_brig;
+                time->result_brig = NULL;
+            }
 
             if (!map_sf)
             {
@@ -1673,7 +1791,7 @@ static int LUA_GetMap(lua_State* L)
         if (!ud->closing && ud->file)
         {
             if (!map->sf)
-                map->sf = _getmapsf(ud, id, NULL, ud->file, NULL);
+                map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
 
             if (map->sf)
             {
@@ -1806,7 +1924,7 @@ static int LUA_GetMapInfo(lua_State* L)
     if (!ud->closing && ud->file)
     {
         if (!map->sf)
-            map->sf = _getmapsf(ud, id, NULL, ud->file, NULL);
+            map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
 
         if (map->sf)
         {
@@ -2279,6 +2397,35 @@ static int MAP_NEW(lua_State* L)
             ud->masklist = (Uint32*)MAP_MALLOC(ud->masknum * sizeof(Uint32));  //遮罩偏移
             if (SDL_RWread(rw, ud->masklist, sizeof(Uint32), ud->masknum) != ud->masknum)
                 goto openerr;
+
+            /* 预解析全局遮罩信息（GetZBoostAt 用） */
+            ud->gmasks = (MAP_GlobalMask*)MAP_CALLOC(ud->masknum, sizeof(MAP_GlobalMask));
+            if (ud->gmasks) {
+                Uint32 valid = 0;
+                Sint64 saved_pos = SDL_RWtell(rw);
+                for (Uint32 mi = 0; mi < ud->masknum; mi++) {
+                    Uint32 moff = ud->masklist[mi];
+                    if (SDL_RWseek(rw, moff, RW_SEEK_SET) == -1)
+                        continue;
+                    /* mask header: x(4) + y(4) + w(4) + h(4) + data_size(4) = 20 字节 */
+                    SDL_Rect r;
+                    Uint32 raw_size = 0;
+                    if (SDL_RWread(rw, &r, sizeof(SDL_Rect), 1) != 1)
+                        continue;
+                    if (SDL_RWread(rw, &raw_size, sizeof(Uint32), 1) != 1)
+                        continue;
+                    if (r.w <= 0 || r.h <= 0 || r.w > 8192 || r.h > 8192)
+                        continue;
+                    ud->gmasks[valid].rect = r;
+                    ud->gmasks[valid].data_size = raw_size;
+                    ud->gmasks[valid].file_offset = moff + 20;
+                    ud->gmasks[valid].dec_cache = NULL;
+                    ud->gmasks[valid].dec_len = 0;
+                    valid++;
+                }
+                ud->gmask_count = valid;
+                SDL_RWseek(rw, saved_pos, RW_SEEK_SET);
+            }
         }
 
         lua_createtable(L, 0, 7);
@@ -2408,6 +2555,10 @@ static int LUA_Clear(lua_State* L)
     for (Uint32 n = 0; n < ud->mapnum; n++) {
         if (ud->map[n].sf)
             SDL_FreeSurface(ud->map[n].sf);
+        if (ud->map[n].brig) {
+            MAP_FREE(ud->map[n].brig);
+            ud->map[n].brig = NULL;
+        }
         if (ud->map[n].mask)
             MAP_FREE(ud->map[n].mask);
     }
@@ -2447,6 +2598,10 @@ static int LUA_Clear(lua_State* L)
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
                 }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
+                }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
                     time->result_mask = NULL;
@@ -2467,6 +2622,10 @@ static int LUA_Clear(lua_State* L)
                 if (time->result_raw.pixels) {
                     MAP_FREE(time->result_raw.pixels);
                     time->result_raw.pixels = NULL;
+                }
+                if (time->result_brig) {
+                    MAP_FREE(time->result_brig);
+                    time->result_brig = NULL;
                 }
                 if (time->result_mask) {
                     MAP_FREE(time->result_mask);
@@ -2529,6 +2688,9 @@ static int LUA_GC(lua_State* L)
             if (ud->map[n].sf)
                 SDL_FreeSurface(ud->map[n].sf);
 
+            if (ud->map[n].brig)
+                MAP_FREE(ud->map[n].brig);
+
             if (ud->map[n].mask)
                 MAP_FREE(ud->map[n].mask);
         }
@@ -2547,6 +2709,18 @@ static int LUA_GC(lua_State* L)
     {
         MAP_FREE(ud->masklist);
         ud->masklist = NULL;
+    }
+
+    /* 释放全局遮罩缓存（含懒加载解压缓冲） */
+    if (ud->gmasks)
+    {
+        for (Uint32 n = 0; n < ud->gmask_count; n++) {
+            if (ud->gmasks[n].dec_cache)
+                MAP_FREE(ud->gmasks[n].dec_cache);
+        }
+        MAP_FREE(ud->gmasks);
+        ud->gmasks = NULL;
+        ud->gmask_count = 0;
     }
 
     if (ud->jpeh.mem)
@@ -2595,6 +2769,200 @@ static int LUA_SetMode(lua_State* L)
     return 0;
 }
 
+/* 须在 ud->mutex 已加锁、且 ud->file 有效时调用。
+ * (bx,by) 为整张地图上的全局 BRIG 格索引（每格 8x4 像素）。 */
+static float _brig_factor_global_cell(MAP_UserData* ud, int bx, int by, int maxBx, int maxBy)
+{
+    if (bx < 0) bx = 0;
+    if (by < 0) by = 0;
+    if (bx > maxBx) bx = maxBx;
+    if (by > maxBy) by = maxBy;
+
+    int bCol = bx / 40;
+    int bRow = by / 60;
+    Uint32 tId = (Uint32)(bRow * (int)ud->colnum + bCol);
+    if (tId >= ud->mapnum || ud->colnum == 0)
+        return 1.0f;
+
+    MAP_Data* map = &ud->map[tId];
+    if (!map->brig) {
+        Uint8* dec = NULL;
+        if (_scan_tile_girb(ud, tId, NULL, ud->file, &dec))
+            map->brig = dec;
+    }
+    if (!map->brig)
+        return 1.0f;
+
+    int localBx = bx - bCol * 40;
+    int localBy = by - bRow * 60;
+    Uint8 val = map->brig[localBy * 40 + localBx];
+    float f = (float)val / 119.0f;
+    if (f > 1.0f)
+        f = 1.0f;
+    return f;
+}
+
+/* 地图像素坐标 (wx,wy) 处 GIRB 亮度因子，约 0~1；无数据或越界为 1。
+ * 与 brig_visualize.py 一致：0x77 为基准 1.0，更小为阴影变暗；更大压到 1 不额外提亮角色。 */
+static int LUA_GetBrigFactor(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    int wx = (int)luaL_checkinteger(L, 2);
+    int wy = (int)luaL_checkinteger(L, 3);
+
+    if (wx < 0 || wy < 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    if (ud->colnum == 0 || ud->rownum == 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    Uint32 col = (Uint32)(wx / 320);
+    Uint32 row = (Uint32)(wy / 240);
+    if (col >= ud->colnum || row >= ud->rownum) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    int maxBx = (int)ud->colnum * 40 - 1;
+    int maxBy = (int)ud->rownum * 60 - 1;
+    int gbx = wx / 8;
+    int gby = wy / 4;
+
+    lua_Number factor = 1.0;
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file)
+        factor = (lua_Number)_brig_factor_global_cell(ud, gbx, gby, maxBx, maxBy);
+    SDL_UnlockMutex(ud->mutex);
+
+    lua_pushnumber(L, factor);
+    return 1;
+}
+
+/* 与 Godot MapReader.GetBrightnessAt 一致：格心偏移 (4,2) + 双线性插值，单次加锁、适合每帧调用。 */
+static int LUA_GetBrigFactorSmooth(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    float pixelX = (float)luaL_checknumber(L, 2);
+    float pixelY = (float)luaL_checknumber(L, 3);
+
+    if (ud->colnum == 0 || ud->rownum == 0) {
+        lua_pushnumber(L, 1.0);
+        return 1;
+    }
+
+    int maxBx = (int)ud->colnum * 40 - 1;
+    int maxBy = (int)ud->rownum * 60 - 1;
+
+    float cx = (pixelX - 4.0f) / 8.0f;
+    float cy = (pixelY - 2.0f) / 4.0f;
+    int gx0 = (int)floorf(cx);
+    int gy0 = (int)floorf(cy);
+    int gx1 = gx0 + 1;
+    int gy1 = gy0 + 1;
+    float tx = cx - (float)gx0;
+    float ty = cy - (float)gy0;
+
+    lua_Number factor = 1.0;
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file) {
+        float c00 = _brig_factor_global_cell(ud, gx0, gy0, maxBx, maxBy);
+        float c10 = _brig_factor_global_cell(ud, gx1, gy0, maxBx, maxBy);
+        float c01 = _brig_factor_global_cell(ud, gx0, gy1, maxBx, maxBy);
+        float c11 = _brig_factor_global_cell(ud, gx1, gy1, maxBx, maxBy);
+        float c0 = c00 + (c10 - c00) * tx;
+        float c1 = c01 + (c11 - c01) * tx;
+        float f = c0 + (c1 - c0) * ty;
+        if (f > 1.0f)
+            f = 1.0f;
+        factor = (lua_Number)f;
+    }
+    SDL_UnlockMutex(ud->mutex);
+
+    lua_pushnumber(L, factor);
+    return 1;
+}
+
+/* ── GetZBoostAt(x, y) ─── 移植自 Godot 版 map_reader.cpp ─────────────
+ * 检测角色脚底坐标是否处于遮罩排序区域内（2bpp flag=1/2），
+ * 若命中则返回遮罩底边对应的排序 Z 值，用于将角色排到遮罩后方。
+ * 未命中返回 -1。 */
+static int LUA_GetZBoostAt(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    int cx = (int)luaL_checkinteger(L, 2);
+    int cy = (int)luaL_checkinteger(L, 3);
+
+    if (!ud->gmasks || ud->gmask_count == 0 || !ud->filebuf) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    int max_z = -1;
+    int radius = 12; /* 容错半径（适应 20x20 行走格子的锚点越界问题） */
+
+    for (Uint32 mi = 0; mi < ud->gmask_count; mi++) {
+        MAP_GlobalMask* gm = &ud->gmasks[mi];
+
+        /* 包围盒粗筛 */
+        if (gm->data_size == 0) continue;
+        if (cx + radius < gm->rect.x || cx - radius >= gm->rect.x + gm->rect.w) continue;
+        if (cy + radius < gm->rect.y || cy - radius >= gm->rect.y + gm->rect.h) continue;
+
+        /* 懒加载 LZO 解压 2bpp alpha 数据 */
+        if (!gm->dec_cache) {
+            if (gm->file_offset + gm->data_size > ud->filebuf_size) continue;
+            int align_w = (gm->rect.w + 3) / 4;
+            int dec_size = align_w * gm->rect.h;
+            if (dec_size <= 0 || dec_size > 16 * 1024 * 1024) continue;
+            Uint8* dec = (Uint8*)MAP_CALLOC(1, dec_size);
+            if (!dec) continue;
+            int result = _lzodecompress(
+                (Uint8*)ud->filebuf + gm->file_offset,
+                gm->data_size, dec, dec_size);
+            if (result != dec_size) {
+                MAP_FREE(dec);
+                continue;
+            }
+            gm->dec_cache = dec;
+            gm->dec_len = dec_size;
+        }
+
+        /* 圆形范围检测 2bpp flag */
+        int hit = 0;
+        int align_w = (gm->rect.w + 3) / 4;
+        for (int dy = -radius; dy <= radius && !hit; dy++) {
+            for (int dx = -radius; dx <= radius && !hit; dx++) {
+                if (dx * dx + dy * dy > radius * radius) continue;
+                int px = cx + dx;
+                int py = cy + dy;
+                int lx = px - gm->rect.x;
+                int ly = py - gm->rect.y;
+                if (lx >= 0 && lx < gm->rect.w && ly >= 0 && ly < gm->rect.h) {
+                    int byte_idx = ly * align_w + (lx / 4);
+                    if (byte_idx >= 0 && byte_idx < gm->dec_len) {
+                        Uint8 flag = (gm->dec_cache[byte_idx] >> ((lx % 4) * 2)) & 3;
+                        if (flag == 1 || flag == 2) {
+                            hit = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hit) {
+            int mask_z = (gm->rect.y + gm->rect.h) / 20;
+            if (mask_z + 1 > max_z) max_z = mask_z + 1;
+        }
+    }
+
+    lua_pushinteger(L, max_z);
+    return 1;
+}
+
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
     const luaL_Reg funcs[] = {
@@ -2609,6 +2977,9 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
         {"GetBlock", LUA_GetBlock},
         {"Clear", LUA_Clear},
         {"SetMode", LUA_SetMode},
+        {"GetBrigFactor", LUA_GetBrigFactor},
+        {"GetBrigFactorSmooth", LUA_GetBrigFactorSmooth},
+        {"GetZBoostAt", LUA_GetZBoostAt},
         {"Run", LUA_Run},
         {NULL, NULL},
     };
