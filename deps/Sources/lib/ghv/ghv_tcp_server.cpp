@@ -131,14 +131,6 @@ static int l_tcp_server_start(lua_State* L) {
 
         if (channel->isConnected()) {
             ghv_optimize_game_socket(channel->fd());
-            // DO NOT use hio_set_keepalive_timeout here.
-            // Root cause: hloop.c:158 "goto process_timers" skips IO processing
-            // when timers are overdue. In our low-frequency polling model (~15s/frame),
-            // timers are always overdue, causing IO starvation: last_read_hrtime
-            // never updates, and keepalive falsely fires even with active heartbeat.
-            // Dead connection detection layers:
-            //   1. TCP KeepAlive (ghv_optimize_game_socket): 30s idle + 5s*3 probes = 45s
-            //   2. Lua-layer _最后活跃 timeout: 120s (in RPCServer)
             if (push_server_userdata(L, self)) {
                 int ud_idx = lua_gettop(L);
                 if (ghv_get_lua_ref(L, ud_idx, "on_connect")) {
