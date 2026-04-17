@@ -24,6 +24,7 @@ on:
 env:
   SOLUTION_FILE: deps/Projects/windows/Windows.sln
   OPENSSL_VER: "3.6.1"
+  FFMPEG_VER: "6.1.2"
 
 jobs:
   build-windows:
@@ -125,6 +126,63 @@ jobs:
           Write-Host "  ✅ OpenSSL 头文件已更新"
         }
 
+    # ── FFmpeg SDK 下载 (预编译 shared dev 包) ──
+    - name: Cache FFmpeg SDK
+      uses: actions/cache@v4
+      id: ffmpeg-cache
+      with:
+        path: deps/Dependencies/ffmpeg
+        key: ffmpeg-${{ env.FFMPEG_VER }}-win-x64-v2
+
+    - name: Download FFmpeg ${{ env.FFMPEG_VER }} SDK
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $ffVer = "${{ env.FFMPEG_VER }}"
+        # BtbN latest master 预编译包 (包含 DLL + import lib + 头文件)
+        $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+        # 备用: BtbN release 分支构建
+        $urlAlt = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffVer}-latest-win64-lgpl-shared-${ffVer}.zip"
+        
+        $destDir = "deps/Dependencies/ffmpeg"
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+        # 尝试 BtbN 下载 
+        $archivePath = "ffmpeg-sdk.zip"
+        try {
+          Invoke-WebRequest -Uri $url -OutFile $archivePath -MaximumRetryCount 3 -TimeoutSec 120
+        } catch {
+          Write-Host "⚠️ master 构建下载失败, 尝试 release 分支"
+          Invoke-WebRequest -Uri $urlAlt -OutFile $archivePath -MaximumRetryCount 3 -TimeoutSec 120
+        }
+
+        if ($archivePath -and (Test-Path $archivePath)) {
+          Expand-Archive -Path $archivePath -DestinationPath "ffmpeg-extracted" -Force
+        }
+
+        # 找到解压后的根目录 (可能有一层嵌套)
+        $extractedRoot = Get-ChildItem "ffmpeg-extracted" -Directory | Select-Object -First 1
+        if ($extractedRoot) {
+          # 复制 include
+          if (Test-Path "$($extractedRoot.FullName)/include") {
+            Copy-Item "$($extractedRoot.FullName)/include" -Destination "$destDir/include" -Recurse -Force
+          }
+          # 复制 lib → lib/x64 (vcxproj 引用 lib/$(PlatformTarget))
+          if (Test-Path "$($extractedRoot.FullName)/lib") {
+            New-Item -ItemType Directory -Path "$destDir/lib/x64" -Force | Out-Null
+            Copy-Item "$($extractedRoot.FullName)/lib/*" -Destination "$destDir/lib/x64/" -Recurse -Force
+          }
+          # 复制 bin (运行时 DLL)
+          if (Test-Path "$($extractedRoot.FullName)/bin") {
+            Copy-Item "$($extractedRoot.FullName)/bin" -Destination "$destDir/bin" -Recurse -Force
+          }
+        }
+
+        Write-Host "✅ FFmpeg SDK 已就位:"
+        Get-ChildItem $destDir -Recurse -Include "*.lib" | ForEach-Object {
+          Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1KB,1)) KB)"
+        }
+
     - name: Build ${{ matrix.platform }} (${{ matrix.configuration }})
       shell: pwsh
       run: |
@@ -156,6 +214,8 @@ jobs:
           "GGELUAc.exe",     # 主程序 (控制台)
           "lua.exe"          # Lua 解释器
         )
+        # 可选模块 (缺失不阻塞 CI)
+        $optional = @("gffmpeg.dll")
 
         # 搜索 .x64 编译输出目录
         $found = @{}
@@ -176,17 +236,27 @@ jobs:
             $missing += $name
           }
         }
+        foreach ($name in $optional) {
+          if ($found.ContainsKey($name)) {
+            $f = $found[$name]
+            $sizeKB = [math]::Round($f.Length / 1KB, 1)
+            Write-Host "  ✅ $name ($sizeKB KB) [可选]"
+          } else {
+            Write-Host "  ⚠️ $name 未编译 (FFmpeg SDK 缺失) [可选]"
+          }
+        }
 
         # 列出其他意外产物 (不阻塞，仅供参考)
-        $extra = $found.Keys | Where-Object { $_ -notin $required }
+        $allKnown = $required + $optional
+        $extra = $found.Keys | Where-Object { $_ -notin $allKnown }
         if ($extra.Count -gt 0) {
           Write-Host ""
-          Write-Host "⚠️ 意外产物 (未在必须清单中):"
+          Write-Host "⚠️ 意外产物 (未在清单中):"
           $extra | ForEach-Object { Write-Host "  ⚠️ $_" }
         }
 
         Write-Host ""
-        Write-Host "总计: $($found.Count) 个产物, $($missing.Count) 个缺失"
+        Write-Host "总计: $($found.Count) 个产物, $($missing.Count) 个必需缺失"
         if ($missing.Count -gt 0) {
           Write-Error "Build validation failed: missing $($missing -join ', ')"
           exit 1
@@ -206,6 +276,7 @@ jobs:
           "hiredis.dll",
           "lsqlite3.dll",
           "gastar.dll",
+          "gffmpeg.dll",
           "GGELUA.exe",
           "GGELUAc.exe",
           "lua.exe"

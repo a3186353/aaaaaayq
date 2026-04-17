@@ -73,10 +73,23 @@ typedef struct
     Uint32 mode;
 } MAP_MaskInfo;
 
+/* 全局遮罩信息（Z排序用，仅 M1.0 格式）
+ * 在加载时预解析所有 mask 的 rect/size
+ * dec_cache 按需 LZO 解压 2bpp alpha 数据 */
+typedef struct
+{
+    SDL_Rect rect;       /* 遮罩在地图中的像素坐标和尺寸 */
+    Uint32 data_size;    /* LZO 压缩数据大小 */
+    Uint32 file_offset;  /* 压缩数据在文件缓冲中的偏移 */
+    Uint8* dec_cache;    /* 懒加载解压缓冲 */
+    int    dec_len;      /* 解压后数据长度 */
+} MAP_GlobalMask;
+
 typedef struct
 {
     Uint32 id;
     SDL_Surface* sf;       /* 主线程缓存（同步路径） */
+    Uint8* brig;           /* GIRB 解压后 2400 字节（40x60x1），无则 NULL */
     MAP_MaskInfo* mask;    /* 主线程消费后的遮罩信息 */
     Uint32 masknum;
     int loading;
@@ -106,6 +119,9 @@ typedef struct
 
     Uint32 masknum;// M1.0
     Uint32* masklist; //M1.0 遮罩偏移 
+
+    MAP_GlobalMask* gmasks;   /* 全局遮罩信息缓存（GetZBoostAt 用） */
+    Uint32 gmask_count;       /* 全局遮罩数量 */
 
     MAP_Mem mem[2];
     MAP_Data* map;   //缓存
@@ -138,6 +154,11 @@ typedef struct
 #define MAP_BLOCK_JPEG  0x4A504547   /* 'JPEG' */
 #define MAP_BLOCK_MASK  0x4D41534B   /* 'MASK' */
 #define MAP_BLOCK_CELL  0x43454C4C   /* 'CELL' */
+#define MAP_BLOCK_GIRB  0x42524947   /* 'GIRB' 地表明暗格（LZO→2400） */
+
+/* MAP_UserData.mode 运行模式位 */
+#define MAP_MODE_NO_CACHE   0x00009527u
+#define MAP_MODE_AUTO_BRIG  0x10000000u
 
 typedef struct
 {
@@ -149,6 +170,7 @@ typedef struct
     MAP_Mem mem[2];        /* 异步任务独立缓冲区，不复用 ud->mem[] */
     /* ---- 异步解码结果（Timer线程写入，主线程消费） ---- */
     MAP_RawPixels result_raw;       /* 地表裸像素 */
+    Uint8* result_brig;             /* GIRB 解压缓冲 2400 字节，无则 NULL */
     MAP_MaskInfo* result_mask;      /* 遮罩信息数组 */
     Uint32 result_masknum;          /* 遮罩数量 */
 } TIME_Data;
