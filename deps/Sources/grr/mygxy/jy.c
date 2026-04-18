@@ -194,6 +194,27 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
     Uint32 abpp = ud->alpha_bpp;
     Uint32 pmod = ud->pal_mod;
 
+    /* Pre-compute depth buffer limits for safe access */
+    Uint32 depth_buf_pixels = 0; /* total pixel count in depth_pixels buffer */
+    Uint32 depth_stride = 0;     /* row stride in pixels for depth atlas */
+    if (ud->depth_pixels)
+    {
+        Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
+        Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
+        depth_stride = daw;
+        depth_buf_pixels = daw * dah;
+        /* Diagnostic: log once per frame decode with depth */
+        SDL_Log("JY_Decode id=%u frame(%u,%u %ux%u) depth_bpp=%u dstride=%u dpx=%u df=%p dfc=%u",
+                id, f->sx, f->sy, f->sw, f->sh,
+                ud->depth_bpp, depth_stride, depth_buf_pixels,
+                (void*)ud->depth_frames, ud->depth_frame_count);
+        if (ud->depth_frames && id < ud->depth_frame_count)
+        {
+            JY_FrameInfo* df = &ud->depth_frames[id];
+            SDL_Log("  df[%u] sx=%u sy=%u sw=%u sh=%u", id, df->sx, df->sy, df->sw, df->sh);
+        }
+    }
+
     for (Uint32 y = 0; y < f->sh; y++)
     {
         Uint32 src_y = f->sy + y;
@@ -218,15 +239,14 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                      * Map pixel (x, y) in main frame → depth frame via
                      * nearest-neighbor scaling (matching Python resize NEAREST). */
                     JY_FrameInfo* df = &ud->depth_frames[id];
-                    Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
-                    Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
                     if (df->sw > 0 && df->sh > 0 && f->sw > 0 && f->sh > 0)
                     {
                         Uint32 dx = df->sx + (x * df->sw / f->sw);
                         Uint32 dy = df->sy + (y * df->sh / f->sh);
-                        if (dx < daw && dy < dah)
+                        Uint32 dpx_idx = dy * depth_stride + dx;
+                        if (dpx_idx < depth_buf_pixels)
                         {
-                            Uint32 d_off = (dy * daw + dx) * ud->depth_bpp;
+                            Uint32 d_off = dpx_idx * ud->depth_bpp;
                             depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
                             depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
                         }
@@ -236,11 +256,10 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                 else if (!ud->depth_frames)
                 {
                     /* Depth atlas shares same coordinates as index atlas (no depth_frames) */
-                    Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
-                    Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
-                    if (src_x < daw && src_y < dah)
+                    Uint32 dpx_idx = src_y * depth_stride + src_x;
+                    if (dpx_idx < depth_buf_pixels)
                     {
-                        Uint32 d_off = (src_y * daw + src_x) * ud->depth_bpp;
+                        Uint32 d_off = dpx_idx * ud->depth_bpp;
                         depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
                         depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
                     }
