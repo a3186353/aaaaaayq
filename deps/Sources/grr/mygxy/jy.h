@@ -48,9 +48,11 @@ typedef struct
     /* Atlas 像素 */
     Uint8*  index_pixels;      /* RGB24 (R=pal idx, G/B=depth) */
     Uint8*  alpha_pixels;      /* Grayscale alpha (单通道) */
+    Uint8*  depth_pixels;      /* RGB24 (G/B=depth) */
     Uint32  atlas_w, atlas_h;
     Uint32  index_bpp;         /* 每像素字节数 (3=RGB, 4=RGBA) */
     Uint32  alpha_bpp;         /* 每像素字节数 (1=Gray, 3=RGB, 4=RGBA) */
+    Uint32  depth_bpp;         /* 深度图像素字节数 (3=RGB) */
 
     /* 帧映射 */
     JY_FrameInfo* frames;

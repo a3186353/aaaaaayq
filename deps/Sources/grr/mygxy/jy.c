@@ -209,8 +209,18 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             /* Index pixel → palette index from R channel, depth from G/B */
             Uint32 idx_off = (src_y * aw + src_x) * ibpp;
             Uint8 pal_idx = ud->index_pixels[idx_off]; /* R channel */
-            Uint8 depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
-            Uint8 depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
+            Uint8 depth_hi = 0, depth_lo = 0;
+            if (ud->depth_pixels)
+            {
+                Uint32 d_off = (src_y * aw + src_x) * ud->depth_bpp;
+                depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
+                depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+            }
+            else
+            {
+                depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
+                depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
+            }
 
             /* Alpha pixel */
             Uint8 alpha = 255;
@@ -962,6 +972,11 @@ static void JY_Reset(JY_UserData* ud)
         SDL_free(ud->alpha_pixels);
         ud->alpha_pixels = NULL;
     }
+    if (ud->depth_pixels)
+    {
+        SDL_free(ud->depth_pixels);
+        ud->depth_pixels = NULL;
+    }
 }
 
 static int JY_GC(lua_State* L)
@@ -1425,6 +1440,12 @@ static int JY_NEW(lua_State* L)
     /* Arg 4: frames table */
     luaL_checktype(L, 4, LUA_TTABLE);
 
+    /* Arg 5: optional depth PNG */
+    size_t depth_len = 0;
+    const char* depth_data = NULL;
+    if (lua_type(L, 5) == LUA_TSTRING)
+        depth_data = lua_tolstring(L, 5, &depth_len);
+
     /* ─── Decode index PNG ─── */
     SDL_Surface* idx_sf = JY_LoadPNG(idx_data, idx_len);
     if (!idx_sf)
@@ -1453,6 +1474,17 @@ static int JY_NEW(lua_State* L)
     Uint32 aw2, ah2;
     ud->alpha_pixels = JY_ExtractPixels(alpha_sf, &aw2, &ah2, &ud->alpha_bpp);
     SDL_FreeSurface(alpha_sf);
+
+    if (depth_data && depth_len > 0)
+    {
+        SDL_Surface* depth_sf = JY_LoadPNG(depth_data, depth_len);
+        if (depth_sf)
+        {
+            Uint32 dw, dh;
+            ud->depth_pixels = JY_ExtractPixels(depth_sf, &dw, &dh, &ud->depth_bpp);
+            SDL_FreeSurface(depth_sf);
+        }
+    }
 
     /* alpha atlas dimensions should match index */
     if (aw2 != ud->atlas_w || ah2 != ud->atlas_h)
