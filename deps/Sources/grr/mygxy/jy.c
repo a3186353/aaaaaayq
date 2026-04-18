@@ -821,6 +821,18 @@ static int JY_Composite(lua_State* L)
             }
         }
 
+        /* Apply frame anchor offset (key_x, key_y) so frames are centered correctly.
+         * Without this, each frame is placed at its raw top-left corner, causing
+         * jitter as different frames have different sizes and anchor positions. */
+        int anchor_x = 0, anchor_y = 0;
+        if (layer_ud->frames && frame_id < layer_ud->frame_count)
+        {
+            anchor_x = (int)layer_ud->frames[frame_id].key_x;
+            anchor_y = (int)layer_ud->frames[frame_id].key_y;
+        }
+        int base_x = off_x - anchor_x;
+        int base_y = off_y - anchor_y;
+
         /* Per-pixel Z-test composite */
         int lw = layer_sf->w;
         int lh = layer_sf->h;
@@ -833,12 +845,12 @@ static int JY_Composite(lua_State* L)
 
         for (int py = 0; py < lh; py++)
         {
-            int dy = off_y + py;
+            int dy = base_y + py;
             if (dy < 0 || dy >= canvas_h)
                 continue;
             for (int px = 0; px < lw; px++)
             {
-                int dx = off_x + px;
+                int dx = base_x + px;
                 if (dx < 0 || dx >= canvas_w)
                     continue;
 
