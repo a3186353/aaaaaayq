@@ -220,7 +220,7 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                     JY_FrameInfo* df = &ud->depth_frames[id];
                     Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
                     Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
-                    if (df->sw > 0 && df->sh > 0)
+                    if (df->sw > 0 && df->sh > 0 && f->sw > 0 && f->sh > 0)
                     {
                         Uint32 dx = df->sx + (x * df->sw / f->sw);
                         Uint32 dy = df->sy + (y * df->sh / f->sh);
@@ -231,14 +231,21 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                             depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
                         }
                     }
+                    /* else: depth frame has zero size, keep depth = 0 */
                 }
-                else
+                else if (!ud->depth_frames)
                 {
-                    /* Depth atlas shares same coordinates as index atlas */
-                    Uint32 d_off = (src_y * aw + src_x) * ud->depth_bpp;
-                    depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
-                    depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+                    /* Depth atlas shares same coordinates as index atlas (no depth_frames) */
+                    Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
+                    Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
+                    if (src_x < daw && src_y < dah)
+                    {
+                        Uint32 d_off = (src_y * daw + src_x) * ud->depth_bpp;
+                        depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
+                        depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+                    }
                 }
+                /* else: depth_frames exists but id out of range → skip depth (keep 0) */
             }
             else
             {
