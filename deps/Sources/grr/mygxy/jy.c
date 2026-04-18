@@ -212,9 +212,33 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             Uint8 depth_hi = 0, depth_lo = 0;
             if (ud->depth_pixels)
             {
-                Uint32 d_off = (src_y * aw + src_x) * ud->depth_bpp;
-                depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
-                depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+                if (ud->depth_frames && id < ud->depth_frame_count)
+                {
+                    /* Separate depth atlas with independent frame coordinates.
+                     * Map pixel (x, y) in main frame → depth frame via
+                     * nearest-neighbor scaling (matching Python resize NEAREST). */
+                    JY_FrameInfo* df = &ud->depth_frames[id];
+                    Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
+                    Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
+                    if (df->sw > 0 && df->sh > 0)
+                    {
+                        Uint32 dx = df->sx + (x * df->sw / f->sw);
+                        Uint32 dy = df->sy + (y * df->sh / f->sh);
+                        if (dx < daw && dy < dah)
+                        {
+                            Uint32 d_off = (dy * daw + dx) * ud->depth_bpp;
+                            depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
+                            depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+                        }
+                    }
+                }
+                else
+                {
+                    /* Depth atlas shares same coordinates as index atlas */
+                    Uint32 d_off = (src_y * aw + src_x) * ud->depth_bpp;
+                    depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
+                    depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
+                }
             }
             else
             {
@@ -977,6 +1001,11 @@ static void JY_Reset(JY_UserData* ud)
         SDL_free(ud->depth_pixels);
         ud->depth_pixels = NULL;
     }
+    if (ud->depth_frames)
+    {
+        SDL_free(ud->depth_frames);
+        ud->depth_frames = NULL;
+    }
 }
 
 static int JY_GC(lua_State* L)
@@ -1482,7 +1511,59 @@ static int JY_NEW(lua_State* L)
         {
             Uint32 dw, dh;
             ud->depth_pixels = JY_ExtractPixels(depth_sf, &dw, &dh, &ud->depth_bpp);
+            ud->depth_atlas_w = dw;
+            ud->depth_atlas_h = dh;
             SDL_FreeSurface(depth_sf);
+        }
+    }
+
+    /* Arg 6: optional depth frames table (independent depth atlas coordinates) */
+    if (lua_type(L, 6) == LUA_TTABLE)
+    {
+        lua_len(L, 6);
+        Uint32 dn = (Uint32)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        if (dn > 0)
+        {
+            ud->depth_frame_count = dn;
+            ud->depth_frames = (JY_FrameInfo*)SDL_calloc(dn, sizeof(JY_FrameInfo));
+            if (ud->depth_frames)
+            {
+                for (Uint32 i = 0; i < dn; i++)
+                {
+                    lua_geti(L, 6, (lua_Integer)(i + 1));
+                    if (lua_istable(L, -1))
+                    {
+                        JY_FrameInfo* df = &ud->depth_frames[i];
+
+                        lua_getfield(L, -1, "sx");
+                        df->sx = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+
+                        lua_getfield(L, -1, "sy");
+                        df->sy = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+
+                        lua_getfield(L, -1, "sw");
+                        df->sw = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+
+                        lua_getfield(L, -1, "sh");
+                        df->sh = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+
+                        lua_getfield(L, -1, "key_x");
+                        df->key_x = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+
+                        lua_getfield(L, -1, "key_y");
+                        df->key_y = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
+                        lua_pop(L, 1);
+                    }
+                    lua_pop(L, 1);
+                }
+            }
         }
     }
 

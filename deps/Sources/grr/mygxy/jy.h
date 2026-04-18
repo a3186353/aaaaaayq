@@ -50,6 +50,7 @@ typedef struct
     Uint8*  alpha_pixels;      /* Grayscale alpha (单通道) */
     Uint8*  depth_pixels;      /* RGB24 (G/B=depth) */
     Uint32  atlas_w, atlas_h;
+    Uint32  depth_atlas_w, depth_atlas_h; /* 深度 atlas 尺寸（可能与主 atlas 不同） */
     Uint32  index_bpp;         /* 每像素字节数 (3=RGB, 4=RGBA) */
     Uint32  alpha_bpp;         /* 每像素字节数 (1=Gray, 3=RGB, 4=RGBA) */
     Uint32  depth_bpp;         /* 深度图像素字节数 (3=RGB) */
@@ -57,6 +58,10 @@ typedef struct
     /* 帧映射 */
     JY_FrameInfo* frames;
     Uint32 frame_count;
+
+    /* 深度帧映射 (独立于主帧, 用于深度 atlas 坐标与主 atlas 不同的情况) */
+    JY_FrameInfo* depth_frames;
+    Uint32 depth_frame_count;
     Uint32 group;              /* 方向数 */
     Uint32 frame_per_group;    /* 每方向帧数 */
 
