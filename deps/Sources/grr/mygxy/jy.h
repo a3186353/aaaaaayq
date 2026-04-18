@@ -28,6 +28,7 @@ typedef struct
 typedef struct
 {
     SDL_Surface* surface;      /* 已解码 ARGB8888，NULL 表示空槽 */
+    Uint16*     depth;         /* 16-bit 深度值 (w*h)，NULL 表示无深度 */
     Uint32 frame_id;
     Uint32 pal_ver;            /* 解码时的调色板版本 */
     Uint32 lru_tick;
@@ -60,6 +61,7 @@ typedef struct
     /* 调色板 */
     Uint32 pal[256];           /* ARGB8888 */
     Uint32 pal_count;
+    Uint32 pal_mod;            /* 有效调色板模数 64/128/256 (palette_mod) */
     Uint32 pal_version;        /* 每次 SetPal 递增 */
 
     /* 全局尺寸 */
