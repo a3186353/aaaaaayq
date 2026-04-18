@@ -30,6 +30,7 @@ static int JY_GetPal(lua_State* L);
 static int JY_SetPP(lua_State* L);
 static int JY_SetPalette(lua_State* L);
 static int JY_Prefetch(lua_State* L);
+static int JY_Composite(lua_State* L);
 static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
@@ -45,6 +46,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"get_palette", JY_GetPal},
     {"SetPP",       JY_SetPP},
     {"Prefetch",    JY_Prefetch},
+    {"Composite",   JY_Composite},
     {NULL, NULL},
 };
 
@@ -131,10 +133,41 @@ static JY_UserData* JY_Check(lua_State* L, int idx)
 }
 
 /* ═══════════════════════════════════════════
- *  Frame decode (pure C, thread‑safe)
+ *  palette_mod auto-detection (matching view.py _load_palette)
+ *  Scans palette from idx 255 downward to find last non-zero
+ *  RGB entry, then sets pal_mod to 64/128/256.
  * ═══════════════════════════════════════════ */
-static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
+static void JY_CalcPalMod(JY_UserData* ud)
 {
+    Uint32 last_valid = 0;
+    for (int i = 255; i >= 0; i--)
+    {
+        Uint32 c = ud->pal[i];
+        Uint32 rgb = c & 0x00FFFFFF;
+        if (rgb != 0)
+        {
+            last_valid = (Uint32)i;
+            break;
+        }
+    }
+    if (last_valid < 64)
+        ud->pal_mod = 64;
+    else if (last_valid < 128)
+        ud->pal_mod = 128;
+    else
+        ud->pal_mod = 256;
+}
+
+/* ═══════════════════════════════════════════
+ *  Frame decode (pure C, thread‑safe)
+ *  out_depth: if non-NULL, receives malloc'd Uint16[w*h] depth buffer
+ *             depth = (G << 8) | B  from index pixels, 0 if alpha < 77
+ *             (matching view.py depth extraction)
+ * ═══════════════════════════════════════════ */
+static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_depth)
+{
+    if (out_depth) *out_depth = NULL;
+
     if (id >= ud->frame_count)
         return NULL;
 
@@ -148,6 +181,9 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
         return NULL;
     SDL_FillRect(sf, NULL, 0);
 
+    /* Allocate depth buffer */
+    Uint16* depth_buf = (Uint16*)SDL_calloc(f->sw * f->sh, sizeof(Uint16));
+
     if (SDL_MUSTLOCK(sf))
         SDL_LockSurface(sf);
 
@@ -156,6 +192,7 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
     Uint32 aw = ud->atlas_w;
     Uint32 ibpp = ud->index_bpp;
     Uint32 abpp = ud->alpha_bpp;
+    Uint32 pmod = ud->pal_mod;
 
     for (Uint32 y = 0; y < f->sh; y++)
     {
@@ -169,9 +206,11 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
             if (src_x >= aw)
                 continue;
 
-            /* Index pixel → palette index from R channel */
+            /* Index pixel → palette index from R channel, depth from G/B */
             Uint32 idx_off = (src_y * aw + src_x) * ibpp;
             Uint8 pal_idx = ud->index_pixels[idx_off]; /* R channel */
+            Uint8 depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
+            Uint8 depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
 
             /* Alpha pixel */
             Uint8 alpha = 255;
@@ -181,8 +220,15 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
                 alpha = ud->alpha_pixels[a_off]; /* first channel */
             }
 
-            Uint32 color = ud->pal[pal_idx % ud->pal_count];
+            Uint32 color = ud->pal[pal_idx % pmod];
             dst[y * stride + x] = (color & 0x00FFFFFF) | ((Uint32)alpha << 24);
+
+            /* Depth: (G << 8) | B, zero if alpha < 77 (matching view.py) */
+            if (depth_buf)
+            {
+                Uint16 d = ((Uint16)depth_hi << 8) | depth_lo;
+                depth_buf[y * f->sw + x] = (alpha >= 77) ? d : 0;
+            }
         }
     }
 
@@ -190,6 +236,12 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id)
         SDL_UnlockSurface(sf);
 
     SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_BLEND);
+
+    if (out_depth)
+        *out_depth = depth_buf;
+    else
+        SDL_free(depth_buf);
+
     return sf;
 }
 
@@ -212,8 +264,8 @@ static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id, Uint32 pa
     return NULL;
 }
 
-/* Cache owns the surface — caller must NOT free sf after insert */
-static void JY_CacheInsert(JY_UserData* ud, Uint32 frame_id, SDL_Surface* sf)
+/* Cache owns the surface + depth — caller must NOT free after insert */
+static void JY_CacheInsert(JY_UserData* ud, Uint32 frame_id, SDL_Surface* sf, Uint16* depth)
 {
     if (!ud->cache || !sf)
         return;
@@ -241,8 +293,14 @@ static void JY_CacheInsert(JY_UserData* ud, Uint32 frame_id, SDL_Surface* sf)
         SDL_FreeSurface(e->surface);
         e->surface = NULL;
     }
+    if (e->depth)
+    {
+        SDL_free(e->depth);
+        e->depth = NULL;
+    }
 
     e->surface = sf;
+    e->depth = depth;
     e->frame_id = frame_id;
     e->pal_ver = ud->pal_version;
     e->lru_tick = ++ud->cache_tick;
@@ -258,6 +316,11 @@ static void JY_CacheClear(JY_UserData* ud)
         {
             SDL_FreeSurface(ud->cache[i].surface);
             ud->cache[i].surface = NULL;
+        }
+        if (ud->cache[i].depth)
+        {
+            SDL_free(ud->cache[i].depth);
+            ud->cache[i].depth = NULL;
         }
     }
 }
@@ -309,14 +372,19 @@ static int JY_WorkerFunc(void* data)
         if (hit)
             continue;
 
-        /* Decode */
-        SDL_Surface* sf = JY_DecodeFrame(ud, task.frame_id);
+        /* Decode (with depth) */
+        Uint16* depth = NULL;
+        SDL_Surface* sf = JY_DecodeFrame(ud, task.frame_id, &depth);
         if (sf)
         {
             SDL_LockMutex(ud->queue_mutex);
-            /* CacheInsert takes ownership of sf */
-            JY_CacheInsert(ud, task.frame_id, sf);
+            /* CacheInsert takes ownership of sf + depth */
+            JY_CacheInsert(ud, task.frame_id, sf, depth);
             SDL_UnlockMutex(ud->queue_mutex);
+        }
+        else if (depth)
+        {
+            SDL_free(depth);
         }
     }
     return 0;
@@ -424,21 +492,38 @@ static int JY_GetFrame(lua_State* L)
     }
 
     /* Cache miss → synchronous decode */
-    SDL_Surface* sf = JY_DecodeFrame(ud, id);
+    Uint16* depth = NULL;
+    SDL_Surface* sf = JY_DecodeFrame(ud, id, &depth);
     if (!sf)
+    {
+        if (depth) SDL_free(depth);
         return 0;
+    }
 
     /* Insert a duplicate into cache; Lua owns the original */
     if (ud->cache && ud->queue_mutex)
     {
         SDL_Surface* cache_copy = SDL_DuplicateSurface(sf);
+        Uint16* depth_copy = NULL;
+        if (depth && sf->w > 0 && sf->h > 0)
+        {
+            Uint32 dpx = (Uint32)(sf->w * sf->h);
+            depth_copy = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
+            if (depth_copy)
+                SDL_memcpy(depth_copy, depth, dpx * sizeof(Uint16));
+        }
         if (cache_copy)
         {
             SDL_LockMutex(ud->queue_mutex);
-            JY_CacheInsert(ud, id, cache_copy);
+            JY_CacheInsert(ud, id, cache_copy, depth_copy);
             SDL_UnlockMutex(ud->queue_mutex);
         }
+        else if (depth_copy)
+        {
+            SDL_free(depth_copy);
+        }
     }
+    if (depth) SDL_free(depth);
 
     return JY_PushFrame(L, sf, f);
 }
@@ -451,22 +536,55 @@ static int JY_SetPal(lua_State* L)
     JY_UserData* ud = JY_Check(L, 1);
     size_t len;
     const char* pal = luaL_checklstring(L, 2, &len);
-    if (len == 1024)
+    if (len >= 1024)
     {
-        SDL_memcpy(ud->pal, pal, 1024);
+        /* BGRA → ARGB8888 conversion (matching view.py BMP palette) */
+        const Uint8* pb = (const Uint8*)pal;
+        for (Uint32 i = 0; i < 256; i++)
+        {
+            Uint8 b = pb[i * 4 + 0];
+            Uint8 g = pb[i * 4 + 1];
+            Uint8 r = pb[i * 4 + 2];
+            Uint8 a = pb[i * 4 + 3];
+            ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+        }
+        JY_CalcPalMod(ud);
         ud->pal_version++;
-        /* Invalidate cache lazily: new pal_version won't match older entries */
+    }
+    else if (len >= 768)
+    {
+        /* BMP pixel data: BGR format (256*3 bytes) */
+        const Uint8* pb = (const Uint8*)pal;
+        for (Uint32 i = 0; i < 256; i++)
+        {
+            Uint8 b = pb[i * 3 + 0];
+            Uint8 g = pb[i * 3 + 1];
+            Uint8 r = pb[i * 3 + 2];
+            ud->pal[i] = (255u << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+        }
+        JY_CalcPalMod(ud);
+        ud->pal_version++;
     }
     return 0;
 }
 
 /* ═══════════════════════════════════════════
- *  Lua API: GetPal() → pal_string (1024 bytes)
+ *  Lua API: GetPal() → pal_string (1024 bytes, BGRA format for Lua compat)
  * ═══════════════════════════════════════════ */
 static int JY_GetPal(lua_State* L)
 {
     JY_UserData* ud = JY_Check(L, 1);
-    lua_pushlstring(L, (const char*)ud->pal, 1024);
+    /* Convert internal ARGB8888 → BGRA for Lua compatibility */
+    Uint8 buf[1024];
+    for (Uint32 i = 0; i < 256; i++)
+    {
+        Uint32 c = ud->pal[i];
+        buf[i * 4 + 0] = (Uint8)(c & 0xFF);         /* B */
+        buf[i * 4 + 1] = (Uint8)((c >> 8) & 0xFF);  /* G */
+        buf[i * 4 + 2] = (Uint8)((c >> 16) & 0xFF); /* R */
+        buf[i * 4 + 3] = (Uint8)((c >> 24) & 0xFF); /* A */
+    }
+    lua_pushlstring(L, (const char*)buf, 1024);
     return 1;
 }
 
@@ -506,6 +624,7 @@ static int JY_SetPP(lua_State* L)
         ud->pal[i] = (a << 24) | (rr << 16) | (gg << 8) | bb;
     }
 
+    JY_CalcPalMod(ud);
     ud->pal_version++;
     return 0;
 }
@@ -573,6 +692,198 @@ static int JY_Prefetch(lua_State* L)
     SDL_UnlockMutex(ud->queue_mutex);
 
     return 0;
+}
+
+/* ═══════════════════════════════════════════
+ *  Lua API: Composite(canvas_w, canvas_h, layers_table)
+ *  layers_table = { {ud, frame_id, z_offset, x, y}, ... }
+ *  Per-pixel Z-test depth compositing (matching view.py OutfitComposer)
+ *  Returns: SDL_Surface* (composited ARGB8888)
+ * ═══════════════════════════════════════════ */
+static int JY_Composite(lua_State* L)
+{
+    /* arg 1: self (jy ud — used as anchor, not strictly required) */
+    JY_Check(L, 1);
+    int canvas_w = (int)luaL_checkinteger(L, 2);
+    int canvas_h = (int)luaL_checkinteger(L, 3);
+    luaL_checktype(L, 4, LUA_TTABLE);
+
+    int n = (int)lua_rawlen(L, 4);
+    if (n <= 0 || canvas_w <= 0 || canvas_h <= 0)
+        return 0;
+
+    /* Allocate result surface */
+    SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!result)
+        return luaL_error(L, "JY_Composite: failed to create result surface");
+    SDL_FillRect(result, NULL, 0);
+
+    /* Allocate z-buffer (Uint16 per pixel, init to 0) */
+    Uint32 canvas_px = (Uint32)(canvas_w * canvas_h);
+    Uint16* zbuf = (Uint16*)SDL_calloc(canvas_px, sizeof(Uint16));
+    if (!zbuf)
+    {
+        SDL_FreeSurface(result);
+        return luaL_error(L, "JY_Composite: failed to alloc z-buffer");
+    }
+
+    if (SDL_MUSTLOCK(result))
+        SDL_LockSurface(result);
+
+    Uint32* dst_pixels = (Uint32*)result->pixels;
+    Uint32 dst_stride = (Uint32)(result->pitch / 4);
+
+    /* Process each layer */
+    for (int i = 1; i <= n; i++)
+    {
+        lua_rawgeti(L, 4, i);
+        if (!lua_istable(L, -1))
+        {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        /* Extract: {ud, frame_id, z_offset, x, y} */
+        lua_rawgeti(L, -1, 1); /* ud */
+        JY_UserData* layer_ud = (JY_UserData*)luaL_testudata(L, -1, JY_MT);
+        lua_pop(L, 1);
+        if (!layer_ud) { lua_pop(L, 1); continue; }
+
+        lua_rawgeti(L, -1, 2); /* frame_id */
+        Uint32 frame_id = (Uint32)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_rawgeti(L, -1, 3); /* z_offset */
+        int z_offset = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_rawgeti(L, -1, 4); /* off_x */
+        int off_x = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_rawgeti(L, -1, 5); /* off_y */
+        int off_y = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_pop(L, 1); /* pop layer entry table */
+
+        if (frame_id >= layer_ud->frame_count)
+            continue;
+
+        /* Try to get from cache first */
+        SDL_Surface* layer_sf = NULL;
+        Uint16* layer_depth = NULL;
+        int from_cache = 0;
+
+        if (layer_ud->cache && layer_ud->queue_mutex)
+        {
+            SDL_LockMutex(layer_ud->queue_mutex);
+            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
+            if (hit && hit->surface)
+            {
+                layer_sf = hit->surface;
+                layer_depth = hit->depth;
+                from_cache = 1;
+            }
+            SDL_UnlockMutex(layer_ud->queue_mutex);
+        }
+
+        /* Cache miss → decode */
+        Uint16* alloc_depth = NULL;
+        if (!layer_sf)
+        {
+            layer_sf = JY_DecodeFrame(layer_ud, frame_id, &alloc_depth);
+            if (!layer_sf)
+                continue;
+            layer_depth = alloc_depth;
+
+            /* Insert into cache for future use */
+            if (layer_ud->cache && layer_ud->queue_mutex)
+            {
+                SDL_Surface* cc = SDL_DuplicateSurface(layer_sf);
+                Uint16* dc = NULL;
+                if (alloc_depth && layer_sf->w > 0 && layer_sf->h > 0)
+                {
+                    Uint32 dpx = (Uint32)(layer_sf->w * layer_sf->h);
+                    dc = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
+                    if (dc)
+                        SDL_memcpy(dc, alloc_depth, dpx * sizeof(Uint16));
+                }
+                if (cc)
+                {
+                    SDL_LockMutex(layer_ud->queue_mutex);
+                    JY_CacheInsert(layer_ud, frame_id, cc, dc);
+                    SDL_UnlockMutex(layer_ud->queue_mutex);
+                }
+                else if (dc)
+                    SDL_free(dc);
+            }
+        }
+
+        /* Per-pixel Z-test composite */
+        int lw = layer_sf->w;
+        int lh = layer_sf->h;
+
+        if (SDL_MUSTLOCK(layer_sf))
+            SDL_LockSurface(layer_sf);
+
+        Uint32* src_pixels = (Uint32*)layer_sf->pixels;
+        Uint32 src_stride = (Uint32)(layer_sf->pitch / 4);
+
+        for (int py = 0; py < lh; py++)
+        {
+            int dy = off_y + py;
+            if (dy < 0 || dy >= canvas_h)
+                continue;
+            for (int px = 0; px < lw; px++)
+            {
+                int dx = off_x + px;
+                if (dx < 0 || dx >= canvas_w)
+                    continue;
+
+                Uint32 spixel = src_pixels[py * src_stride + px];
+                Uint8 alpha = (Uint8)((spixel >> 24) & 0xFF);
+                if (alpha == 0)
+                    continue;
+
+                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
+                int effective_d = (int)d + z_offset;
+                if (effective_d < 0) effective_d = 0;
+
+                Uint16* zp = &zbuf[dy * canvas_w + dx];
+                if ((Uint16)effective_d >= *zp)
+                {
+                    *zp = (Uint16)effective_d;
+                    dst_pixels[dy * dst_stride + dx] = spixel;
+                }
+            }
+        }
+
+        if (SDL_MUSTLOCK(layer_sf))
+            SDL_UnlockSurface(layer_sf);
+
+        /* Free if we decoded (not from cache) */
+        if (!from_cache)
+        {
+            SDL_FreeSurface(layer_sf);
+            if (alloc_depth)
+                SDL_free(alloc_depth);
+        }
+    }
+
+    if (SDL_MUSTLOCK(result))
+        SDL_UnlockSurface(result);
+
+    SDL_free(zbuf);
+    SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
+
+    /* Push result as SDL_Surface userdata */
+    SDL_Surface** sfud = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
+    *sfud = result;
+    luaL_setmetatable(L, "SDL_Surface");
+
+    return 1;
 }
 
 /* ═══════════════════════════════════════════
@@ -897,6 +1208,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         const char* pal_data = lua_tolstring(L, 2, &pal_len);
         if (pal_len >= 1024)
         {
+            /* BGRA format (BMP 32-bit) */
             const Uint8* ppb = (const Uint8*)pal_data;
             for (Uint32 i = 0; i < 256; i++)
             {
@@ -909,13 +1221,13 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         }
         else if (pal_len >= 768)
         {
-            /* RGB format (256*3 bytes) */
+            /* BMP pixel data: BGR format (256*3 bytes) */
             const Uint8* ppb = (const Uint8*)pal_data;
             for (Uint32 i = 0; i < 256; i++)
             {
-                Uint8 r = ppb[i * 3 + 0];
+                Uint8 b = ppb[i * 3 + 0];
                 Uint8 g = ppb[i * 3 + 1];
-                Uint8 b = ppb[i * 3 + 2];
+                Uint8 r = ppb[i * 3 + 2];
                 ud->pal[i] = (255u << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
             }
         }
@@ -932,6 +1244,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         for (Uint32 i = 0; i < 256; i++)
             ud->pal[i] = (255u << 24) | (i << 16) | (i << 8) | i;
     }
+    JY_CalcPalMod(ud);
     ud->pal_version = 0;
 
     /* ─── Build frames (map into virtual atlas) ─── */
@@ -1091,6 +1404,7 @@ static int JY_NEW(lua_State* L)
         Uint8 a = pb[i * 4 + 3];
         ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
     }
+    JY_CalcPalMod(ud);
     ud->pal_version = 0;
 
     /* ─── Parse frames table ─── */
