@@ -660,22 +660,375 @@ static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Ui
 }
 
 /* ═══════════════════════════════════════════
- *  Constructor: xy_jy(idx_png, alpha_png, pal_data, frames_table)
+ *  SPR/FTEN constructor: xy_jy(spr_data [, pal_data])
  *
- *  frames_table = {
- *     group = N,   frame = M,   width = W,   height = H,
- *     x = gx,      y = gy,
- *     [1] = {sx=.., sy=.., sw=.., sh=.., key_x=.., key_y=..},
- *     [2] = ...,
- *  }
+ *  spr_data : string (FTEN binary with embedded PNGs)
+ *  pal_data : string (1024 bytes BGRA) — optional
+ *
+ *  Internally builds a virtual atlas by stacking embedded PNGs,
+ *  extracting R→index_pixels and (A%32)*8→alpha_pixels,
+ *  then delegates to the same JY_DecodeFrame pipeline.
+ * ═══════════════════════════════════════════ */
+static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
+{
+    /* ─── FTEN header: tag(4) + version(4) + filesize(4) + hash(4) = 16B ─── */
+    Uint32 extra = 16;
+    const Uint8* inner = data + extra;
+    Uint32 innerLen = (Uint32)(len - extra);
+    if (innerLen < 16)
+        return luaL_error(L, "JY-SPR: inner data too short");
+
+    /* ─── SPR inner header (16B) ─── */
+    Uint32 off = 0;
+    off += 2; /* sid */
+    Uint16 dir_cnt = *(const Uint16*)(inner + off); off += 2;
+    Uint16 frame_cnt = *(const Uint16*)(inner + off); off += 2;
+    Uint16 spr_width = *(const Uint16*)(inner + off); off += 2;
+    Uint16 spr_height = *(const Uint16*)(inner + off); off += 2;
+    Sint16 kx = *(const Sint16*)(inner + off); off += 2;
+    Sint16 ky = *(const Sint16*)(inner + off); off += 2;
+    Uint16 image_res_nums = *(const Uint16*)(inner + off); off += 2;
+
+    Uint32 total_frames = (Uint32)dir_cnt * (Uint32)frame_cnt;
+    Uint32 frames_size = total_frames * 14;
+    if (off + frames_size + 4 > innerLen)
+        return luaL_error(L, "JY-SPR: frame table overflow");
+
+    /* ─── Parse frame entries (14B each) ─── */
+    typedef struct { Sint16 image_idx, pos_x, pos_y; Uint16 w, h; Sint16 key_x, key_y; } SPR_Frame;
+    SPR_Frame* spr_frames = (SPR_Frame*)SDL_calloc(total_frames, sizeof(SPR_Frame));
+    if (!spr_frames)
+        return luaL_error(L, "JY-SPR: out of memory");
+
+    for (Uint32 i = 0; i < total_frames; i++)
+    {
+        const Uint8* fp = inner + off;
+        spr_frames[i].image_idx = *(const Sint16*)(fp + 0);
+        spr_frames[i].pos_x    = *(const Sint16*)(fp + 2);
+        spr_frames[i].pos_y    = *(const Sint16*)(fp + 4);
+        spr_frames[i].w        = *(const Uint16*)(fp + 6);
+        spr_frames[i].h        = *(const Uint16*)(fp + 8);
+        spr_frames[i].key_x    = *(const Sint16*)(fp + 10);
+        spr_frames[i].key_y    = *(const Sint16*)(fp + 12);
+        off += 14;
+    }
+
+    off += 4; /* sprtype */
+
+    /* ─── Image offset table (8B each) ─── */
+    if (off + (Uint32)image_res_nums * 8 > innerLen)
+    {
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: offset table overflow");
+    }
+
+    typedef struct { Uint32 offset, length; } IMG_Entry;
+    IMG_Entry* img_entries = (IMG_Entry*)SDL_calloc(image_res_nums, sizeof(IMG_Entry));
+    if (!img_entries)
+    {
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: out of memory");
+    }
+
+    for (Uint32 i = 0; i < image_res_nums; i++)
+    {
+        const Uint8* op = inner + off;
+        Sint32 img_off = *(const Sint32*)(op + 0);
+        Sint32 img_len = *(const Sint32*)(op + 4);
+        img_entries[i].offset = (Uint32)(img_off + (Sint32)extra);
+        img_entries[i].length = (Uint32)img_len;
+        off += 8;
+    }
+
+    /* ─── Load all embedded PNGs ─── */
+    SDL_Surface** png_surfaces = (SDL_Surface**)SDL_calloc(image_res_nums, sizeof(SDL_Surface*));
+    if (!png_surfaces)
+    {
+        SDL_free(img_entries);
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: out of memory");
+    }
+
+    Uint32 max_w = 0;
+    Uint32 total_h = 0;
+    Uint32* y_offsets = (Uint32*)SDL_calloc(image_res_nums, sizeof(Uint32));
+
+    for (Uint32 i = 0; i < image_res_nums; i++)
+    {
+        Uint32 ofs = img_entries[i].offset;
+        Uint32 blen = img_entries[i].length;
+
+        if (ofs >= (Uint32)len || blen == 0 || ofs + blen > (Uint32)len)
+            continue;
+
+        /* Search for PNG signature (matching view.py) */
+        const Uint8* raw = data + ofs;
+        const Uint8* png_start = NULL;
+        for (Uint32 j = 0; j + 4 <= blen; j++)
+        {
+            if (raw[j] == 0x89 && raw[j+1] == 0x50 && raw[j+2] == 0x4E && raw[j+3] == 0x47)
+            {
+                png_start = raw + j;
+                blen -= j;
+                break;
+            }
+        }
+        if (!png_start)
+            continue;
+
+        SDL_RWops* rw = SDL_RWFromMem((void*)png_start, (int)blen);
+        if (rw)
+        {
+            png_surfaces[i] = IMG_Load_RW(rw, 1);
+        }
+
+        if (png_surfaces[i])
+        {
+            y_offsets[i] = total_h;
+            if ((Uint32)png_surfaces[i]->w > max_w)
+                max_w = (Uint32)png_surfaces[i]->w;
+            total_h += (Uint32)png_surfaces[i]->h;
+        }
+    }
+
+    if (max_w == 0 || total_h == 0)
+    {
+        for (Uint32 i = 0; i < image_res_nums; i++)
+            if (png_surfaces[i]) SDL_FreeSurface(png_surfaces[i]);
+        SDL_free(png_surfaces);
+        SDL_free(y_offsets);
+        SDL_free(img_entries);
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: no valid PNG images found");
+    }
+
+    /* ─── Build virtual atlas: index_pixels (R) + alpha_pixels ((A%32)*8) ─── */
+    Uint32 atlas_w = max_w;
+    Uint32 atlas_h = total_h;
+    size_t pixel_count = (size_t)atlas_w * atlas_h;
+
+    Uint8* index_pixels = (Uint8*)SDL_calloc(pixel_count, 3); /* RGB format */
+    Uint8* alpha_pixels = (Uint8*)SDL_calloc(pixel_count, 1); /* Grayscale */
+    if (!index_pixels || !alpha_pixels)
+    {
+        if (index_pixels) SDL_free(index_pixels);
+        if (alpha_pixels) SDL_free(alpha_pixels);
+        for (Uint32 i = 0; i < image_res_nums; i++)
+            if (png_surfaces[i]) SDL_FreeSurface(png_surfaces[i]);
+        SDL_free(png_surfaces);
+        SDL_free(y_offsets);
+        SDL_free(img_entries);
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: out of memory for atlas");
+    }
+
+    for (Uint32 i = 0; i < image_res_nums; i++)
+    {
+        SDL_Surface* sf = png_surfaces[i];
+        if (!sf) continue;
+
+        /* Convert to RGBA32 for uniform access */
+        SDL_Surface* conv = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
+        if (!conv) continue;
+
+        if (SDL_MUSTLOCK(conv)) SDL_LockSurface(conv);
+
+        Uint32 pw = (Uint32)conv->w;
+        Uint32 ph = (Uint32)conv->h;
+        Uint32 pitch4 = (Uint32)(conv->pitch / 4);
+        Uint32* pixels = (Uint32*)conv->pixels;
+
+        for (Uint32 row = 0; row < ph; row++)
+        {
+            Uint32 dst_y = y_offsets[i] + row;
+            if (dst_y >= atlas_h) break;
+
+            for (Uint32 col = 0; col < pw; col++)
+            {
+                if (col >= atlas_w) break;
+
+                Uint32 pixel = pixels[row * pitch4 + col];
+                /* ARGB8888: A[31:24] R[23:16] G[15:8] B[7:0] */
+                Uint8 pa = (Uint8)((pixel >> 24) & 0xFF);
+                Uint8 pr = (Uint8)((pixel >> 16) & 0xFF);
+                Uint8 pg = (Uint8)((pixel >> 8) & 0xFF);
+                Uint8 pb = (Uint8)(pixel & 0xFF);
+
+                size_t dst_idx = (size_t)dst_y * atlas_w + col;
+
+                /* index_pixels: R=pal_idx, G=depth_hi, B=depth_lo */
+                index_pixels[dst_idx * 3 + 0] = pr;
+                index_pixels[dst_idx * 3 + 1] = pg;
+                index_pixels[dst_idx * 3 + 2] = pb;
+
+                /* alpha: 5-bit decode (matching view.py) */
+                Uint32 alpha = (Uint32)(pa % 32) * 8;
+                if (alpha > 255) alpha = 255;
+                alpha_pixels[dst_idx] = (Uint8)alpha;
+            }
+        }
+
+        if (SDL_MUSTLOCK(conv)) SDL_UnlockSurface(conv);
+        SDL_FreeSurface(conv);
+    }
+
+    /* Free PNG surfaces */
+    for (Uint32 i = 0; i < image_res_nums; i++)
+        if (png_surfaces[i]) SDL_FreeSurface(png_surfaces[i]);
+    SDL_free(png_surfaces);
+
+    /* ─── Create userdata ─── */
+    JY_UserData* ud = (JY_UserData*)lua_newuserdata(L, sizeof(JY_UserData));
+    SDL_memset(ud, 0, sizeof(JY_UserData));
+    luaL_setmetatable(L, JY_MT);
+
+    ud->index_pixels = index_pixels;
+    ud->alpha_pixels = alpha_pixels;
+    ud->atlas_w = atlas_w;
+    ud->atlas_h = atlas_h;
+    ud->index_bpp = 3; /* RGB */
+    ud->alpha_bpp = 1; /* Grayscale */
+
+    /* ─── Load palette ─── */
+    ud->pal_count = 256;
+    if (lua_type(L, 2) == LUA_TSTRING)
+    {
+        size_t pal_len;
+        const char* pal_data = lua_tolstring(L, 2, &pal_len);
+        if (pal_len >= 1024)
+        {
+            const Uint8* ppb = (const Uint8*)pal_data;
+            for (Uint32 i = 0; i < 256; i++)
+            {
+                Uint8 b = ppb[i * 4 + 0];
+                Uint8 g = ppb[i * 4 + 1];
+                Uint8 r = ppb[i * 4 + 2];
+                Uint8 a = ppb[i * 4 + 3];
+                ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+            }
+        }
+        else if (pal_len >= 768)
+        {
+            /* RGB format (256*3 bytes) */
+            const Uint8* ppb = (const Uint8*)pal_data;
+            for (Uint32 i = 0; i < 256; i++)
+            {
+                Uint8 r = ppb[i * 3 + 0];
+                Uint8 g = ppb[i * 3 + 1];
+                Uint8 b = ppb[i * 3 + 2];
+                ud->pal[i] = (255u << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+            }
+        }
+        else
+        {
+            /* Fallback: grayscale */
+            for (Uint32 i = 0; i < 256; i++)
+                ud->pal[i] = (255u << 24) | (i << 16) | (i << 8) | i;
+        }
+    }
+    else
+    {
+        /* No palette: grayscale */
+        for (Uint32 i = 0; i < 256; i++)
+            ud->pal[i] = (255u << 24) | (i << 16) | (i << 8) | i;
+    }
+    ud->pal_version = 0;
+
+    /* ─── Build frames (map into virtual atlas) ─── */
+    ud->group = dir_cnt;
+    ud->frame_per_group = frame_cnt;
+    ud->width = spr_width;
+    ud->height = spr_height;
+    ud->global_x = kx;
+    ud->global_y = ky;
+    ud->frame_count = total_frames;
+
+    ud->frames = (JY_FrameInfo*)SDL_calloc(total_frames, sizeof(JY_FrameInfo));
+    if (!ud->frames)
+    {
+        SDL_free(y_offsets);
+        SDL_free(img_entries);
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: out of memory for frames");
+    }
+
+    for (Uint32 i = 0; i < total_frames; i++)
+    {
+        JY_FrameInfo* jf = &ud->frames[i];
+        SPR_Frame* sf_info = &spr_frames[i];
+
+        Sint16 img_idx = sf_info->image_idx;
+        if (img_idx >= 0 && img_idx < (Sint16)image_res_nums)
+        {
+            /* Map pos into virtual atlas:
+               sx = pos_x within the PNG image
+               sy = y_offsets[img_idx] + pos_y */
+            jf->sx = (Uint32)sf_info->pos_x;
+            jf->sy = y_offsets[img_idx] + (Uint32)sf_info->pos_y;
+            jf->sw = (Uint32)sf_info->w;
+            jf->sh = (Uint32)sf_info->h;
+        }
+        jf->key_x = (Sint32)sf_info->key_x;
+        jf->key_y = (Sint32)sf_info->key_y;
+    }
+
+    SDL_free(y_offsets);
+    SDL_free(img_entries);
+    SDL_free(spr_frames);
+
+    /* ─── Init cache ─── */
+    ud->cache_cap = 128;
+    ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
+    ud->cache_tick = 0;
+
+    /* ─── Start worker threads ─── */
+    JY_StartWorkers(ud);
+
+    /* ─── Build info return table (tcp compatible) ─── */
+    lua_createtable(L, 0, 8);
+
+    lua_pushinteger(L, (lua_Integer)ud->group);
+    lua_setfield(L, -2, "group");
+    lua_pushinteger(L, (lua_Integer)ud->frame_per_group);
+    lua_setfield(L, -2, "frame");
+    lua_pushinteger(L, (lua_Integer)ud->width);
+    lua_setfield(L, -2, "width");
+    lua_pushinteger(L, (lua_Integer)ud->height);
+    lua_setfield(L, -2, "height");
+    lua_pushinteger(L, (lua_Integer)ud->global_x);
+    lua_setfield(L, -2, "x");
+    lua_pushinteger(L, (lua_Integer)ud->global_y);
+    lua_setfield(L, -2, "y");
+    lua_pushstring(L, "FT");
+    lua_setfield(L, -2, "type");
+    lua_pushinteger(L, (lua_Integer)ud->frame_count);
+    lua_setfield(L, -2, "total");
+
+    return 2;
+}
+
+/* ═══════════════════════════════════════════
+ *  Constructor: xy_jy(idx_png, alpha_png, pal_data, frames_table)
+ *           OR: xy_jy(spr_data [, pal_data])  — auto-detect FTEN
  *
  *  Returns: userdata, info_table
  * ═══════════════════════════════════════════ */
 static int JY_NEW(lua_State* L)
 {
-    /* Arg 1: index PNG binary */
-    size_t idx_len;
-    const char* idx_data = luaL_checklstring(L, 1, &idx_len);
+    /* ─── Auto-detect FTEN/SPR format ─── */
+    size_t arg1_len;
+    const char* arg1_data = luaL_checklstring(L, 1, &arg1_len);
+    if (arg1_len >= 32 &&
+        arg1_data[0] == 'F' && arg1_data[1] == 'T' &&
+        arg1_data[2] == 'E' && arg1_data[3] == 'N')
+    {
+        return JY_CreateFromSPR(L, (const Uint8*)arg1_data, arg1_len);
+    }
+
+    /* ─── Original atlas path ─── */
+    /* arg1 is already idx_data/idx_len */
+    size_t idx_len = arg1_len;
+    const char* idx_data = arg1_data;
 
     /* Arg 2: alpha PNG binary */
     size_t alpha_len;
