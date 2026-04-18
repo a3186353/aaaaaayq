@@ -937,35 +937,56 @@ static SDL_Surface* JY_LoadPNG(const char* data, size_t len)
     return sf;
 }
 
-/* Extract raw pixel data from SDL_Surface */
+/* Extract raw pixel data from SDL_Surface.
+ * For surfaces with 3+ bytes per pixel (RGB/BGR/RGBA/BGRA), we first
+ * convert to SDL_PIXELFORMAT_RGB24 so byte layout is always R,G,B.
+ * This avoids platform-dependent BGR byte order issues on Windows. */
 static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Uint32* out_bpp)
 {
     if (!sf)
         return NULL;
 
-    *out_w = (Uint32)sf->w;
-    *out_h = (Uint32)sf->h;
-    *out_bpp = (Uint32)sf->format->BytesPerPixel;
+    /* For 3+ bpp surfaces, normalize to RGB24 to guarantee R,G,B byte order */
+    SDL_Surface* src = sf;
+    SDL_Surface* conv = NULL;
+    if (sf->format->BytesPerPixel >= 3 &&
+        sf->format->format != SDL_PIXELFORMAT_RGB24)
+    {
+        conv = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_RGB24, 0);
+        if (conv)
+            src = conv;
+        /* If conversion fails, fall through to use original surface */
+    }
 
-    size_t total = (size_t)sf->w * (size_t)sf->h * (size_t)sf->format->BytesPerPixel;
+    *out_w = (Uint32)src->w;
+    *out_h = (Uint32)src->h;
+    *out_bpp = (Uint32)src->format->BytesPerPixel;
+
+    size_t total = (size_t)src->w * (size_t)src->h * (size_t)src->format->BytesPerPixel;
     Uint8* pixels = (Uint8*)SDL_malloc(total);
     if (!pixels)
+    {
+        if (conv) SDL_FreeSurface(conv);
         return NULL;
+    }
 
-    if (SDL_MUSTLOCK(sf))
-        SDL_LockSurface(sf);
+    if (SDL_MUSTLOCK(src))
+        SDL_LockSurface(src);
 
     /* Copy row by row to handle pitch */
-    Uint32 row_bytes = (Uint32)sf->w * sf->format->BytesPerPixel;
-    for (int y = 0; y < sf->h; y++)
+    Uint32 row_bytes = (Uint32)src->w * src->format->BytesPerPixel;
+    for (int y = 0; y < src->h; y++)
     {
         SDL_memcpy(pixels + y * row_bytes,
-                   (Uint8*)sf->pixels + y * sf->pitch,
+                   (Uint8*)src->pixels + y * src->pitch,
                    row_bytes);
     }
 
-    if (SDL_MUSTLOCK(sf))
-        SDL_UnlockSurface(sf);
+    if (SDL_MUSTLOCK(src))
+        SDL_UnlockSurface(src);
+
+    if (conv)
+        SDL_FreeSurface(conv);
 
     return pixels;
 }
