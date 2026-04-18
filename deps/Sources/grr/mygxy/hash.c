@@ -297,10 +297,11 @@ int luaopen_mygxy_map(lua_State* L);
 int luaopen_mygxy_wdf(lua_State* L);
 int luaopen_mygxy_fsb(lua_State* L);
 int luaopen_mygxy_wpk(lua_State* L);
+int luaopen_mygxy_jy(lua_State* L);
 MYGXY_API int luaopen_mygxy(lua_State* L)
 {
 
-    lua_createtable(L, 0, 6);
+    lua_createtable(L, 0, 7);
 
     lua_pushcfunction(L, luaopen_mygxy_tcp);
     lua_call(L, 0, 1);
@@ -325,6 +326,10 @@ MYGXY_API int luaopen_mygxy(lua_State* L)
     lua_pushcfunction(L, luaopen_mygxy_hash);
     lua_call(L, 0, 1);
     lua_setfield(L, -2, "Hash");
+
+    lua_pushcfunction(L, luaopen_mygxy_jy);
+    lua_call(L, 0, 1);
+    lua_setfield(L, -2, "Jy");
 
     lua_createtable(L, 0, 1);
     lua_pushcfunction(L, lua_mygxy_call);
