@@ -20,6 +20,7 @@
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\map.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\SDL_list.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\tcp.c" />
+    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\jy.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\wdf.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\wpk.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\ujpeg\ujpeg.c" />
