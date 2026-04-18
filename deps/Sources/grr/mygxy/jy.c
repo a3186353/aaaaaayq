@@ -719,14 +719,15 @@ static int JY_Composite(lua_State* L)
         return luaL_error(L, "JY_Composite: failed to create result surface");
     SDL_FillRect(result, NULL, 0);
 
-    /* Allocate z-buffer (Uint16 per pixel, init to 0) */
+    /* Allocate z-buffer (Sint32 per pixel, init to INT32_MIN — matching Python) */
     Uint32 canvas_px = (Uint32)(canvas_w * canvas_h);
-    Uint16* zbuf = (Uint16*)SDL_calloc(canvas_px, sizeof(Uint16));
+    Sint32* zbuf = (Sint32*)SDL_malloc(canvas_px * sizeof(Sint32));
     if (!zbuf)
     {
         SDL_FreeSurface(result);
         return luaL_error(L, "JY_Composite: failed to alloc z-buffer");
     }
+    for (Uint32 zi = 0; zi < canvas_px; zi++) zbuf[zi] = (-2147483647 - 1); /* INT32_MIN */
 
     if (SDL_MUSTLOCK(result))
         SDL_LockSurface(result);
@@ -860,14 +861,49 @@ static int JY_Composite(lua_State* L)
                     continue;
 
                 Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
-                int effective_d = (int)d + z_offset;
-                if (effective_d < 0) effective_d = 0;
+                Sint32 effective_d = (Sint32)d + (Sint32)z_offset;
 
-                Uint16* zp = &zbuf[dy * canvas_w + dx];
-                if ((Uint16)effective_d >= *zp)
+                Sint32* zp = &zbuf[dy * canvas_w + dx];
+                if (effective_d > *zp)
                 {
-                    *zp = (Uint16)effective_d;
-                    dst_pixels[dy * dst_stride + dx] = spixel;
+                    *zp = effective_d;
+
+                    /* Alpha composite (Porter-Duff over) — matching Python */
+                    Uint32 dpixel = dst_pixels[dy * dst_stride + dx];
+                    Uint8 da = (Uint8)((dpixel >> 24) & 0xFF);
+                    if (da == 0 || alpha == 255)
+                    {
+                        dst_pixels[dy * dst_stride + dx] = spixel;
+                    }
+                    else
+                    {
+                        Uint32 sa = alpha;
+                        Uint32 inv_sa = 255u - sa;
+                        /* out_a = sa + da*(1-sa/255) ≈ sa + da*inv_sa/255 */
+                        Uint32 out_a = sa + (da * inv_sa / 255u);
+                        if (out_a > 255u) out_a = 255u;
+                        if (out_a == 0)
+                        {
+                            dst_pixels[dy * dst_stride + dx] = 0;
+                        }
+                        else
+                        {
+                            Uint32 sr = (spixel >> 16) & 0xFF;
+                            Uint32 sg = (spixel >> 8)  & 0xFF;
+                            Uint32 sb =  spixel        & 0xFF;
+                            Uint32 dr = (dpixel >> 16) & 0xFF;
+                            Uint32 dg = (dpixel >> 8)  & 0xFF;
+                            Uint32 db =  dpixel        & 0xFF;
+                            Uint32 or_ = (sr * sa + dr * da * inv_sa / 255u) / out_a;
+                            Uint32 og  = (sg * sa + dg * da * inv_sa / 255u) / out_a;
+                            Uint32 ob  = (sb * sa + db * da * inv_sa / 255u) / out_a;
+                            if (or_ > 255u) or_ = 255u;
+                            if (og  > 255u) og  = 255u;
+                            if (ob  > 255u) ob  = 255u;
+                            dst_pixels[dy * dst_stride + dx] =
+                                (out_a << 24) | (or_ << 16) | (og << 8) | ob;
+                        }
+                    }
                 }
             }
         }
