@@ -905,23 +905,22 @@ static int JY_Composite(lua_State* L)
         if (SDL_MUSTLOCK(layer_sf))
             SDL_LockSurface(layer_sf);
 
-        Uint32* src_pixels = (Uint32*)layer_sf->pixels;
-        Uint32 src_stride = (Uint32)(layer_sf->pitch / 4);
+        /* Pre-calculate clipping bounds so we don't branch per pixel */
+        int start_y = (base_y < 0) ? -base_y : 0;
+        int start_x = (base_x < 0) ? -base_x : 0;
+        int end_y = (base_y + lh > canvas_h) ? canvas_h - base_y : lh;
+        int end_x = (base_x + lw > canvas_w) ? canvas_w - base_x : lw;
 
-        for (int py = 0; py < lh; py++)
+        for (int py = start_y; py < end_y; py++)
         {
             int dy = base_y + py;
-            if (dy < 0 || dy >= canvas_h)
-                continue;
-            for (int px = 0; px < lw; px++)
+            for (int px = start_x; px < end_x; px++)
             {
                 int dx = base_x + px;
-                if (dx < 0 || dx >= canvas_w)
-                    continue;
 
-                Uint32 spixel = src_pixels[py * src_stride + px];
-                Uint8 alpha = (Uint8)((spixel >> 24) & 0xFF);
-                if (alpha == 0)
+                Uint32 spixel = ((Uint32*)layer_sf->pixels)[py * (layer_sf->pitch / 4) + px];
+                Uint32 sa = (spixel >> 24) & 0xFF;
+                if (sa == 0)
                     continue;
 
                 Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
@@ -936,13 +935,12 @@ static int JY_Composite(lua_State* L)
                     /* Alpha composite (Porter-Duff over) — matching Python */
                     Uint32 dpixel = dst_pixels[dy * dst_stride + dx];
                     Uint8 da = (Uint8)((dpixel >> 24) & 0xFF);
-                    if (da == 0 || alpha == 255)
+                    if (da == 0 || sa == 255)
                     {
                         dst_pixels[dy * dst_stride + dx] = spixel;
                     }
                     else
                     {
-                        Uint32 sa = alpha;
                         Uint32 inv_sa = 255u - sa;
                         /* out_a = sa + da*(1-sa/255) ≈ sa + da*inv_sa/255 */
                         Uint32 out_a = sa + (da * inv_sa / 255u);
