@@ -1489,14 +1489,18 @@ static int JY_NEW(lua_State* L)
     size_t idx_len = arg1_len;
     const char* idx_data = arg1_data;
 
-    /* Arg 2: alpha PNG binary */
-    size_t alpha_len;
-    const char* alpha_data = luaL_checklstring(L, 2, &alpha_len);
+    /* Arg 2: alpha PNG binary (optional if idx_png has alpha) */
+    size_t alpha_len = 0;
+    const char* alpha_data = NULL;
+    if (lua_type(L, 2) == LUA_TSTRING)
+        alpha_data = lua_tolstring(L, 2, &alpha_len);
 
     /* Arg 3: palette data (1024 bytes BGRA) */
-    size_t pal_len;
-    const char* pal_data = luaL_checklstring(L, 3, &pal_len);
-    if (pal_len < 1024)
+    size_t pal_len = 0;
+    const char* pal_data = NULL;
+    if (lua_type(L, 3) == LUA_TSTRING)
+        pal_data = lua_tolstring(L, 3, &pal_len);
+    if (pal_data && pal_len < 1024)
         return luaL_error(L, "JY: palette must be 1024 bytes, got %d", (int)pal_len);
 
     /* Arg 4: frames table */
@@ -1513,12 +1517,58 @@ static int JY_NEW(lua_State* L)
     if (!idx_sf)
         return luaL_error(L, "JY: failed to decode index PNG");
 
-    /* ─── Decode alpha PNG ─── */
-    SDL_Surface* alpha_sf = JY_LoadPNG(alpha_data, alpha_len);
-    if (!alpha_sf)
+    /* ─── Create userdata ─── */
+    JY_UserData* ud = (JY_UserData*)lua_newuserdata(L, sizeof(JY_UserData));
+    SDL_memset(ud, 0, sizeof(JY_UserData));
+    luaL_setmetatable(L, JY_MT);
+
+    Uint32 aw2 = (Uint32)idx_sf->w, ah2 = (Uint32)idx_sf->h;
+
+    /* ─── Decode or Extract alpha PNG ─── */
+    if (alpha_data)
     {
-        SDL_FreeSurface(idx_sf);
-        return luaL_error(L, "JY: failed to decode alpha PNG");
+        SDL_Surface* alpha_sf = JY_LoadPNG(alpha_data, alpha_len);
+        if (!alpha_sf)
+        {
+            SDL_FreeSurface(idx_sf);
+            return luaL_error(L, "JY: failed to decode alpha PNG");
+        }
+        ud->alpha_pixels = JY_ExtractPixels(alpha_sf, &aw2, &ah2, &ud->alpha_bpp);
+        SDL_FreeSurface(alpha_sf);
+    }
+    else if (idx_sf->format->Amask != 0)
+    {
+        /* Manually extract Alpha channel from RGBA index image */
+        SDL_Surface* argb_sf = NULL;
+        SDL_Surface* src_alpha = idx_sf;
+        if (idx_sf->format->format != SDL_PIXELFORMAT_ARGB8888)
+        {
+            SDL_SetSurfaceBlendMode(idx_sf, SDL_BLENDMODE_NONE);
+            argb_sf = SDL_ConvertSurfaceFormat(idx_sf, SDL_PIXELFORMAT_ARGB8888, 0);
+            if (argb_sf) src_alpha = argb_sf;
+        }
+
+        Uint32 aw = (Uint32)src_alpha->w;
+        Uint32 ah = (Uint32)src_alpha->h;
+        ud->alpha_pixels = (Uint8*)SDL_malloc(aw * ah);
+        ud->alpha_bpp = 1;
+        aw2 = aw; ah2 = ah;
+
+        if (ud->alpha_pixels)
+        {
+            if (SDL_MUSTLOCK(src_alpha)) SDL_LockSurface(src_alpha);
+            Uint32* src_px = (Uint32*)src_alpha->pixels;
+            Uint32 pitch4 = (Uint32)(src_alpha->pitch / 4);
+            for (Uint32 y = 0; y < ah; y++) {
+                for (Uint32 x = 0; x < aw; x++) {
+                    Uint32 p = src_px[y * pitch4 + x];
+                    ud->alpha_pixels[y * aw + x] = (Uint8)((p >> 24) & 0xFF);
+                }
+            }
+            if (SDL_MUSTLOCK(src_alpha)) SDL_UnlockSurface(src_alpha);
+        }
+
+        if (argb_sf) SDL_FreeSurface(argb_sf);
     }
 
     /* ─── Create userdata ─── */
@@ -1532,10 +1582,6 @@ static int JY_NEW(lua_State* L)
 
     if (!ud->index_pixels)
         return luaL_error(L, "JY: failed to extract index pixels");
-
-    Uint32 aw2, ah2;
-    ud->alpha_pixels = JY_ExtractPixels(alpha_sf, &aw2, &ah2, &ud->alpha_bpp);
-    SDL_FreeSurface(alpha_sf);
 
     if (depth_data && depth_len > 0)
     {
@@ -1649,15 +1695,24 @@ static int JY_NEW(lua_State* L)
     }
 
     /* ─── Load palette (BGRA → ARGB8888) ─── */
-    const Uint8* pb = (const Uint8*)pal_data;
     ud->pal_count = 256;
-    for (Uint32 i = 0; i < 256; i++)
+    if (pal_data)
     {
-        Uint8 b = pb[i * 4 + 0];
-        Uint8 g = pb[i * 4 + 1];
-        Uint8 r = pb[i * 4 + 2];
-        Uint8 a = pb[i * 4 + 3];
-        ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+        const Uint8* pb = (const Uint8*)pal_data;
+        for (Uint32 i = 0; i < 256; i++)
+        {
+            Uint8 b = pb[i * 4 + 0];
+            Uint8 g = pb[i * 4 + 1];
+            Uint8 r = pb[i * 4 + 2];
+            Uint8 a = pb[i * 4 + 3];
+            ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+        }
+    }
+    else
+    {
+        /* Fallback if pal_data is completely missing/optional */
+        for (Uint32 i = 0; i < 256; i++)
+            ud->pal[i] = (255u << 24) | (i << 16) | (i << 8) | i;
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
