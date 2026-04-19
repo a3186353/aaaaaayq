@@ -264,7 +264,13 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                         depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
                     }
                 }
-                /* else: depth_frames exists but id out of range → skip depth (keep 0) */
+                else
+                {
+                    /* depth_frames exists but id out of range →
+                     * fall back to index atlas G/B channels (matching Python view.py) */
+                    depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0;
+                    depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0;
+                }
             }
             else
             {
