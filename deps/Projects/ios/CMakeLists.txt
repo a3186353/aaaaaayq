@@ -289,6 +289,7 @@ set(MYGXY_SOURCES
     "${MYGXY_SRC_DIR}/tcp.c"
     "${MYGXY_SRC_DIR}/wdf.c"
     "${MYGXY_SRC_DIR}/wpk.c"
+    "${MYGXY_SRC_DIR}/jy.c"
     "${MYGXY_SRC_DIR}/ujpeg/ujpeg.c"
     # zstd (解压)
     "${DEPS_DIR}/zstd/common/debug.c"
