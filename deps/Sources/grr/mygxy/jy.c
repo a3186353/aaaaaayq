@@ -182,25 +182,8 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         return NULL;
     SDL_FillRect(sf, NULL, 0);
 
-    /* Allocate depth buffer.
-     * Layers WITHOUT a separate depth atlas and with index G/B = 0
-     * (common for addon decorations) would get depth=0 everywhere,
-     * making them always lose the Z-test to layers WITH depth data.
-     * Pre-fill with 0xFFFF (65535) for such layers so they naturally
-     * sort above depth-bearing layers at the same z_priority. */
-    Uint32 depth_px_count = f->sw * f->sh;
-    Uint16* depth_buf;
-    if (!ud->depth_pixels)
-    {
-        /* No depth source at all → fill with max depth */
-        depth_buf = (Uint16*)SDL_malloc(depth_px_count * sizeof(Uint16));
-        if (depth_buf)
-            SDL_memset(depth_buf, 0xFF, depth_px_count * sizeof(Uint16));
-    }
-    else
-    {
-        depth_buf = (Uint16*)SDL_calloc(depth_px_count, sizeof(Uint16));
-    }
+    /* Allocate depth buffer */
+    Uint16* depth_buf = (Uint16*)SDL_calloc(f->sw * f->sh, sizeof(Uint16));
 
     if (SDL_MUSTLOCK(sf))
         SDL_LockSurface(sf);
@@ -300,11 +283,7 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             if (depth_buf)
             {
                 Uint16 d = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
-                /* Only write if layer has a depth source, or depth is non-zero.
-                 * For layers without depth_pixels, depth_buf was pre-filled with
-                 * 65535; don't overwrite that with 0 from empty G/B channels. */
-                if (ud->depth_pixels || d != 0)
-                    depth_buf[y * f->sw + x] = d;
+                depth_buf[y * f->sw + x] = d;
             }
         }
     }
@@ -944,7 +923,7 @@ static int JY_Composite(lua_State* L)
                 if (sa == 0)
                     continue;
 
-                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 65535;
+                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
 
                 Sint32 effective_d = (Sint32)d + z_offset;
 
