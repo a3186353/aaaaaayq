@@ -923,7 +923,7 @@ static int JY_Composite(lua_State* L)
                 if (sa == 0)
                     continue;
 
-                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
+                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 65535;
 
                 Sint32 effective_d = (Sint32)d + z_offset;
 
