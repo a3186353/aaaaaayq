@@ -1536,39 +1536,19 @@ static int JY_NEW(lua_State* L)
         ud->alpha_pixels = JY_ExtractPixels(alpha_sf, &aw2, &ah2, &ud->alpha_bpp);
         SDL_FreeSurface(alpha_sf);
     }
-    else if (idx_sf->format->Amask != 0)
+    else
     {
-        /* Manually extract Alpha channel from RGBA index image */
-        SDL_Surface* argb_sf = NULL;
-        SDL_Surface* src_alpha = idx_sf;
-        if (idx_sf->format->format != SDL_PIXELFORMAT_ARGB8888)
-        {
-            SDL_SetSurfaceBlendMode(idx_sf, SDL_BLENDMODE_NONE);
-            argb_sf = SDL_ConvertSurfaceFormat(idx_sf, SDL_PIXELFORMAT_ARGB8888, 0);
-            if (argb_sf) src_alpha = argb_sf;
-        }
-
-        Uint32 aw = (Uint32)src_alpha->w;
-        Uint32 ah = (Uint32)src_alpha->h;
+        /* No separate alpha PNG provided.
+         * Match Python MountLoader.load line 137:
+         *   alpha_img = Image.new("L", index_img.size, 255)
+         * → create a fully opaque alpha buffer. */
+        Uint32 aw = (Uint32)idx_sf->w;
+        Uint32 ah = (Uint32)idx_sf->h;
         ud->alpha_pixels = (Uint8*)SDL_malloc(aw * ah);
         ud->alpha_bpp = 1;
         aw2 = aw; ah2 = ah;
-
         if (ud->alpha_pixels)
-        {
-            if (SDL_MUSTLOCK(src_alpha)) SDL_LockSurface(src_alpha);
-            Uint32* src_px = (Uint32*)src_alpha->pixels;
-            Uint32 pitch4 = (Uint32)(src_alpha->pitch / 4);
-            for (Uint32 y = 0; y < ah; y++) {
-                for (Uint32 x = 0; x < aw; x++) {
-                    Uint32 p = src_px[y * pitch4 + x];
-                    ud->alpha_pixels[y * aw + x] = (Uint8)((p >> 24) & 0xFF);
-                }
-            }
-            if (SDL_MUSTLOCK(src_alpha)) SDL_UnlockSurface(src_alpha);
-        }
-
-        if (argb_sf) SDL_FreeSurface(argb_sf);
+            SDL_memset(ud->alpha_pixels, 255, aw * ah);
     }
 
     /* Extract pixels */
