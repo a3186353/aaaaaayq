@@ -1571,11 +1571,6 @@ static int JY_NEW(lua_State* L)
         if (argb_sf) SDL_FreeSurface(argb_sf);
     }
 
-    /* ─── Create userdata ─── */
-    JY_UserData* ud = (JY_UserData*)lua_newuserdata(L, sizeof(JY_UserData));
-    SDL_memset(ud, 0, sizeof(JY_UserData));
-    luaL_setmetatable(L, JY_MT);
-
     /* Extract pixels */
     ud->index_pixels = JY_ExtractPixels(idx_sf, &ud->atlas_w, &ud->atlas_h, &ud->index_bpp);
     SDL_FreeSurface(idx_sf);
