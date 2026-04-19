@@ -1544,12 +1544,38 @@ static int JY_NEW(lua_State* L)
         }
     }
 
+    /* ─── Parse global info from frames table (arg 4) ─── */
+    lua_getfield(L, 4, "group");
+    ud->group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 4, "frame");
+    ud->frame_per_group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 4, "width");
+    ud->width = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 4, "height");
+    ud->height = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 4, "x");
+    ud->global_x = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 4, "y");
+    ud->global_y = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    Uint32 total_expected_frames = ud->group * ud->frame_per_group;
+
     /* Arg 6: optional depth frames table (independent depth atlas coordinates) */
     if (lua_type(L, 6) == LUA_TTABLE)
     {
-        lua_len(L, 6);
-        Uint32 dn = (Uint32)lua_tointeger(L, -1);
-        lua_pop(L, 1);
+        /* Use total_expected_frames instead of lua_len, which fails on tables with holes */
+        Uint32 dn = total_expected_frames;
 
         if (dn > 0)
         {
@@ -1617,34 +1643,7 @@ static int JY_NEW(lua_State* L)
     ud->pal_version = 0;
 
     /* ─── Parse frames table ─── */
-    lua_getfield(L, 4, "group");
-    ud->group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    lua_getfield(L, 4, "frame");
-    ud->frame_per_group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    lua_getfield(L, 4, "width");
-    ud->width = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    lua_getfield(L, 4, "height");
-    ud->height = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    lua_getfield(L, 4, "x");
-    ud->global_x = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    lua_getfield(L, 4, "y");
-    ud->global_y = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    /* Count array entries in frames table */
-    lua_len(L, 4);
-    Uint32 n = (Uint32)lua_tointeger(L, -1);
-    lua_pop(L, 1);
+    Uint32 n = total_expected_frames;
 
     ud->frame_count = n;
     ud->frames = (JY_FrameInfo*)SDL_calloc(n, sizeof(JY_FrameInfo));
