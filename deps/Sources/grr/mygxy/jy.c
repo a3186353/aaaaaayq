@@ -1536,6 +1536,19 @@ static int JY_NEW(lua_State* L)
         SDL_Surface* depth_sf = JY_LoadPNG(depth_data, depth_len);
         if (depth_sf)
         {
+            /* Force depth surface to RGB24 to safely extract G and B channels.
+             * This prevents 8-bit indexed PNGs (from size optimization) from being
+             * misread as byte-misaligned coordinates when `depth_bpp` == 1. */
+            if (depth_sf->format->format != SDL_PIXELFORMAT_RGB24)
+            {
+                SDL_Surface* conv = SDL_ConvertSurfaceFormat(depth_sf, SDL_PIXELFORMAT_RGB24, 0);
+                if (conv)
+                {
+                    SDL_FreeSurface(depth_sf);
+                    depth_sf = conv;
+                }
+            }
+
             Uint32 dw, dh;
             ud->depth_pixels = JY_ExtractPixels(depth_sf, &dw, &dh, &ud->depth_bpp);
             ud->depth_atlas_w = dw;
