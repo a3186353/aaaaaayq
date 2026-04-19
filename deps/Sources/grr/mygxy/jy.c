@@ -258,18 +258,16 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                 }
                 else
                 {
-                    /* depth_frames exists but id out of range →
-                     * fall back to index atlas G/B channels (matching Python view.py) */
-                    depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0;
-                    depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0;
+                    /* depth_frames exists but id out of range 
+                     * Python view.py leaves depth as 0 in this case. */
+                    depth_hi = 0;
+                    depth_lo = 0;
                 }
             }
-            else if (ud->has_pixel_depth)
+            else
             {
-                /* G/B channels carry per-pixel depth data (both TCP and SPR formats).
-                 * Python view.py always reads G/B as depth for all layer types. */
-                depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
-                depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
+                depth_hi = 0;
+                depth_lo = 0;
             }
 
             /* Alpha pixel */
@@ -827,12 +825,6 @@ static int JY_Composite(lua_State* L)
         int off_y = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
 
-        int ignore_depth = 0;
-        lua_rawgeti(L, -1, 6); /* ignore_depth */
-        if (lua_isboolean(L, -1))
-            ignore_depth = lua_toboolean(L, -1);
-        lua_pop(L, 1);
-
         lua_pop(L, 1); /* pop layer entry table */
 
         if (frame_id >= layer_ud->frame_count)
@@ -935,13 +927,11 @@ static int JY_Composite(lua_State* L)
                     continue;
 
                 Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
-                if (ignore_depth)
-                    d = 0;
 
                 Sint32 effective_d = (Sint32)d + z_offset;
 
                 Sint32* zp = &zbuf[dy * canvas_w + dx];
-                if (effective_d >= *zp)
+                if (effective_d > *zp)
                 {
                     *zp = effective_d;
 
@@ -1401,7 +1391,6 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
-    ud->has_pixel_depth = 1; /* SPR embedded PNGs: G/B channels carry depth (matching Python) */
 
     /* ─── Build frames (map into virtual atlas) ─── */
     ud->group = dir_cnt;
@@ -1631,7 +1620,6 @@ static int JY_NEW(lua_State* L)
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
-    ud->has_pixel_depth = 1; /* TCP/JSON format: G/B channels carry depth */
 
     /* ─── Parse frames table ─── */
     lua_getfield(L, 4, "group");
