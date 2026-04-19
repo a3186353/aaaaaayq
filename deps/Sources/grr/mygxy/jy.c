@@ -827,6 +827,12 @@ static int JY_Composite(lua_State* L)
         int off_y = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
 
+        int ignore_depth = 0;
+        lua_rawgeti(L, -1, 6); /* ignore_depth */
+        if (lua_isboolean(L, -1))
+            ignore_depth = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+
         lua_pop(L, 1); /* pop layer entry table */
 
         if (frame_id >= layer_ud->frame_count)
@@ -921,7 +927,10 @@ static int JY_Composite(lua_State* L)
                     continue;
 
                 Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
-                Sint32 effective_d = (Sint32)d + (Sint32)z_offset;
+                if (ignore_depth)
+                    d = 0;
+
+                Sint32 effective_d = (Sint32)d + z_offset;
 
                 Sint32* zp = &zbuf[dy * canvas_w + dx];
                 if (effective_d > *zp)
