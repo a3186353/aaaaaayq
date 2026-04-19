@@ -986,6 +986,36 @@ static int JY_Composite(lua_State* L)
         if (SDL_MUSTLOCK(layer_sf))
             SDL_UnlockSurface(layer_sf);
 
+        /* ── Depth diagnostics (once per composite call) ── */
+        {
+            Uint16 d_min = 0xFFFF, d_max = 0;
+            Uint32 d_count = 0;
+            Uint64 d_sum = 0;
+            if (layer_depth)
+            {
+                Uint32 total_px = (Uint32)(lw * lh);
+                for (Uint32 di = 0; di < total_px; di++)
+                {
+                    Uint16 dv = layer_depth[di];
+                    if (dv > 0)
+                    {
+                        if (dv < d_min) d_min = dv;
+                        if (dv > d_max) d_max = dv;
+                        d_sum += dv;
+                        d_count++;
+                    }
+                }
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "JY_Composite layer %d: z_off=%d has_depth=%d size=%dx%d "
+                "base=(%d,%d) depth_range=[%u..%u] avg=%u count=%u",
+                i, z_offset, (layer_depth ? 1 : 0), lw, lh,
+                base_x, base_y,
+                (unsigned)(d_count ? d_min : 0), (unsigned)d_max,
+                (unsigned)(d_count ? (Uint32)(d_sum / d_count) : 0),
+                (unsigned)d_count);
+        }
+
         /* Always free: we always own layer_sf/layer_depth (either decoded
          * fresh or duplicated from cache). */
         SDL_FreeSurface(layer_sf);
