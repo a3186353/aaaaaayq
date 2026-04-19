@@ -182,8 +182,25 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         return NULL;
     SDL_FillRect(sf, NULL, 0);
 
-    /* Allocate depth buffer */
-    Uint16* depth_buf = (Uint16*)SDL_calloc(f->sw * f->sh, sizeof(Uint16));
+    /* Allocate depth buffer.
+     * Layers WITHOUT a separate depth atlas and with index G/B = 0
+     * (common for addon decorations) would get depth=0 everywhere,
+     * making them always lose the Z-test to layers WITH depth data.
+     * Pre-fill with 0xFFFF (65535) for such layers so they naturally
+     * sort above depth-bearing layers at the same z_priority. */
+    Uint32 depth_px_count = f->sw * f->sh;
+    Uint16* depth_buf;
+    if (!ud->depth_pixels)
+    {
+        /* No depth source at all → fill with max depth */
+        depth_buf = (Uint16*)SDL_malloc(depth_px_count * sizeof(Uint16));
+        if (depth_buf)
+            SDL_memset(depth_buf, 0xFF, depth_px_count * sizeof(Uint16));
+    }
+    else
+    {
+        depth_buf = (Uint16*)SDL_calloc(depth_px_count, sizeof(Uint16));
+    }
 
     if (SDL_MUSTLOCK(sf))
         SDL_LockSurface(sf);
