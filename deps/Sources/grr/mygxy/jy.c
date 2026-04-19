@@ -1071,6 +1071,11 @@ static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Ui
     if (sf->format->BytesPerPixel >= 3 &&
         sf->format->format != SDL_PIXELFORMAT_RGB24)
     {
+        /* Disable self-blending. For data-carrying images, we need the raw
+         * memory layout exactly equivalent to Python's convert("RGB").
+         * This absolutely prevents semi-transparent anti-aliasing edges from 
+         * reducing RGB values against a black background. */
+        SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_NONE);
         conv = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_RGB24, 0);
         if (conv)
             src = conv;
@@ -1541,6 +1546,7 @@ static int JY_NEW(lua_State* L)
              * misread as byte-misaligned coordinates when `depth_bpp` == 1. */
             if (depth_sf->format->format != SDL_PIXELFORMAT_RGB24)
             {
+                SDL_SetSurfaceBlendMode(depth_sf, SDL_BLENDMODE_NONE);
                 SDL_Surface* conv = SDL_ConvertSurfaceFormat(depth_sf, SDL_PIXELFORMAT_RGB24, 0);
                 if (conv)
                 {
