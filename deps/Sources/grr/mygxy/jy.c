@@ -283,11 +283,11 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             Uint32 color = ud->pal[pal_idx % pmod];
             dst[y * stride + x] = (color & 0x00FFFFFF) | ((Uint32)alpha << 24);
 
-            /* Depth: (G << 8) | B, zero if alpha < 77 (matching view.py) */
+            /* Depth: (G << 8) | B */
             if (depth_buf)
             {
                 Uint16 d = ((Uint16)depth_hi << 8) | depth_lo;
-                depth_buf[y * f->sw + x] = (alpha >= 77) ? d : 0;
+                depth_buf[y * f->sw + x] = d;
             }
         }
     }
@@ -1718,6 +1718,10 @@ static int JY_NEW(lua_State* L)
 
     lua_pushinteger(L, (lua_Integer)ud->frame_count);
     lua_setfield(L, -2, "total");
+
+    /* Version marker for DLL verification */
+    lua_pushinteger(L, 2);
+    lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
     return 2;
