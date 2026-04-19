@@ -88,6 +88,7 @@ typedef struct
     Uint32 task_count;
     Uint32 task_cap;
     volatile int shutdown;
+    Uint8 has_pixel_depth;     /* 1=TCP格式(G/B是深度), 0=SPR格式(G/B无深度) */
 } JY_UserData;
 
 /* 公共入口 */

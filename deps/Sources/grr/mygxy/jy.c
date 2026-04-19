@@ -203,16 +203,6 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
         depth_stride = daw;
         depth_buf_pixels = daw * dah;
-        /* Diagnostic: log once per frame decode with depth */
-        SDL_Log("JY_Decode id=%u frame(%u,%u %ux%u) depth_bpp=%u dstride=%u dpx=%u df=%p dfc=%u",
-                id, f->sx, f->sy, f->sw, f->sh,
-                ud->depth_bpp, depth_stride, depth_buf_pixels,
-                (void*)ud->depth_frames, ud->depth_frame_count);
-        if (ud->depth_frames && id < ud->depth_frame_count)
-        {
-            JY_FrameInfo* df = &ud->depth_frames[id];
-            SDL_Log("  df[%u] sx=%u sy=%u sw=%u sh=%u", id, df->sx, df->sy, df->sw, df->sh);
-        }
     }
 
     for (Uint32 y = 0; y < f->sh; y++)
@@ -272,11 +262,13 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                     depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0;
                 }
             }
-            else
+            else if (ud->has_pixel_depth)
             {
+                /* TCP format: G/B channels carry real depth data */
                 depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
                 depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
             }
+            /* else: SPR format (has_pixel_depth==0), G/B are palette copies, keep depth=0 */
 
             /* Alpha pixel */
             Uint8 alpha = 255;
@@ -1400,6 +1392,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
+    ud->has_pixel_depth = 0; /* SPR format: G/B channels are NOT depth */
 
     /* ─── Build frames (map into virtual atlas) ─── */
     ud->group = dir_cnt;
@@ -1629,6 +1622,7 @@ static int JY_NEW(lua_State* L)
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
+    ud->has_pixel_depth = 1; /* TCP/JSON format: G/B channels carry depth */
 
     /* ─── Parse frames table ─── */
     lua_getfield(L, 4, "group");
