@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+
 #if defined(_WIN32)
 #define MYGXY_API __declspec(dllexport)
 #else
@@ -204,6 +205,7 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         depth_stride = daw;
         depth_buf_pixels = daw * dah;
     }
+
 
     for (Uint32 y = 0; y < f->sh; y++)
     {
@@ -939,7 +941,7 @@ static int JY_Composite(lua_State* L)
                 Sint32 effective_d = (Sint32)d + z_offset;
 
                 Sint32* zp = &zbuf[dy * canvas_w + dx];
-                if (effective_d > *zp)
+                if (effective_d >= *zp)
                 {
                     *zp = effective_d;
 
