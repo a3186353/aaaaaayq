@@ -281,10 +281,10 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             Uint32 color = ud->pal[pal_idx % pmod];
             dst[y * stride + x] = (color & 0x00FFFFFF) | ((Uint32)alpha << 24);
 
-            /* Depth: (G << 8) | B */
+            /* Depth: (G << 8) | B — matching Python: depth = 0 when alpha < 77 */
             if (depth_buf)
             {
-                Uint16 d = ((Uint16)depth_hi << 8) | depth_lo;
+                Uint16 d = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
                 depth_buf[y * f->sw + x] = d;
             }
         }
