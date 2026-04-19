@@ -231,43 +231,10 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                      * Map pixel (x, y) in main frame → depth frame via
                      * nearest-neighbor scaling (matching Python resize NEAREST). */
                     JY_FrameInfo* df = &ud->depth_frames[id];
-                    if (df->sw > 0 && df->sh > 0 && f->sw > 0 && f->sh > 0)
-                    {
-                        Uint32 dx = df->sx + (x * df->sw / f->sw);
-                        Uint32 dy = df->sy + (y * df->sh / f->sh);
-                        Uint32 dpx_idx = dy * depth_stride + dx;
-                        if (dpx_idx < depth_buf_pixels)
-                        {
-                            Uint32 d_off = dpx_idx * ud->depth_bpp;
-                            depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
-                            depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
-                        }
-                    }
                     /* else: depth frame has zero size, keep depth = 0 */
                 }
-                else if (!ud->depth_frames)
-                {
-                    /* Depth atlas shares same coordinates as index atlas (no depth_frames) */
-                    Uint32 dpx_idx = src_y * depth_stride + src_x;
-                    if (dpx_idx < depth_buf_pixels)
-                    {
-                        Uint32 d_off = dpx_idx * ud->depth_bpp;
-                        depth_hi = (ud->depth_bpp >= 2) ? ud->depth_pixels[d_off + 1] : 0;
-                        depth_lo = (ud->depth_bpp >= 3) ? ud->depth_pixels[d_off + 2] : 0;
-                    }
-                }
-                else
-                {
-                    /* depth_frames exists but id out of range 
-                     * Python view.py leaves depth as 0 in this case. */
-                    depth_hi = 0;
-                    depth_lo = 0;
-                }
-            }
-            else
-            {
-                depth_hi = 0;
-                depth_lo = 0;
+                /* If depth_frames is missing or id is out of range, 
+                 * depth_hi/depth_lo remain 0, perfectly matching Python's np.zeros_like(). */
             }
 
             /* Alpha pixel */
