@@ -233,9 +233,12 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                     JY_FrameInfo* df = &ud->depth_frames[id];
                     if (df->sw > 0 && df->sh > 0)
                     {
-                        /* Nearest-neighbor: map (x,y) in main frame to depth frame */
-                        Uint32 dmx = x * df->sw / f->sw;
-                        Uint32 dmy = y * df->sh / f->sh;
+                        /* Nearest-neighbor: map (x,y) in main frame to depth frame.
+                         * PILLOW uses center-pixel mapping: dst_idx + 0.5
+                         * Formula: src_idx = int((dst_idx + 0.5) * src_width / dst_width)
+                         * Equivalent integer math: (dst_idx * 2 + 1) * src_width / (dst_width * 2) */
+                        Uint32 dmx = ((x * 2 + 1) * df->sw) / (f->sw * 2);
+                        Uint32 dmy = ((y * 2 + 1) * df->sh) / (f->sh * 2);
                         if (dmx < df->sw && dmy < df->sh)
                         {
                             Uint32 dax = df->sx + dmx;
