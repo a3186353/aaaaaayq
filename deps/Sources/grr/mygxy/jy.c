@@ -231,10 +231,38 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                      * Map pixel (x, y) in main frame → depth frame via
                      * nearest-neighbor scaling (matching Python resize NEAREST). */
                     JY_FrameInfo* df = &ud->depth_frames[id];
+                    if (df->sw > 0 && df->sh > 0)
+                    {
+                        /* Nearest-neighbor: map (x,y) in main frame to depth frame */
+                        Uint32 dmx = x * df->sw / f->sw;
+                        Uint32 dmy = y * df->sh / f->sh;
+                        if (dmx < df->sw && dmy < df->sh)
+                        {
+                            Uint32 dax = df->sx + dmx;
+                            Uint32 day = df->sy + dmy;
+                            Uint32 d_pixel_off = day * depth_stride + dax;
+                            if (d_pixel_off < depth_buf_pixels)
+                            {
+                                Uint32 d_byte_off = d_pixel_off * ud->depth_bpp;
+                                depth_hi = ud->depth_pixels[d_byte_off + 1]; /* G channel */
+                                depth_lo = ud->depth_pixels[d_byte_off + 2]; /* B channel */
+                            }
+                        }
+                    }
                     /* else: depth frame has zero size, keep depth = 0 */
                 }
                 /* If depth_frames is missing or id is out of range, 
                  * depth_hi/depth_lo remain 0, perfectly matching Python's np.zeros_like(). */
+            }
+            else
+            {
+                /* No separate depth image: extract depth from index pixel G/B channels.
+                 * Original data format: R=palette index, G/B=depth (matching view.py). */
+                if (ibpp >= 3)
+                {
+                    depth_hi = ud->index_pixels[idx_off + 1]; /* G channel */
+                    depth_lo = ud->index_pixels[idx_off + 2]; /* B channel */
+                }
             }
 
             /* Alpha pixel */
