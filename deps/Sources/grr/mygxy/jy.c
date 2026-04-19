@@ -300,7 +300,11 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             if (depth_buf)
             {
                 Uint16 d = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
-                depth_buf[y * f->sw + x] = d;
+                /* Only write if layer has a depth source, or depth is non-zero.
+                 * For layers without depth_pixels, depth_buf was pre-filled with
+                 * 65535; don't overwrite that with 0 from empty G/B channels. */
+                if (ud->depth_pixels || d != 0)
+                    depth_buf[y * f->sw + x] = d;
             }
         }
     }
