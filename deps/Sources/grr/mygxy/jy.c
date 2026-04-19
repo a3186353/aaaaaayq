@@ -264,11 +264,11 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             }
             else if (ud->has_pixel_depth)
             {
-                /* TCP format: G/B channels carry real depth data */
+                /* G/B channels carry per-pixel depth data (both TCP and SPR formats).
+                 * Python view.py always reads G/B as depth for all layer types. */
                 depth_hi = (ibpp >= 2) ? ud->index_pixels[idx_off + 1] : 0; /* G */
                 depth_lo = (ibpp >= 3) ? ud->index_pixels[idx_off + 2] : 0; /* B */
             }
-            /* else: SPR format (has_pixel_depth==0), G/B are palette copies, keep depth=0 */
 
             /* Alpha pixel */
             Uint8 alpha = 255;
@@ -836,10 +836,13 @@ static int JY_Composite(lua_State* L)
         if (frame_id >= layer_ud->frame_count)
             continue;
 
-        /* Try to get from cache first */
+        /* Try to get from cache first.
+         * IMPORTANT: We must duplicate the surface/depth BEFORE releasing the
+         * mutex, because worker threads can evict (and free) cache entries at
+         * any time.  Without duplication we'd have a use-after-free race that
+         * manifests as random flickering / layer-order glitches. */
         SDL_Surface* layer_sf = NULL;
         Uint16* layer_depth = NULL;
-        int from_cache = 0;
 
         if (layer_ud->cache && layer_ud->queue_mutex)
         {
@@ -847,33 +850,38 @@ static int JY_Composite(lua_State* L)
             JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
             if (hit && hit->surface)
             {
-                layer_sf = hit->surface;
-                layer_depth = hit->depth;
-                from_cache = 1;
+                layer_sf = SDL_DuplicateSurface(hit->surface);
+                if (hit->depth && hit->surface->w > 0 && hit->surface->h > 0)
+                {
+                    Uint32 dpx = (Uint32)(hit->surface->w * hit->surface->h);
+                    layer_depth = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
+                    if (layer_depth)
+                        SDL_memcpy(layer_depth, hit->depth, dpx * sizeof(Uint16));
+                }
             }
             SDL_UnlockMutex(layer_ud->queue_mutex);
         }
 
         /* Cache miss → decode */
-        Uint16* alloc_depth = NULL;
         if (!layer_sf)
         {
-            layer_sf = JY_DecodeFrame(layer_ud, frame_id, &alloc_depth);
+            Uint16* decode_depth = NULL;
+            layer_sf = JY_DecodeFrame(layer_ud, frame_id, &decode_depth);
             if (!layer_sf)
                 continue;
-            layer_depth = alloc_depth;
+            layer_depth = decode_depth;
 
-            /* Insert into cache for future use */
+            /* Insert a copy into cache for future use */
             if (layer_ud->cache && layer_ud->queue_mutex)
             {
                 SDL_Surface* cc = SDL_DuplicateSurface(layer_sf);
                 Uint16* dc = NULL;
-                if (alloc_depth && layer_sf->w > 0 && layer_sf->h > 0)
+                if (decode_depth && layer_sf->w > 0 && layer_sf->h > 0)
                 {
                     Uint32 dpx = (Uint32)(layer_sf->w * layer_sf->h);
                     dc = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
                     if (dc)
-                        SDL_memcpy(dc, alloc_depth, dpx * sizeof(Uint16));
+                        SDL_memcpy(dc, decode_depth, dpx * sizeof(Uint16));
                 }
                 if (cc)
                 {
@@ -978,13 +986,11 @@ static int JY_Composite(lua_State* L)
         if (SDL_MUSTLOCK(layer_sf))
             SDL_UnlockSurface(layer_sf);
 
-        /* Free if we decoded (not from cache) */
-        if (!from_cache)
-        {
-            SDL_FreeSurface(layer_sf);
-            if (alloc_depth)
-                SDL_free(alloc_depth);
-        }
+        /* Always free: we always own layer_sf/layer_depth (either decoded
+         * fresh or duplicated from cache). */
+        SDL_FreeSurface(layer_sf);
+        if (layer_depth)
+            SDL_free(layer_depth);
     }
 
     if (SDL_MUSTLOCK(result))
@@ -1392,7 +1398,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     }
     JY_CalcPalMod(ud);
     ud->pal_version = 0;
-    ud->has_pixel_depth = 0; /* SPR format: G/B channels are NOT depth */
+    ud->has_pixel_depth = 1; /* SPR embedded PNGs: G/B channels carry depth (matching Python) */
 
     /* ─── Build frames (map into virtual atlas) ─── */
     ud->group = dir_cnt;
