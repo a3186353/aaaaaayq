@@ -76,10 +76,17 @@ static int SDLCALL WPK_physfs_close(SDL_RWops *context) {
 }
 static SDL_RWops* WPK_SDL_RWFromFile(const char* path, const char* mode) {
     if (PHYSFS_isInit() && !SDL_strchr(path, ':') && path[0] != '/') {
+        /* PhysFS rejects paths starting with "./" as "insecure".
+         * Strip all leading "./" or ".\\" segments before passing to PhysFS. */
+        const char* ppath = path;
+        while (ppath[0] == '.' && (ppath[1] == '/' || ppath[1] == '\\'))
+            ppath += 2;
         PHYSFS_File *handle = NULL;
-        if (SDL_strchr(mode, 'w')) handle = PHYSFS_openWrite(path);
-        else if (SDL_strchr(mode, 'a')) handle = PHYSFS_openAppend(path);
-        else handle = PHYSFS_openRead(path);
+        if (ppath[0] != '\0') {
+            if (SDL_strchr(mode, 'w')) handle = PHYSFS_openWrite(ppath);
+            else if (SDL_strchr(mode, 'a')) handle = PHYSFS_openAppend(ppath);
+            else handle = PHYSFS_openRead(ppath);
+        }
         if (handle) {
             SDL_RWops *rwops = SDL_AllocRW();
             if (rwops) {
@@ -91,7 +98,7 @@ static SDL_RWops* WPK_SDL_RWFromFile(const char* path, const char* mode) {
             }
             PHYSFS_close(handle);
         }
-        else
+        else if (ppath[0] != '\0')
         {
             WPK_LogOpenFailure("physfs", path, PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
         }
