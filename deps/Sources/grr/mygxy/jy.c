@@ -928,7 +928,7 @@ static int JY_Composite(lua_State* L)
                 Sint32 effective_d = (Sint32)d + z_offset;
 
                 Sint32* zp = &zbuf[dy * canvas_w + dx];
-                if (effective_d > *zp)
+                if (effective_d >= *zp)
                 {
                     *zp = effective_d;
 
@@ -1218,22 +1218,35 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         if (ofs >= (Uint32)len || blen == 0 || ofs + blen > (Uint32)len)
             continue;
 
-        /* Search for PNG signature (matching view.py) */
+        /* Search for PNG signature (89 50 4E 47) or WebP/RIFF signature (52 49 46 46) */
         const Uint8* raw = data + ofs;
-        const Uint8* png_start = NULL;
+        const Uint8* img_start = NULL;
+        Uint32 img_blen = blen;
         for (Uint32 j = 0; j + 4 <= blen; j++)
         {
             if (raw[j] == 0x89 && raw[j+1] == 0x50 && raw[j+2] == 0x4E && raw[j+3] == 0x47)
             {
-                png_start = raw + j;
-                blen -= j;
+                /* PNG signature found */
+                img_start = raw + j;
+                img_blen = blen - j;
                 break;
             }
+            if (raw[j] == 0x52 && raw[j+1] == 0x49 && raw[j+2] == 0x46 && raw[j+3] == 0x46)
+            {
+                /* RIFF (WebP) signature found — verify WEBP tag at offset +8 */
+                if (j + 12 <= blen &&
+                    raw[j+8] == 0x57 && raw[j+9] == 0x45 && raw[j+10] == 0x42 && raw[j+11] == 0x50)
+                {
+                    img_start = raw + j;
+                    img_blen = blen - j;
+                    break;
+                }
+            }
         }
-        if (!png_start)
+        if (!img_start)
             continue;
 
-        SDL_RWops* rw = SDL_RWFromMem((void*)png_start, (int)blen);
+        SDL_RWops* rw = SDL_RWFromMem((void*)img_start, (int)img_blen);
         if (rw)
         {
             png_surfaces[i] = IMG_Load_RW(rw, 1);
