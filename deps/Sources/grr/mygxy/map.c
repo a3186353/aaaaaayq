@@ -2984,6 +2984,7 @@ static int LUA_GetZBoostAt(lua_State* L)
 
     lua_pushinteger(L, max_z);
     return 1;
+#endif /* MAP_DISABLE_ZBOOST_LZO */
 }
 
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
