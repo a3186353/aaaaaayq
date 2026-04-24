@@ -2912,17 +2912,25 @@ static int LUA_GetZBoostAt(lua_State* L)
         if (cx + radius < gm->rect.x || cx - radius >= gm->rect.x + gm->rect.w) continue;
         if (cy + radius < gm->rect.y || cy - radius >= gm->rect.y + gm->rect.h) continue;
 
-        /* 懒加载 LZO 解压 2bpp alpha 数据 */
+        /* 懒加载 LZO 解压 2bpp alpha 数据
+         * ★ 修复堆损坏（STATUS_HEAP_CORRUPTION 0xC0000374）：
+         *   _lzodecompress 在 daee34d 之后是无边界检查版本，若压缩流实际为
+         *   4bpp/8bpp 旧格式但我们按 2bpp 分配缓冲，会越界写穿堆元数据。
+         *   修法：缓冲多分配 8 倍 + 128B pad，覆盖最宽的 8bpp 格式；
+         *   解压后只接受返回值 == dec_size（2bpp 预期）的结果。 */
         if (!gm->dec_cache) {
             if (gm->file_offset + gm->data_size > ud->filebuf_size) continue;
             int align_w = (gm->rect.w + 3) / 4;
             int dec_size = align_w * gm->rect.h;
             if (dec_size <= 0 || dec_size > 16 * 1024 * 1024) continue;
-            Uint8* dec = (Uint8*)MAP_CALLOC(1, dec_size);
+            /* 越界安全裕度：8bpp 最坏情况 × 8 倍 + 128B 哨兵 */
+            size_t alloc_size = (size_t)dec_size * 8 + 128;
+            Uint8* dec = (Uint8*)MAP_CALLOC(1, alloc_size);
             if (!dec) continue;
             int result = _lzodecompress(
                 (Uint8*)ud->filebuf + gm->file_offset,
-                gm->data_size, dec, dec_size);
+                gm->data_size, dec, (int)alloc_size);
+            /* 只接受 2bpp 标准输出长度，其它一律丢弃避免产生错误的命中判定 */
             if (result != dec_size) {
                 MAP_FREE(dec);
                 continue;
