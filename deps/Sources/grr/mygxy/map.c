@@ -2881,7 +2881,6 @@ static int LUA_GetBrigFactorSmooth(lua_State* L)
         factor = (lua_Number)f;
     }
     SDL_UnlockMutex(ud->mutex);
-
     lua_pushnumber(L, factor);
     return 1;
 }
@@ -2889,13 +2888,29 @@ static int LUA_GetBrigFactorSmooth(lua_State* L)
 /* ── GetZBoostAt(x, y) ─── 移植自 Godot 版 map_reader.cpp ─────────────
  * 检测角色脚底坐标是否处于遮罩排序区域内（2bpp flag=1/2），
  * 若命中则返回遮罩底边对应的排序 Z 值，用于将角色排到遮罩后方。
- * 未命中返回 -1。 */
+ * 未命中返回 -1。
+ *
+ * ★ 临时熔断（MAP_DISABLE_ZBOOST_LZO=1 默认开）：直接返回 -1，不触发 LZO 解压。
+ *   原因：_lzodecompress 是 daee34d 之后无边界检查版本（所有 LZO_CHECK_* 宏移除），
+ *   对于新版 1580.map 等 WEBP 格式的全局遮罩，LZO 实际输出长度远超 2bpp 公式
+ *   (w+3)/4*h 的预期，即使给 dec 缓冲加 8× + 128B 安全裕度也会越界写穿堆元数据，
+ *   在下一次 malloc/free 时触发 ntdll STATUS_HEAP_CORRUPTION 0xC0000374 闪退。
+ *   待 _lzodecompress 恢复边界检查版本（或确认 1580 全局遮罩正确解压格式）后
+ *   将此宏改 0 恢复启用。 */
+#ifndef MAP_DISABLE_ZBOOST_LZO
+#define MAP_DISABLE_ZBOOST_LZO 1
+#endif
 static int LUA_GetZBoostAt(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
     int cx = (int)luaL_checkinteger(L, 2);
     int cy = (int)luaL_checkinteger(L, 3);
 
+#if MAP_DISABLE_ZBOOST_LZO
+    (void)ud; (void)cx; (void)cy;
+    lua_pushinteger(L, -1);
+    return 1;
+#else
     if (!ud->gmasks || ud->gmask_count == 0 || !ud->filebuf) {
         lua_pushinteger(L, -1);
         return 1;
