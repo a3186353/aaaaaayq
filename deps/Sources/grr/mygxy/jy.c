@@ -758,8 +758,8 @@ static int JY_Prefetch(lua_State* L)
  * ═══════════════════════════════════════════ */
 static int JY_Composite(lua_State* L)
 {
-    /* arg 1: self (jy ud — used as anchor, not strictly required) */
-    JY_Check(L, 1);
+    /* arg 1: self (jy ud — used as anchor + zbuf_cached 宿主) */
+    JY_UserData* ud = JY_Check(L, 1);
     int canvas_w = (int)luaL_checkinteger(L, 2);
     int canvas_h = (int)luaL_checkinteger(L, 3);
     luaL_checktype(L, 4, LUA_TTABLE);
