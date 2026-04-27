@@ -22,7 +22,8 @@
  *   - 单个 JY_UserData 的 key = pid|cdn_eid|act|dir，仅承载单动作单方向
  *   - 实际帧数：stand 8〜walk 12〜attack 16〜cast 12〜die 24，最大 24 帧
  *   - 32 帧提供 ~33% 余量，足够覆盖全部常规动作重复播放不会重解码
- *   - 内存收益：单 jy_obj 从 128×345KB≈44MB 降为 32×345KB≈11MB（−4倍）
+ *   - R8 优化后帧大小：~160KB/帧（200×200 idx+alpha+depth），32 帧约 5MB/jy_obj
+ *     (R8 之前 SDL_Surface ARGB+depth 约 240KB/帧 → R8 约省 33%)
  *   - 代价：跨 32+ 帧的滚动场景（霓裳宝阁拖动预览）需重解码，单帧 ~1ms 肉眼无感
  *   - cache_cap 字段仍保留运行时可调，宏仅为默认初始值 */
 #define JY_CACHE_CAP_DEFAULT 32
