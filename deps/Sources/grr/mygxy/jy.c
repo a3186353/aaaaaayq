@@ -32,6 +32,7 @@ static int JY_SetPP(lua_State* L);
 static int JY_SetPalette(lua_State* L);
 static int JY_Prefetch(lua_State* L);
 static int JY_LUA_CacheClear(lua_State* L);
+static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_GC(lua_State* L);
 
@@ -49,6 +50,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"SetPP",       JY_SetPP},
     {"Prefetch",    JY_Prefetch},
     {"CacheClear",  JY_LUA_CacheClear},
+    {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
     {NULL, NULL},
 };
@@ -765,6 +767,123 @@ static int JY_LUA_CacheClear(lua_State* L)
     if (ud)
         JY_CacheClear(ud);
     return 0;
+}
+
+/* ══════════════════════════════════════════
+ *  Lua API: SetCacheCap(cap)
+ *  ★ 动态调整帧缓存容量，供 Lua 层按场景优化内存：
+ *     - 大世界/战斗：默认 32 帧足够
+ *     - 霓裳宝阁拖动预览：可临时调高到 64~128 减少重解码
+ *     - 内存压力微高：可调低到 16 进一步压缩
+ *  边界：1 ≤ cap ≤ 256（其它越界值被限位到此区间）
+ *  线程安全：worker 启动后需加锁，避免解码线程访问被 realloc 后的旧指针
+ *  返回值：boolean（true=调整成功，false=参数无效 / realloc 失败）
+ * ══════════════════════════════════════════ */
+static int JY_LUA_SetCacheCap(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    if (!ud || !ud->cache)
+    {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* 参数边界保护：1 ≤ cap ≤ 256 */
+    int arg = (int)luaL_checkinteger(L, 2);
+    if (arg < 1) arg = 1;
+    if (arg > 256) arg = 256;
+    Uint32 new_cap = (Uint32)arg;
+
+    if (new_cap == ud->cache_cap)
+    {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    /* worker 启动时加锁防止并发访问被 realloc 后的旧指针 */
+    if (ud->queue_mutex) SDL_LockMutex(ud->queue_mutex);
+
+    int ok = 1;
+
+    if (new_cap < ud->cache_cap)
+    {
+        /* ── 缩容：按 LRU 淘汰 → 压缩 → realloc ── */
+
+        /* 1. 统计存活条目数 */
+        Uint32 alive = 0;
+        for (Uint32 i = 0; i < ud->cache_cap; i++)
+            if (ud->cache[i].surface) alive++;
+
+        /* 2. 超出 new_cap 部分按 lru_tick 升序逐个释放 */
+        while (alive > new_cap)
+        {
+            Uint32 victim = 0;
+            Uint32 min_tick = 0xFFFFFFFFu;
+            int found = 0;
+            for (Uint32 i = 0; i < ud->cache_cap; i++)
+            {
+                if (ud->cache[i].surface && ud->cache[i].lru_tick < min_tick)
+                {
+                    min_tick = ud->cache[i].lru_tick;
+                    victim = i;
+                    found = 1;
+                }
+            }
+            if (!found) break;
+            JY_CacheEntry* e = &ud->cache[victim];
+            SDL_FreeSurface(e->surface);
+            e->surface = NULL;
+            if (e->depth)
+            {
+                SDL_free(e->depth);
+                e->depth = NULL;
+            }
+            alive--;
+        }
+
+        /* 3. 压缩：将存活条目搬到数组前 new_cap 个槽位 */
+        Uint32 dst = 0;
+        for (Uint32 i = 0; i < ud->cache_cap && dst < new_cap; i++)
+        {
+            if (ud->cache[i].surface)
+            {
+                if (i != dst)
+                {
+                    ud->cache[dst] = ud->cache[i];
+                    SDL_memset(&ud->cache[i], 0, sizeof(JY_CacheEntry));
+                }
+                dst++;
+            }
+        }
+
+        /* 4. realloc 缩容 */
+        JY_CacheEntry* nc = (JY_CacheEntry*)SDL_realloc(ud->cache, new_cap * sizeof(JY_CacheEntry));
+        if (nc)
+        {
+            ud->cache = nc;
+            ud->cache_cap = new_cap;
+        }
+        else
+            ok = 0;  /* realloc 失败，保留原 cache 不变 */
+    }
+    else
+    {
+        /* ── 扩容：realloc + 清零新增槽位 ── */
+        JY_CacheEntry* nc = (JY_CacheEntry*)SDL_realloc(ud->cache, new_cap * sizeof(JY_CacheEntry));
+        if (nc)
+        {
+            SDL_memset(&nc[ud->cache_cap], 0, (new_cap - ud->cache_cap) * sizeof(JY_CacheEntry));
+            ud->cache = nc;
+            ud->cache_cap = new_cap;
+        }
+        else
+            ok = 0;
+    }
+
+    if (ud->queue_mutex) SDL_UnlockMutex(ud->queue_mutex);
+
+    lua_pushboolean(L, ok);
+    return 1;
 }
 
 /* ═══════════════════════════════════════════
