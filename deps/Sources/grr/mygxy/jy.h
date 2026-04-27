@@ -94,6 +94,11 @@ typedef struct
     Uint16 width, height;
     Sint16 global_x, global_y;
 
+    /* ★ R9 紧致画布：单 act+dir 内所有 frame 的实际裁剪区最大值
+     *   由 Lua 层 合成动画源.新建 用于计算 wrapper 画布尺寸（替代 width/height）
+     *   收益：相比 spr 全包围盒减少 ~30% 画布像素 → zbuf init / result surface 更轻量 */
+    Uint16 max_frame_w, max_frame_h;
+
     /* LRU 帧缓存 */
     JY_CacheEntry* cache;
     Uint32 cache_cap;          /* 默认 JY_CACHE_CAP_DEFAULT (32)，运行时可按需调整 */

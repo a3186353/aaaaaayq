@@ -1755,6 +1755,9 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
             jf->sy = y_offsets[img_idx] + (Uint32)sf_info->pos_y;
             jf->sw = (Uint32)sf_info->w;
             jf->sh = (Uint32)sf_info->h;
+            /* R9：累加单 act+dir 内所有帧的最大裁剪区，供 Lua 层紧致画布使用 */
+            if (jf->sw > ud->max_frame_w) ud->max_frame_w = (Uint16)jf->sw;
+            if (jf->sh > ud->max_frame_h) ud->max_frame_h = (Uint16)jf->sh;
         }
         jf->key_x = (Sint32)sf_info->key_x;
         jf->key_y = (Sint32)sf_info->key_y;
@@ -1793,8 +1796,15 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     lua_pushinteger(L, (lua_Integer)ud->frame_count);
     lua_setfield(L, -2, "total");
 
-    /* DLL 版本标记：3 = R8 LRU 优化（路线 A，染色零失效） */
-    lua_pushinteger(L, 3);
+    /* R9 紧致画布：单 act+dir 内所有帧的实际裁剪区最大值
+     *   Lua 层 合成动画源.新建 用此替代 width/height 计算画布尺寸 */
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_w);
+    lua_setfield(L, -2, "max_frame_w");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_h);
+    lua_setfield(L, -2, "max_frame_h");
+
+    /* DLL 版本标记：4 = R8 LRU + R9 紧致画布（max_frame_w/h 暴露） */
+    lua_pushinteger(L, 4);
     lua_setfield(L, -2, "depth_ver");
 
     return 2;
@@ -2057,6 +2067,10 @@ static int JY_NEW(lua_State* L)
             f->sh = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
 
+            /* R9：累加单 act+dir 内所有帧的最大裁剪区，供 Lua 层紧致画布使用 */
+            if (f->sw > ud->max_frame_w) ud->max_frame_w = (Uint16)f->sw;
+            if (f->sh > ud->max_frame_h) ud->max_frame_h = (Uint16)f->sh;
+
             lua_getfield(L, -1, "key_x");
             f->key_x = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
@@ -2102,9 +2116,16 @@ static int JY_NEW(lua_State* L)
     lua_pushinteger(L, (lua_Integer)ud->frame_count);
     lua_setfield(L, -2, "total");
 
-    /* DLL 版本标记：3 = R8 LRU 优化（路线 A，染色零失效）
-     * 客户端可通过 jy_obj.depth_ver == 3 判断新 DLL 是否落地 */
-    lua_pushinteger(L, 3);
+    /* R9 紧致画布：单 act+dir 内所有帧的实际裁剪区最大值
+     *   Lua 层 合成动画源.新建 用此替代 width/height 计算画布尺寸 */
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_w);
+    lua_setfield(L, -2, "max_frame_w");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_h);
+    lua_setfield(L, -2, "max_frame_h");
+
+    /* DLL 版本标记：4 = R8 LRU + R9 紧致画布（max_frame_w/h 暴露）
+     * 客户端可通过 jy_obj.depth_ver >= 4 判断新 DLL 是否落地 */
+    lua_pushinteger(L, 4);
     lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
