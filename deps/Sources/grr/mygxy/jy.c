@@ -31,6 +31,7 @@ static int JY_GetPal(lua_State* L);
 static int JY_SetPP(lua_State* L);
 static int JY_SetPalette(lua_State* L);
 static int JY_Prefetch(lua_State* L);
+static int JY_LUA_CacheClear(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_GC(lua_State* L);
 
@@ -47,6 +48,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"get_palette", JY_GetPal},
     {"SetPP",       JY_SetPP},
     {"Prefetch",    JY_Prefetch},
+    {"CacheClear",  JY_LUA_CacheClear},
     {"Composite",   JY_Composite},
     {NULL, NULL},
 };
@@ -747,6 +749,21 @@ static int JY_Prefetch(lua_State* L)
     SDL_CondBroadcast(ud->queue_cond);
     SDL_UnlockMutex(ud->queue_mutex);
 
+    return 0;
+}
+
+/* ═══════════════════════════════════════════
+ *  Lua API: CacheClear() — manually free LRU SDL_Surface cache
+ *  ★ 用于场景切换 / 战斗结束时主动释放 C 层 SDL_Surface 缓存（每个 jy 最多 ~44MB），
+ *     不需等待 Lua GC 触发 __gc → JY_Reset。Lua 层 jy:清理缓存() 调用。
+ *     调用后 cache 数组保留（容量不变），仅 surface/depth 内存释放，
+ *     下次访问时按需重新 GetFrame 解码并填充。
+ * ═══════════════════════════════════════════ */
+static int JY_LUA_CacheClear(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    if (ud)
+        JY_CacheClear(ud);
     return 0;
 }
 
