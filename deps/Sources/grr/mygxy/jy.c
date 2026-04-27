@@ -775,14 +775,22 @@ static int JY_Composite(lua_State* L)
         return luaL_error(L, "JY_Composite: failed to create result surface");
     SDL_FillRect(result, NULL, 0);
 
-    /* Allocate z-buffer (Sint32 per pixel, init to INT32_MIN — matching Python) */
+    /* M3: 复用 zbuf_cached，避免每帧 malloc/free + 全量初始化抖动
+     *      首次 / 画布变大时按需扩容；初始化用 SDL_memset(0xFF) 等价 INT32_MIN
+     *      （0xFFFFFFFF = -1，与 INT32_MIN 不同——保留逐像素赋值以保证语义一致） */
     Uint32 canvas_px = (Uint32)(canvas_w * canvas_h);
-    Sint32* zbuf = (Sint32*)SDL_malloc(canvas_px * sizeof(Sint32));
-    if (!zbuf)
+    if (ud->zbuf_cached_size < canvas_px)
     {
-        SDL_FreeSurface(result);
-        return luaL_error(L, "JY_Composite: failed to alloc z-buffer");
+        Sint32* nz = (Sint32*)SDL_realloc(ud->zbuf_cached, canvas_px * sizeof(Sint32));
+        if (!nz)
+        {
+            SDL_FreeSurface(result);
+            return luaL_error(L, "JY_Composite: failed to alloc z-buffer");
+        }
+        ud->zbuf_cached = nz;
+        ud->zbuf_cached_size = canvas_px;
     }
+    Sint32* zbuf = ud->zbuf_cached;
     for (Uint32 zi = 0; zi < canvas_px; zi++) zbuf[zi] = (-2147483647 - 1); /* INT32_MIN */
 
     if (SDL_MUSTLOCK(result))
@@ -828,30 +836,46 @@ static int JY_Composite(lua_State* L)
         if (frame_id >= layer_ud->frame_count)
             continue;
 
-        /* Try to get from cache first.
-         * IMPORTANT: We must duplicate the surface/depth BEFORE releasing the
-         * mutex, because worker threads can evict (and free) cache entries at
-         * any time.  Without duplication we'd have a use-after-free race that
-         * manifests as random flickering / layer-order glitches. */
+        /* H6: 双路径 cache hit
+         *  Worker 已启动：保留 SDL_DuplicateSurface 防 UAF（worker 可能并发淘汰）
+         *  Worker 未启动：直接引用 cache 内 surface/depth，跳过 ~3MB/帧 拷贝
+         *                 （H1 关闭主动启动后，客户端不调 Prefetch 时常驻此分支） */
         SDL_Surface* layer_sf = NULL;
         Uint16* layer_depth = NULL;
+        int layer_sf_owned = 0;     /* 是否拥有所有权（结尾负责 free） */
+        int layer_depth_owned = 0;
 
         if (layer_ud->cache && layer_ud->queue_mutex)
         {
+            /* Worker 启动路径：保持原行为，复制后释放锁 */
             SDL_LockMutex(layer_ud->queue_mutex);
             JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
             if (hit && hit->surface)
             {
                 layer_sf = SDL_DuplicateSurface(hit->surface);
+                layer_sf_owned = 1;
                 if (hit->depth && hit->surface->w > 0 && hit->surface->h > 0)
                 {
                     Uint32 dpx = (Uint32)(hit->surface->w * hit->surface->h);
                     layer_depth = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
                     if (layer_depth)
+                    {
                         SDL_memcpy(layer_depth, hit->depth, dpx * sizeof(Uint16));
+                        layer_depth_owned = 1;
+                    }
                 }
             }
             SDL_UnlockMutex(layer_ud->queue_mutex);
+        }
+        else if (layer_ud->cache)
+        {
+            /* ★ H6 快路径：worker 未启动 → 无并发淘汰风险 → 零拷贝直接引用 */
+            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
+            if (hit && hit->surface)
+            {
+                layer_sf = hit->surface;       /* borrow，不拥有所有权 */
+                layer_depth = hit->depth;
+            }
         }
 
         /* Cache miss → decode */
@@ -862,10 +886,13 @@ static int JY_Composite(lua_State* L)
             if (!layer_sf)
                 continue;
             layer_depth = decode_depth;
+            layer_sf_owned = 1;
+            layer_depth_owned = (decode_depth != NULL) ? 1 : 0;
 
-            /* Insert a copy into cache for future use */
+            /* Insert into cache for future use */
             if (layer_ud->cache && layer_ud->queue_mutex)
             {
+                /* Worker 启动路径：复制后插入，原对象保留作本帧使用 */
                 SDL_Surface* cc = SDL_DuplicateSurface(layer_sf);
                 Uint16* dc = NULL;
                 if (decode_depth && layer_sf->w > 0 && layer_sf->h > 0)
@@ -883,6 +910,14 @@ static int JY_Composite(lua_State* L)
                 }
                 else if (dc)
                     SDL_free(dc);
+            }
+            else if (layer_ud->cache)
+            {
+                /* ★ H6: worker 未启动 → 直接转移所有权到 cache（节省一次拷贝）
+                 *      cache insert 不会淘汰本次插入的新条目，本帧引用安全 */
+                JY_CacheInsert(layer_ud, frame_id, layer_sf, layer_depth);
+                layer_sf_owned = 0;
+                layer_depth_owned = 0;
             }
         }
 
@@ -975,17 +1010,17 @@ static int JY_Composite(lua_State* L)
             SDL_UnlockSurface(layer_sf);
 
 
-        /* Always free: we always own layer_sf/layer_depth (either decoded
-         * fresh or duplicated from cache). */
-        SDL_FreeSurface(layer_sf);
-        if (layer_depth)
+        /* H6: 仅在拥有所有权时释放（borrow 路径不释放，由 cache 持有） */
+        if (layer_sf_owned)
+            SDL_FreeSurface(layer_sf);
+        if (layer_depth_owned && layer_depth)
             SDL_free(layer_depth);
     }
 
     if (SDL_MUSTLOCK(result))
         SDL_UnlockSurface(result);
 
-    SDL_free(zbuf);
+    /* M3: zbuf 复用，不释放（JY_Reset 内统一释放） */
     SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
 
     /* Push result as SDL_Surface userdata */
@@ -1033,6 +1068,13 @@ static void JY_Reset(JY_UserData* ud)
     {
         SDL_free(ud->depth_frames);
         ud->depth_frames = NULL;
+    }
+    /* M3: 释放 zbuf 复用缓冲 */
+    if (ud->zbuf_cached)
+    {
+        SDL_free(ud->zbuf_cached);
+        ud->zbuf_cached = NULL;
+        ud->zbuf_cached_size = 0;
     }
 }
 
@@ -1453,8 +1495,9 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 
-    /* ─── Start worker threads ─── */
-    JY_StartWorkers(ud);
+    /* ★ H1: 不主动启动 worker，仅在 :Prefetch 调用时延迟启动。
+     *      客户端不调用时零内核线程/锁对象，避免最多 512 个闲置线程。
+     *      JY_StartWorkers 本身仍保留并在 Prefetch 内调用。 */
 
     /* ─── Build info return table (tcp compatible) ─── */
     lua_createtable(L, 0, 8);
@@ -1752,8 +1795,7 @@ static int JY_NEW(lua_State* L)
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 
-    /* ─── Start worker threads ─── */
-    JY_StartWorkers(ud);
+    /* ★ H1: 不主动启动 worker（同 SPR 路径，参见上方注释） */
 
     /* ─── Build info return table (tcp compatible) ─── */
     lua_createtable(L, 0, 8);

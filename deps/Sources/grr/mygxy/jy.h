@@ -80,7 +80,7 @@ typedef struct
     Uint32 cache_cap;          /* 默认 128 */
     Uint32 cache_tick;
 
-    /* 工作线程 */
+    /* 工作线程（仅在 :Prefetch 调用时延迟启动；客户端不调用时全程 NULL） */
     SDL_Thread*  workers[2];
     SDL_mutex*   queue_mutex;
     SDL_cond*    queue_cond;
@@ -88,6 +88,11 @@ typedef struct
     Uint32 task_count;
     Uint32 task_cap;
     volatile int shutdown;
+
+    /* M3: Composite z-buffer 复用（避免每帧 230KB malloc/free + memset 抖动）
+     * 按需扩容；JY_Reset 时统一释放。 */
+    Sint32* zbuf_cached;
+    Uint32  zbuf_cached_size;  /* zbuf_cached 元素数（pixels），非字节数 */
 } JY_UserData;
 
 /* 公共入口 */
