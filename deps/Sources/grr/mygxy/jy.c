@@ -1508,7 +1508,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     SDL_free(spr_frames);
 
     /* ─── Init cache ─── */
-    ud->cache_cap = 128;
+    ud->cache_cap = JY_CACHE_CAP_DEFAULT;
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 
@@ -1808,7 +1808,7 @@ static int JY_NEW(lua_State* L)
     }
 
     /* ─── Init cache ─── */
-    ud->cache_cap = 128;
+    ud->cache_cap = JY_CACHE_CAP_DEFAULT;
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 

@@ -17,6 +17,16 @@
 
 #define JY_MT "xyq_jy"
 
+/* ─── LRU 缓存容量默认值 ───
+ * ★ 从 128 调低到 32：
+ *   - 单个 JY_UserData 的 key = pid|cdn_eid|act|dir，仅承载单动作单方向
+ *   - 实际帧数：stand 8〜walk 12〜attack 16〜cast 12〜die 24，最大 24 帧
+ *   - 32 帧提供 ~33% 余量，足够覆盖全部常规动作重复播放不会重解码
+ *   - 内存收益：单 jy_obj 从 128×345KB≈44MB 降为 32×345KB≈11MB（−4倍）
+ *   - 代价：跨 32+ 帧的滚动场景（霓裳宝阁拖动预览）需重解码，单帧 ~1ms 肉眼无感
+ *   - cache_cap 字段仍保留运行时可调，宏仅为默认初始值 */
+#define JY_CACHE_CAP_DEFAULT 32
+
 /* ─── 单帧在 Atlas 中的区域 ─── */
 typedef struct
 {
@@ -77,7 +87,7 @@ typedef struct
 
     /* LRU 帧缓存 */
     JY_CacheEntry* cache;
-    Uint32 cache_cap;          /* 默认 128 */
+    Uint32 cache_cap;          /* 默认 JY_CACHE_CAP_DEFAULT (32)，运行时可按需调整 */
     Uint32 cache_tick;
 
     /* 工作线程（仅在 :Prefetch 调用时延迟启动；客户端不调用时全程 NULL） */
