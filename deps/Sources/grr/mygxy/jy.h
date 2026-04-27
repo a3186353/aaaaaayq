@@ -35,20 +35,28 @@ typedef struct
 } JY_FrameInfo;
 
 /* ─── 帧缓存条目 ─── */
+/* ★ R8 优化（路线 A）：cache 从 SDL_Surface(ARGB8888 32bpp) 改为 R8 三 buffer
+ *   - idx_pixels / alpha_pixels：调色板索引 + alpha 蒙版（各 1 字节/像素）
+ *   - depth：保持 16-bit
+ *   - 不存调色后的 ARGB → 调色板版本变化时缓存仍然有效（零失效）
+ *   - 视觉一致性：GetFrame 返回时按当前 pal[] 实时反查生成 ARGB8888 surface
+ *   - 内存收益：单帧 4 字节 → 2 字节（不含 depth），约 -50% */
 typedef struct
 {
-    SDL_Surface* surface;      /* 已解码 ARGB8888，NULL 表示空槽 */
-    Uint16*     depth;         /* 16-bit 深度值 (w*h)，NULL 表示无深度 */
-    Uint32 frame_id;
-    Uint32 pal_ver;            /* 解码时的调色板版本 */
-    Uint32 lru_tick;
+    Uint8*  idx_pixels;        /* R8 调色板索引 (sw*sh 字节)，NULL 表示空槽 */
+    Uint8*  alpha_pixels;      /* R8 alpha 蒙版 (sw*sh 字节)，可为 NULL（视为全 255） */
+    Uint16* depth;             /* 16-bit 深度值 (w*h)，NULL 表示无深度 */
+    Uint16  w, h;              /* 帧裁剪后尺寸（反查用） */
+    Uint32  frame_id;
+    /* pal_ver 字段移除：cache 内容与调色板解耦，染色变化零失效 */
+    Uint32  lru_tick;
 } JY_CacheEntry;
 
 /* ─── 异步任务 ─── */
 typedef struct
 {
     Uint32 frame_id;
-    Uint32 pal_ver;
+    /* pal_ver 字段移除：worker 解码 R8，与调色板版本无关 */
     volatile int done;         /* 0=pending, 1=done, -1=canceled */
 } JY_AsyncTask;
 

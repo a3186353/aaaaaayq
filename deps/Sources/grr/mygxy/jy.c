@@ -164,44 +164,61 @@ static void JY_CalcPalMod(JY_UserData* ud)
 }
 
 /* ═══════════════════════════════════════════
- *  Frame decode (pure C, thread‑safe)
- *  out_depth: if non-NULL, receives malloc'd Uint16[w*h] depth buffer
- *             depth = (G << 8) | B  from index pixels, 0 if alpha < 77
- *             (matching view.py depth extraction)
+ *  Frame decode (pure C, thread‑safe) — R8 优化版（路线 A）
+ *
+ *  解码到三 buffer（不应用调色板，与 pal_version 解耦）：
+ *    out_idx     : malloc 的 Uint8[w*h]，每像素 1 字节调色板索引
+ *    out_alpha   : malloc 的 Uint8[w*h]，每像素 1 字节 alpha；可能为 NULL（视为全 255）
+ *    out_depth   : malloc 的 Uint16[w*h] 深度，可能为 NULL（无 depth 信息）
+ *    out_w/out_h : 帧裁剪后尺寸
+ *
+ *  返回 1 = 成功（所有 out 已填充，调用方接管所有权）
+ *       0 = 失败（所有 out_* 被置 NULL）
  * ═══════════════════════════════════════════ */
-static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_depth)
+static int JY_DecodeFrame(
+    JY_UserData* ud, Uint32 id,
+    Uint8** out_idx, Uint8** out_alpha, Uint16** out_depth,
+    Uint16* out_w, Uint16* out_h)
 {
+    /* 安全初始化 out 参数，失败路径统一返回 NULL */
+    if (out_idx)   *out_idx = NULL;
+    if (out_alpha) *out_alpha = NULL;
     if (out_depth) *out_depth = NULL;
+    if (out_w)     *out_w = 0;
+    if (out_h)     *out_h = 0;
 
     if (id >= ud->frame_count)
-        return NULL;
+        return 0;
 
     JY_FrameInfo* f = &ud->frames[id];
     if (f->sw == 0 || f->sh == 0)
-        return NULL;
+        return 0;
 
-    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, (int)f->sw, (int)f->sh, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!sf)
-        return NULL;
-    SDL_FillRect(sf, NULL, 0);
+    Uint32 npx = f->sw * f->sh;
 
-    /* Allocate depth buffer */
-    Uint16* depth_buf = (Uint16*)SDL_calloc(f->sw * f->sh, sizeof(Uint16));
+    /* 分配 R8 idx + R8 alpha + Uint16 depth 三 buffer
+     * 任一分配失败即整体回滚（避免半完成状态污染 cache） */
+    Uint8*  idx_buf   = (Uint8*)SDL_malloc(npx);
+    Uint8*  alpha_buf = (Uint8*)SDL_malloc(npx);
+    Uint16* depth_buf = (Uint16*)SDL_calloc(npx, sizeof(Uint16));
+    if (!idx_buf || !alpha_buf || !depth_buf)
+    {
+        if (idx_buf)   SDL_free(idx_buf);
+        if (alpha_buf) SDL_free(alpha_buf);
+        if (depth_buf) SDL_free(depth_buf);
+        return 0;
+    }
+    /* 透明像素的索引置 0（idx 0 通常是透明色，避免随机数据污染缓存） */
+    SDL_memset(idx_buf, 0, npx);
+    SDL_memset(alpha_buf, 0, npx);
 
-    if (SDL_MUSTLOCK(sf))
-        SDL_LockSurface(sf);
-
-    Uint32* dst = (Uint32*)sf->pixels;
-    Uint32 stride = (Uint32)(sf->pitch / 4);
-    Uint32 aw = ud->atlas_w;
+    Uint32 aw   = ud->atlas_w;
     Uint32 ibpp = ud->index_bpp;
     Uint32 abpp = ud->alpha_bpp;
-    Uint32 pmod = ud->pal_mod;
 
-    /* Pre-compute depth buffer limits for safe access */
-    Uint32 depth_buf_pixels = 0; /* total pixel count in depth_pixels buffer */
-    Uint32 depth_stride = 0;     /* row stride in pixels for depth atlas */
+    /* 预计算 depth atlas 边界 */
+    Uint32 depth_buf_pixels = 0;
+    Uint32 depth_stride = 0;
     if (ud->depth_pixels)
     {
         Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
@@ -209,7 +226,6 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         depth_stride = daw;
         depth_buf_pixels = daw * dah;
     }
-
 
     for (Uint32 y = 0; y < f->sh; y++)
     {
@@ -223,24 +239,19 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
             if (src_x >= aw)
                 continue;
 
-            /* Index pixel → palette index from R channel, depth from G/B */
+            /* Index 像素：R 通道 = 调色板索引，G/B 备用作深度 */
             Uint32 idx_off = (src_y * aw + src_x) * ibpp;
-            Uint8 pal_idx = ud->index_pixels[idx_off]; /* R channel */
+            Uint8 pal_idx = ud->index_pixels[idx_off];
             Uint8 depth_hi = 0, depth_lo = 0;
+
             if (ud->depth_pixels)
             {
                 if (ud->depth_frames && id < ud->depth_frame_count)
                 {
-                    /* Separate depth atlas with independent frame coordinates.
-                     * Map pixel (x, y) in main frame → depth frame via
-                     * nearest-neighbor scaling (matching Python resize NEAREST). */
+                    /* 独立 depth atlas（与主 atlas 不同坐标），用最近邻映射对齐 */
                     JY_FrameInfo* df = &ud->depth_frames[id];
                     if (df->sw > 0 && df->sh > 0)
                     {
-                        /* Nearest-neighbor: map (x,y) in main frame to depth frame.
-                         * PILLOW uses center-pixel mapping: dst_idx + 0.5
-                         * Formula: src_idx = int((dst_idx + 0.5) * src_width / dst_width)
-                         * Equivalent integer math: (dst_idx * 2 + 1) * src_width / (dst_width * 2) */
                         Uint32 dmx = ((x * 2 + 1) * df->sw) / (f->sw * 2);
                         Uint32 dmy = ((y * 2 + 1) * df->sh) / (f->sh * 2);
                         if (dmx < df->sw && dmy < df->sh)
@@ -251,44 +262,88 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
                             if (d_pixel_off < depth_buf_pixels)
                             {
                                 Uint32 d_byte_off = d_pixel_off * ud->depth_bpp;
-                                depth_hi = ud->depth_pixels[d_byte_off + 1]; /* G channel */
-                                depth_lo = ud->depth_pixels[d_byte_off + 2]; /* B channel */
+                                depth_hi = ud->depth_pixels[d_byte_off + 1];
+                                depth_lo = ud->depth_pixels[d_byte_off + 2];
                             }
                         }
                     }
-                    /* else: depth frame has zero size, keep depth = 0 */
                 }
-                /* If depth_frames is missing or id is out of range, 
-                 * depth_hi/depth_lo remain 0, perfectly matching Python's np.zeros_like(). */
             }
-            else
+            else if (ibpp >= 3)
             {
-                /* No separate depth image: extract depth from index pixel G/B channels.
-                 * Original data format: R=palette index, G/B=depth (matching view.py). */
-                if (ibpp >= 3)
-                {
-                    depth_hi = ud->index_pixels[idx_off + 1]; /* G channel */
-                    depth_lo = ud->index_pixels[idx_off + 2]; /* B channel */
-                }
+                /* 无独立 depth：从 index 像素 G/B 通道提取（等价 view.py） */
+                depth_hi = ud->index_pixels[idx_off + 1];
+                depth_lo = ud->index_pixels[idx_off + 2];
             }
 
-            /* Alpha pixel */
+            /* Alpha 像素 */
             Uint8 alpha = 255;
             if (ud->alpha_pixels)
             {
                 Uint32 a_off = (src_y * aw + src_x) * abpp;
-                alpha = ud->alpha_pixels[a_off]; /* first channel */
+                alpha = ud->alpha_pixels[a_off];
             }
 
-            Uint32 color = ud->pal[pal_idx % pmod];
-            dst[y * stride + x] = (color & 0x00FFFFFF) | ((Uint32)alpha << 24);
+            /* 写入三 buffer：idx 不查表，调色延后到 RenderFrameToSurface / Composite */
+            Uint32 dst_off = y * f->sw + x;
+            idx_buf[dst_off]   = pal_idx;
+            alpha_buf[dst_off] = alpha;
+            /* depth：与原逻辑一致，alpha < 77 时 depth = 0 */
+            depth_buf[dst_off] = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
+        }
+    }
 
-            /* Depth: (G << 8) | B — matching Python: depth = 0 when alpha < 77 */
-            if (depth_buf)
-            {
-                Uint16 d = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
-                depth_buf[y * f->sw + x] = d;
-            }
+    *out_idx   = idx_buf;
+    *out_alpha = alpha_buf;
+    *out_depth = depth_buf;
+    *out_w     = (Uint16)f->sw;
+    *out_h     = (Uint16)f->sh;
+    return 1;
+}
+
+/* ═══════════════════════════════════════════
+ *  R8 → ARGB8888 反查渲染（路线 A 核心）
+ *
+ *  把 idx + alpha 双 buffer 按当前 ud->pal[] 反查生成 ARGB8888 surface。
+ *  调用方接管返回 surface 所有权。失败返回 NULL。
+ *
+ *  热路径：每帧 GetFrame 与 Composite cache miss/染色后命中 时调用
+ *  性能：~300×300 帧 ~1ms（含 SDL_CreateRGBSurfaceWithFormat 内部 memset）
+ * ═══════════════════════════════════════════ */
+static SDL_Surface* JY_RenderFrameToSurface(
+    JY_UserData* ud,
+    const Uint8* idx_pixels,
+    const Uint8* alpha_pixels,
+    Uint16 w, Uint16 h)
+{
+    if (!ud || !idx_pixels || w == 0 || h == 0)
+        return NULL;
+
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, (int)w, (int)h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!sf)
+        return NULL;
+
+    if (SDL_MUSTLOCK(sf))
+        SDL_LockSurface(sf);
+
+    Uint32* dst = (Uint32*)sf->pixels;
+    Uint32 stride = (Uint32)(sf->pitch / 4);
+    Uint32 pmod = ud->pal_mod ? ud->pal_mod : 256;
+
+    /* 主循环：每像素 1 次查表 + 1 次按位组合
+     * pmod 在外提，避免循环内重复读 ud 字段 */
+    for (Uint32 y = 0; y < h; y++)
+    {
+        Uint32* row = dst + (size_t)y * stride;
+        const Uint8* irow = idx_pixels + (size_t)y * w;
+        const Uint8* arow = alpha_pixels ? (alpha_pixels + (size_t)y * w) : NULL;
+        for (Uint32 x = 0; x < w; x++)
+        {
+            Uint8 pal_idx = irow[x];
+            Uint8 alpha   = arow ? arow[x] : 255;
+            Uint32 color  = ud->pal[pal_idx % pmod];
+            row[x] = (color & 0x00FFFFFF) | ((Uint32)alpha << 24);
         }
     }
 
@@ -296,26 +351,33 @@ static SDL_Surface* JY_DecodeFrame(JY_UserData* ud, Uint32 id, Uint16** out_dept
         SDL_UnlockSurface(sf);
 
     SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_BLEND);
-
-    if (out_depth)
-        *out_depth = depth_buf;
-    else
-        SDL_free(depth_buf);
-
     return sf;
 }
 
 /* ═══════════════════════════════════════════
- *  LRU cache
+ *  LRU cache（R8 优化版：与 pal_version 解耦）
  * ═══════════════════════════════════════════ */
-static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id, Uint32 pal_ver)
+
+/* 释放单条 cache entry 的 R8 三 buffer（不清 frame_id/lru_tick，留给 Insert 覆盖） */
+static void JY_CacheEntryFree(JY_CacheEntry* e)
+{
+    if (!e) return;
+    if (e->idx_pixels)   { SDL_free(e->idx_pixels);   e->idx_pixels = NULL; }
+    if (e->alpha_pixels) { SDL_free(e->alpha_pixels); e->alpha_pixels = NULL; }
+    if (e->depth)        { SDL_free(e->depth);        e->depth = NULL; }
+    e->w = 0;
+    e->h = 0;
+}
+
+static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id)
 {
     if (!ud->cache)
         return NULL;
     for (Uint32 i = 0; i < ud->cache_cap; i++)
     {
         JY_CacheEntry* e = &ud->cache[i];
-        if (e->surface && e->frame_id == frame_id && e->pal_ver == pal_ver)
+        /* 命中条件：idx_pixels 非空 + frame_id 匹配（不再比 pal_ver） */
+        if (e->idx_pixels && e->frame_id == frame_id)
         {
             e->lru_tick = ++ud->cache_tick;
             return e;
@@ -324,18 +386,22 @@ static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id, Uint32 pa
     return NULL;
 }
 
-/* Cache owns the surface + depth — caller must NOT free after insert */
-static void JY_CacheInsert(JY_UserData* ud, Uint32 frame_id, SDL_Surface* sf, Uint16* depth)
+/* Cache 接管 idx + alpha + depth 三 buffer 所有权 — 调用方不再 free
+ * idx 必须非 NULL；alpha / depth 可为 NULL */
+static void JY_CacheInsert(
+    JY_UserData* ud, Uint32 frame_id,
+    Uint8* idx, Uint8* alpha, Uint16* depth,
+    Uint16 w, Uint16 h)
 {
-    if (!ud->cache || !sf)
+    if (!ud->cache || !idx)
         return;
 
-    /* Find empty slot or LRU victim */
+    /* 找空槽或 LRU 牺牲者 */
     Uint32 victim = 0;
     Uint32 min_tick = 0xFFFFFFFFu;
     for (Uint32 i = 0; i < ud->cache_cap; i++)
     {
-        if (!ud->cache[i].surface)
+        if (!ud->cache[i].idx_pixels)
         {
             victim = i;
             break;
@@ -348,22 +414,15 @@ static void JY_CacheInsert(JY_UserData* ud, Uint32 frame_id, SDL_Surface* sf, Ui
     }
 
     JY_CacheEntry* e = &ud->cache[victim];
-    if (e->surface)
-    {
-        SDL_FreeSurface(e->surface);
-        e->surface = NULL;
-    }
-    if (e->depth)
-    {
-        SDL_free(e->depth);
-        e->depth = NULL;
-    }
+    JY_CacheEntryFree(e);
 
-    e->surface = sf;
-    e->depth = depth;
-    e->frame_id = frame_id;
-    e->pal_ver = ud->pal_version;
-    e->lru_tick = ++ud->cache_tick;
+    e->idx_pixels   = idx;
+    e->alpha_pixels = alpha;
+    e->depth        = depth;
+    e->w            = w;
+    e->h            = h;
+    e->frame_id     = frame_id;
+    e->lru_tick     = ++ud->cache_tick;
 }
 
 static void JY_CacheClear(JY_UserData* ud)
@@ -371,18 +430,7 @@ static void JY_CacheClear(JY_UserData* ud)
     if (!ud->cache)
         return;
     for (Uint32 i = 0; i < ud->cache_cap; i++)
-    {
-        if (ud->cache[i].surface)
-        {
-            SDL_FreeSurface(ud->cache[i].surface);
-            ud->cache[i].surface = NULL;
-        }
-        if (ud->cache[i].depth)
-        {
-            SDL_free(ud->cache[i].depth);
-            ud->cache[i].depth = NULL;
-        }
-    }
+        JY_CacheEntryFree(&ud->cache[i]);
 }
 
 /* ═══════════════════════════════════════════
@@ -424,28 +472,26 @@ static int JY_WorkerFunc(void* data)
         if (!has_task)
             continue;
 
-        /* Skip if already cached */
+        /* 已缓存则跳过（无需 pal_ver 比对） */
         SDL_LockMutex(ud->queue_mutex);
-        JY_CacheEntry* hit = JY_CacheLookup(ud, task.frame_id, task.pal_ver);
+        JY_CacheEntry* hit = JY_CacheLookup(ud, task.frame_id);
         SDL_UnlockMutex(ud->queue_mutex);
 
         if (hit)
             continue;
 
-        /* Decode (with depth) */
+        /* 解码到 R8 三 buffer（与调色板版本无关）*/
+        Uint8 *idx = NULL, *alpha = NULL;
         Uint16* depth = NULL;
-        SDL_Surface* sf = JY_DecodeFrame(ud, task.frame_id, &depth);
-        if (sf)
+        Uint16 w = 0, h = 0;
+        if (JY_DecodeFrame(ud, task.frame_id, &idx, &alpha, &depth, &w, &h))
         {
             SDL_LockMutex(ud->queue_mutex);
-            /* CacheInsert takes ownership of sf + depth */
-            JY_CacheInsert(ud, task.frame_id, sf, depth);
+            /* CacheInsert 接管 idx + alpha + depth 所有权 */
+            JY_CacheInsert(ud, task.frame_id, idx, alpha, depth, w, h);
             SDL_UnlockMutex(ud->queue_mutex);
         }
-        else if (depth)
-        {
-            SDL_free(depth);
-        }
+        /* 解码失败时 JY_DecodeFrame 内部已统一回滚释放，此处无需额外清理 */
     }
     return 0;
 }
@@ -537,53 +583,106 @@ static int JY_GetFrame(lua_State* L)
     Uint32 id = (Uint32)idx;
     JY_FrameInfo* f = &ud->frames[id];
 
-    /* Try cache first — return a duplicate so cache keeps its copy */
+    /* ─── Cache 命中路径：按当前 pal[] 实时反查生成 ARGB8888 surface ───
+     *
+     * R8 优化（路线 A）的核心：
+     * - cache 内只存 idx + alpha + depth，不存 ARGB
+     * - 染色变化（pal_version++）后，cache 仍命中，省一次完整 DecodeFrame
+     * - 反查 ~1ms / 300×300 帧（CPU 端）
+     *
+     * 拷贝 idx + alpha 到本地 buffer 后立刻释放锁，反查在锁外进行
+     * 避免主线程渲染阻塞 worker 解码
+     */
     if (ud->cache && ud->queue_mutex)
     {
         SDL_LockMutex(ud->queue_mutex);
-        JY_CacheEntry* hit = JY_CacheLookup(ud, id, ud->pal_version);
-        if (hit && hit->surface)
+        JY_CacheEntry* hit = JY_CacheLookup(ud, id);
+        if (hit && hit->idx_pixels)
         {
-            SDL_Surface* dup = SDL_DuplicateSurface(hit->surface);
+            Uint16 w = hit->w, h = hit->h;
+            Uint32 npx = (Uint32)w * (Uint32)h;
+            /* 拷贝出锁（worker 启动时 hit 可能并发被淘汰） */
+            Uint8* idx_copy = (Uint8*)SDL_malloc(npx);
+            Uint8* alpha_copy = NULL;
+            int has_alpha = (hit->alpha_pixels != NULL);
+            if (idx_copy)
+                SDL_memcpy(idx_copy, hit->idx_pixels, npx);
+            if (has_alpha)
+            {
+                alpha_copy = (Uint8*)SDL_malloc(npx);
+                if (alpha_copy)
+                    SDL_memcpy(alpha_copy, hit->alpha_pixels, npx);
+            }
             SDL_UnlockMutex(ud->queue_mutex);
-            return JY_PushFrame(L, dup, f);
+
+            if (idx_copy)
+            {
+                SDL_Surface* sf = JY_RenderFrameToSurface(ud, idx_copy, alpha_copy, w, h);
+                SDL_free(idx_copy);
+                if (alpha_copy) SDL_free(alpha_copy);
+                if (sf)
+                    return JY_PushFrame(L, sf, f);
+            }
+            else if (alpha_copy)
+            {
+                SDL_free(alpha_copy);
+            }
+            /* 拷贝失败回退到 cache miss 路径重新解码 */
         }
-        SDL_UnlockMutex(ud->queue_mutex);
+        else
+        {
+            SDL_UnlockMutex(ud->queue_mutex);
+        }
+    }
+    else if (ud->cache)
+    {
+        /* Worker 未启动：无并发，直接 borrow cache 内 buffer 反查 */
+        JY_CacheEntry* hit = JY_CacheLookup(ud, id);
+        if (hit && hit->idx_pixels)
+        {
+            SDL_Surface* sf = JY_RenderFrameToSurface(
+                ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
+            if (sf)
+                return JY_PushFrame(L, sf, f);
+        }
     }
 
-    /* Cache miss → synchronous decode */
-    Uint16* depth = NULL;
-    SDL_Surface* sf = JY_DecodeFrame(ud, id, &depth);
+    /* ─── Cache miss：同步解码到 R8 三 buffer ───
+     * 渲染输出 surface 给 Lua（Lua 接管所有权）
+     * cache 接管 idx + alpha + depth（避免拷贝）
+     */
+    Uint8 *idx_buf = NULL, *alpha_buf = NULL;
+    Uint16* depth_buf = NULL;
+    Uint16 w = 0, h = 0;
+    if (!JY_DecodeFrame(ud, id, &idx_buf, &alpha_buf, &depth_buf, &w, &h))
+        return 0;
+
+    /* 反查生成 surface 给 Lua */
+    SDL_Surface* sf = JY_RenderFrameToSurface(ud, idx_buf, alpha_buf, w, h);
     if (!sf)
     {
-        if (depth) SDL_free(depth);
+        /* 渲染失败统一释放 R8 三 buffer */
+        SDL_free(idx_buf);
+        if (alpha_buf) SDL_free(alpha_buf);
+        if (depth_buf) SDL_free(depth_buf);
         return 0;
     }
 
-    /* Insert a duplicate into cache; Lua owns the original */
-    if (ud->cache && ud->queue_mutex)
+    /* 插入 cache（cache 接管 idx + alpha + depth）；无 cache 时直接释放 */
+    if (ud->cache)
     {
-        SDL_Surface* cache_copy = SDL_DuplicateSurface(sf);
-        Uint16* depth_copy = NULL;
-        if (depth && sf->w > 0 && sf->h > 0)
-        {
-            Uint32 dpx = (Uint32)(sf->w * sf->h);
-            depth_copy = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
-            if (depth_copy)
-                SDL_memcpy(depth_copy, depth, dpx * sizeof(Uint16));
-        }
-        if (cache_copy)
-        {
+        if (ud->queue_mutex)
             SDL_LockMutex(ud->queue_mutex);
-            JY_CacheInsert(ud, id, cache_copy, depth_copy);
+        JY_CacheInsert(ud, id, idx_buf, alpha_buf, depth_buf, w, h);
+        if (ud->queue_mutex)
             SDL_UnlockMutex(ud->queue_mutex);
-        }
-        else if (depth_copy)
-        {
-            SDL_free(depth_copy);
-        }
     }
-    if (depth) SDL_free(depth);
+    else
+    {
+        SDL_free(idx_buf);
+        if (alpha_buf) SDL_free(alpha_buf);
+        if (depth_buf) SDL_free(depth_buf);
+    }
 
     return JY_PushFrame(L, sf, f);
 }
@@ -725,8 +824,8 @@ static int JY_Prefetch(lua_State* L)
 
     for (Uint32 id = from; id <= to; id++)
     {
-        /* Skip if already cached */
-        JY_CacheEntry* hit = JY_CacheLookup(ud, id, ud->pal_version);
+        /* 已缓存则跳过（R8 cache 与调色板版本无关）*/
+        JY_CacheEntry* hit = JY_CacheLookup(ud, id);
         if (hit)
             continue;
 
@@ -744,7 +843,7 @@ static int JY_Prefetch(lua_State* L)
 
         JY_AsyncTask* t = &ud->task_queue[ud->task_count++];
         t->frame_id = id;
-        t->pal_ver = ud->pal_version;
+        /* pal_ver 字段已移除：worker 解码 R8，与调色板无关 */
         t->done = 0;
     }
 
@@ -807,12 +906,13 @@ static int JY_LUA_SetCacheCap(lua_State* L)
 
     if (new_cap < ud->cache_cap)
     {
-        /* ── 缩容：按 LRU 淘汰 → 压缩 → realloc ── */
+        /* ── 缩容：按 LRU 淘汰 → 压缩 → realloc ──
+         * R8 优化：判存活以 idx_pixels 为准（surface 字段已移除） */
 
         /* 1. 统计存活条目数 */
         Uint32 alive = 0;
         for (Uint32 i = 0; i < ud->cache_cap; i++)
-            if (ud->cache[i].surface) alive++;
+            if (ud->cache[i].idx_pixels) alive++;
 
         /* 2. 超出 new_cap 部分按 lru_tick 升序逐个释放 */
         while (alive > new_cap)
@@ -822,7 +922,7 @@ static int JY_LUA_SetCacheCap(lua_State* L)
             int found = 0;
             for (Uint32 i = 0; i < ud->cache_cap; i++)
             {
-                if (ud->cache[i].surface && ud->cache[i].lru_tick < min_tick)
+                if (ud->cache[i].idx_pixels && ud->cache[i].lru_tick < min_tick)
                 {
                     min_tick = ud->cache[i].lru_tick;
                     victim = i;
@@ -830,14 +930,8 @@ static int JY_LUA_SetCacheCap(lua_State* L)
                 }
             }
             if (!found) break;
-            JY_CacheEntry* e = &ud->cache[victim];
-            SDL_FreeSurface(e->surface);
-            e->surface = NULL;
-            if (e->depth)
-            {
-                SDL_free(e->depth);
-                e->depth = NULL;
-            }
+            /* JY_CacheEntryFree 统一释放 idx + alpha + depth 三 buffer */
+            JY_CacheEntryFree(&ud->cache[victim]);
             alive--;
         }
 
@@ -845,7 +939,7 @@ static int JY_LUA_SetCacheCap(lua_State* L)
         Uint32 dst = 0;
         for (Uint32 i = 0; i < ud->cache_cap && dst < new_cap; i++)
         {
-            if (ud->cache[i].surface)
+            if (ud->cache[i].idx_pixels)
             {
                 if (i != dst)
                 {
@@ -972,94 +1066,135 @@ static int JY_Composite(lua_State* L)
         if (frame_id >= layer_ud->frame_count)
             continue;
 
-        /* H6: 双路径 cache hit
-         *  Worker 已启动：保留 SDL_DuplicateSurface 防 UAF（worker 可能并发淘汰）
-         *  Worker 未启动：直接引用 cache 内 surface/depth，跳过 ~3MB/帧 拷贝
-         *                 （H1 关闭主动启动后，客户端不调 Prefetch 时常驻此分支） */
-        SDL_Surface* layer_sf = NULL;
-        Uint16* layer_depth = NULL;
-        int layer_sf_owned = 0;     /* 是否拥有所有权（结尾负责 free） */
-        int layer_depth_owned = 0;
+        /* ─── R8 优化：layer 数据从 SDL_Surface 改为 idx + alpha + depth 三 buffer ───
+         *
+         * H6 双路径保留：
+         *  Worker 已启动：复制 idx + alpha + depth 防 UAF（worker 可能并发淘汰）
+         *  Worker 未启动：borrow 直接引用 cache 内 buffer，零拷贝
+         *
+         * 调色板查找延后到内核循环（用 layer_ud->pal[]），不再依赖 ARGB surface
+         */
+        const Uint8* layer_idx = NULL;
+        const Uint8* layer_alpha = NULL;
+        const Uint16* layer_depth = NULL;
+        Uint16 lw16 = 0, lh16 = 0;
+        int layer_owned = 0;        /* 是否拥有所有权（结尾负责 free 三 buffer） */
 
         if (layer_ud->cache && layer_ud->queue_mutex)
         {
-            /* Worker 启动路径：保持原行为，复制后释放锁 */
+            /* Worker 启动路径：拷贝出锁后释放，避免持锁做计算 */
             SDL_LockMutex(layer_ud->queue_mutex);
-            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
-            if (hit && hit->surface)
+            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id);
+            if (hit && hit->idx_pixels)
             {
-                layer_sf = SDL_DuplicateSurface(hit->surface);
-                layer_sf_owned = 1;
-                if (hit->depth && hit->surface->w > 0 && hit->surface->h > 0)
+                lw16 = hit->w;
+                lh16 = hit->h;
+                Uint32 npx = (Uint32)lw16 * (Uint32)lh16;
+                Uint8* idx_copy = (Uint8*)SDL_malloc(npx);
+                Uint8* alpha_copy = NULL;
+                Uint16* depth_copy = NULL;
+                int has_alpha = (hit->alpha_pixels != NULL);
+                int has_depth = (hit->depth != NULL);
+                if (idx_copy)
+                    SDL_memcpy(idx_copy, hit->idx_pixels, npx);
+                if (has_alpha)
                 {
-                    Uint32 dpx = (Uint32)(hit->surface->w * hit->surface->h);
-                    layer_depth = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
-                    if (layer_depth)
-                    {
-                        SDL_memcpy(layer_depth, hit->depth, dpx * sizeof(Uint16));
-                        layer_depth_owned = 1;
-                    }
+                    alpha_copy = (Uint8*)SDL_malloc(npx);
+                    if (alpha_copy)
+                        SDL_memcpy(alpha_copy, hit->alpha_pixels, npx);
+                }
+                if (has_depth)
+                {
+                    depth_copy = (Uint16*)SDL_malloc(npx * sizeof(Uint16));
+                    if (depth_copy)
+                        SDL_memcpy(depth_copy, hit->depth, npx * sizeof(Uint16));
+                }
+                SDL_UnlockMutex(layer_ud->queue_mutex);
+
+                if (idx_copy)
+                {
+                    layer_idx = idx_copy;
+                    layer_alpha = alpha_copy;
+                    layer_depth = depth_copy;
+                    layer_owned = 1;
+                }
+                else
+                {
+                    /* idx 拷贝失败：释放可能已分配的 alpha/depth，回退到 cache miss 路径 */
+                    if (alpha_copy) SDL_free(alpha_copy);
+                    if (depth_copy) SDL_free(depth_copy);
                 }
             }
-            SDL_UnlockMutex(layer_ud->queue_mutex);
+            else
+            {
+                SDL_UnlockMutex(layer_ud->queue_mutex);
+            }
         }
         else if (layer_ud->cache)
         {
             /* ★ H6 快路径：worker 未启动 → 无并发淘汰风险 → 零拷贝直接引用 */
-            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id, layer_ud->pal_version);
-            if (hit && hit->surface)
+            JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id);
+            if (hit && hit->idx_pixels)
             {
-                layer_sf = hit->surface;       /* borrow，不拥有所有权 */
+                layer_idx = hit->idx_pixels;     /* borrow，不拥有所有权 */
+                layer_alpha = hit->alpha_pixels;
                 layer_depth = hit->depth;
+                lw16 = hit->w;
+                lh16 = hit->h;
             }
         }
 
-        /* Cache miss → decode */
-        if (!layer_sf)
+        /* Cache miss → 同步解码 R8 三 buffer */
+        if (!layer_idx)
         {
+            Uint8 *decode_idx = NULL, *decode_alpha = NULL;
             Uint16* decode_depth = NULL;
-            layer_sf = JY_DecodeFrame(layer_ud, frame_id, &decode_depth);
-            if (!layer_sf)
+            Uint16 dw = 0, dh = 0;
+            if (!JY_DecodeFrame(layer_ud, frame_id,
+                                &decode_idx, &decode_alpha, &decode_depth, &dw, &dh))
                 continue;
-            layer_depth = decode_depth;
-            layer_sf_owned = 1;
-            layer_depth_owned = (decode_depth != NULL) ? 1 : 0;
 
-            /* Insert into cache for future use */
+            layer_idx = decode_idx;
+            layer_alpha = decode_alpha;
+            layer_depth = decode_depth;
+            lw16 = dw;
+            lh16 = dh;
+            layer_owned = 1;
+
+            /* 插入 cache 供下次使用 */
             if (layer_ud->cache && layer_ud->queue_mutex)
             {
-                /* Worker 启动路径：复制后插入，原对象保留作本帧使用 */
-                SDL_Surface* cc = SDL_DuplicateSurface(layer_sf);
-                Uint16* dc = NULL;
-                if (decode_depth && layer_sf->w > 0 && layer_sf->h > 0)
+                /* Worker 启动路径：复制后插入，原 buffer 留给本帧使用 */
+                Uint32 npx = (Uint32)dw * (Uint32)dh;
+                Uint8* ic = (Uint8*)SDL_malloc(npx);
+                Uint8* ac = decode_alpha ? (Uint8*)SDL_malloc(npx) : NULL;
+                Uint16* dc = decode_depth ? (Uint16*)SDL_malloc(npx * sizeof(Uint16)) : NULL;
+                if (ic)
                 {
-                    Uint32 dpx = (Uint32)(layer_sf->w * layer_sf->h);
-                    dc = (Uint16*)SDL_malloc(dpx * sizeof(Uint16));
-                    if (dc)
-                        SDL_memcpy(dc, decode_depth, dpx * sizeof(Uint16));
-                }
-                if (cc)
-                {
+                    SDL_memcpy(ic, decode_idx, npx);
+                    if (ac && decode_alpha) SDL_memcpy(ac, decode_alpha, npx);
+                    if (dc && decode_depth) SDL_memcpy(dc, decode_depth, npx * sizeof(Uint16));
                     SDL_LockMutex(layer_ud->queue_mutex);
-                    JY_CacheInsert(layer_ud, frame_id, cc, dc);
+                    JY_CacheInsert(layer_ud, frame_id, ic, ac, dc, dw, dh);
                     SDL_UnlockMutex(layer_ud->queue_mutex);
                 }
-                else if (dc)
-                    SDL_free(dc);
+                else
+                {
+                    /* idx 拷贝分配失败：释放可能已分配的 ac/dc，cache 不更新 */
+                    if (ac) SDL_free(ac);
+                    if (dc) SDL_free(dc);
+                }
             }
             else if (layer_ud->cache)
             {
                 /* ★ H6: worker 未启动 → 直接转移所有权到 cache（节省一次拷贝）
                  *      cache insert 不会淘汰本次插入的新条目，本帧引用安全 */
-                JY_CacheInsert(layer_ud, frame_id, layer_sf, layer_depth);
-                layer_sf_owned = 0;
-                layer_depth_owned = 0;
+                JY_CacheInsert(layer_ud, frame_id, decode_idx, decode_alpha, decode_depth, dw, dh);
+                layer_owned = 0;  /* 所有权已转移给 cache */
             }
         }
 
-        /* Apply frame anchor offset (key_x, key_y) so frames are centered correctly.
-         * Without this, each frame is placed at its raw top-left corner, causing
-         * jitter as different frames have different sizes and anchor positions. */
+        /* 锚点偏移（key_x, key_y）保证多件锦衣帧中心对齐，否则尺寸不同的帧之间会抖动 */
         int anchor_x = 0, anchor_y = 0;
         if (layer_ud->frames && frame_id < layer_ud->frame_count)
         {
@@ -1069,62 +1204,71 @@ static int JY_Composite(lua_State* L)
         int base_x = off_x - anchor_x;
         int base_y = off_y - anchor_y;
 
-        /* Per-pixel Z-test composite */
-        int lw = layer_sf->w;
-        int lh = layer_sf->h;
+        int lw = (int)lw16;
+        int lh = (int)lh16;
 
-        if (SDL_MUSTLOCK(layer_sf))
-            SDL_LockSurface(layer_sf);
-
-        /* Pre-calculate clipping bounds so we don't branch per pixel */
+        /* 预算裁剪边界（避免每像素分支） */
         int start_y = (base_y < 0) ? -base_y : 0;
         int start_x = (base_x < 0) ? -base_x : 0;
         int end_y = (base_y + lh > canvas_h) ? canvas_h - base_y : lh;
         int end_x = (base_x + lw > canvas_w) ? canvas_w - base_x : lw;
 
+        /* 提前缓存当前 layer 调色板与模数到局部变量，
+         * 避免内核循环每像素重复读 ud 字段 */
+        const Uint32* layer_pal = layer_ud->pal;
+        Uint32 layer_pmod = layer_ud->pal_mod ? layer_ud->pal_mod : 256;
+
         for (int py = start_y; py < end_y; py++)
         {
             int dy = base_y + py;
+            const Uint8* irow = layer_idx + (size_t)py * lw;
+            const Uint8* arow = layer_alpha ? (layer_alpha + (size_t)py * lw) : NULL;
+            const Uint16* drow = layer_depth ? (layer_depth + (size_t)py * lw) : NULL;
+            Uint32* dst_row = dst_pixels + (size_t)dy * dst_stride;
+            Sint32* zrow = zbuf + (size_t)dy * canvas_w;
+
             for (int px = start_x; px < end_x; px++)
             {
                 int dx = base_x + px;
 
-                Uint32 spixel = ((Uint32*)layer_sf->pixels)[py * (layer_sf->pitch / 4) + px];
-                Uint32 sa = (spixel >> 24) & 0xFF;
+                /* 实时反查 layer 自己的 pal[] 得到 ARGB（每件锦衣调色板独立）*/
+                Uint32 sa = arow ? arow[px] : 255;
                 if (sa == 0)
                     continue;
 
-                Uint16 d = layer_depth ? layer_depth[py * lw + px] : 0;
+                Uint8 pal_idx = irow[px];
+                Uint32 lcolor = layer_pal[pal_idx % layer_pmod];
 
+                Uint16 d = drow ? drow[px] : 0;
                 Sint32 effective_d = (Sint32)d + z_offset;
 
-                Sint32* zp = &zbuf[dy * canvas_w + dx];
+                Sint32* zp = &zrow[dx];
                 if (effective_d >= *zp)
                 {
                     *zp = effective_d;
 
-                    /* Alpha composite (Porter-Duff over) — matching Python */
-                    Uint32 dpixel = dst_pixels[dy * dst_stride + dx];
+                    /* Alpha composite (Porter-Duff over) — 与原逻辑等价 */
+                    Uint32 dpixel = dst_row[dx];
                     Uint8 da = (Uint8)((dpixel >> 24) & 0xFF);
                     if (da == 0 || sa == 255)
                     {
-                        dst_pixels[dy * dst_stride + dx] = spixel;
+                        /* 完全替换：sa=255 时把 lcolor 的 alpha 强制改为 sa */
+                        dst_row[dx] = (sa << 24) | (lcolor & 0x00FFFFFF);
                     }
                     else
                     {
                         Uint32 inv_sa = 255u - sa;
-                        /* out_a = sa + da*(1-sa/255) ≈ sa + da*inv_sa/255 */
                         Uint32 out_a = sa + (da * inv_sa / 255u);
                         if (out_a > 255u) out_a = 255u;
                         if (out_a == 0)
                         {
-                            dst_pixels[dy * dst_stride + dx] = 0;
+                            dst_row[dx] = 0;
                         }
                         else
                         {
-                            Uint32 sr = (spixel >> 16) & 0xFF;
-                            Uint32 sg = (spixel >> 8)  & 0xFF;
-                            Uint32 sb =  spixel        & 0xFF;
+                            Uint32 sr = (lcolor >> 16) & 0xFF;
+                            Uint32 sg = (lcolor >> 8)  & 0xFF;
+                            Uint32 sb =  lcolor        & 0xFF;
                             Uint32 dr = (dpixel >> 16) & 0xFF;
                             Uint32 dg = (dpixel >> 8)  & 0xFF;
                             Uint32 db =  dpixel        & 0xFF;
@@ -1134,23 +1278,20 @@ static int JY_Composite(lua_State* L)
                             if (or_ > 255u) or_ = 255u;
                             if (og  > 255u) og  = 255u;
                             if (ob  > 255u) ob  = 255u;
-                            dst_pixels[dy * dst_stride + dx] =
-                                (out_a << 24) | (or_ << 16) | (og << 8) | ob;
+                            dst_row[dx] = (out_a << 24) | (or_ << 16) | (og << 8) | ob;
                         }
                     }
                 }
             }
         }
 
-        if (SDL_MUSTLOCK(layer_sf))
-            SDL_UnlockSurface(layer_sf);
-
-
         /* H6: 仅在拥有所有权时释放（borrow 路径不释放，由 cache 持有） */
-        if (layer_sf_owned)
-            SDL_FreeSurface(layer_sf);
-        if (layer_depth_owned && layer_depth)
-            SDL_free(layer_depth);
+        if (layer_owned)
+        {
+            SDL_free((void*)layer_idx);
+            if (layer_alpha) SDL_free((void*)layer_alpha);
+            if (layer_depth) SDL_free((void*)layer_depth);
+        }
     }
 
     if (SDL_MUSTLOCK(result))
