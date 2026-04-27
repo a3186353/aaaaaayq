@@ -1796,6 +1796,10 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     lua_pushinteger(L, (lua_Integer)ud->frame_count);
     lua_setfield(L, -2, "total");
 
+    /* DLL 版本标记：3 = R8 LRU 优化（路线 A，染色零失效） */
+    lua_pushinteger(L, 3);
+    lua_setfield(L, -2, "depth_ver");
+
     return 2;
 }
 
@@ -2101,8 +2105,9 @@ static int JY_NEW(lua_State* L)
     lua_pushinteger(L, (lua_Integer)ud->frame_count);
     lua_setfield(L, -2, "total");
 
-    /* Version marker for DLL verification */
-    lua_pushinteger(L, 2);
+    /* DLL 版本标记：3 = R8 LRU 优化（路线 A，染色零失效）
+     * 客户端可通过 jy_obj.depth_ver == 3 判断新 DLL 是否落地 */
+    lua_pushinteger(L, 3);
     lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
