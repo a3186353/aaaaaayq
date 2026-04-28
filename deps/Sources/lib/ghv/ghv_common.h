@@ -31,6 +31,10 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <cstdio>
+
+// libhv 内置 hlog（默认 INFO 级别且会落盘到 libhv.log），ghv 在非调试模式下关闭
+#include "hlog.h"
 
 // ============================================================
 // Shared EventLoop management
@@ -205,6 +209,35 @@ inline bool ghv_get_lua_ref(lua_State* L, int ud_idx, const char* field) {
     }
     lua_remove(L, -2);
     return true;
+}
+
+// ============================================================
+// libhv 日志开关（仅在调试模式下写出 libhv.log）
+// ============================================================
+//
+// libhv 内部（hloop / nio / HttpClient / WebSocket / openssl 等）会通过
+// hlogi/hlogd/hloge 把信息写到 hlog；hlog 默认级别为 INFO 且会落盘到
+// 工作目录下的 libhv.log（按天滚动），在生产环境会持续产生日志文件。
+//
+// 各模块的 luaopen_ghv_* 入口调用 ghv_init_libhv_log(L) 一次：
+//   - gge.isdebug == true  → 保持默认日志（写文件，方便排查）
+//   - gge.isdebug == false → 调用 hlog_disable() 设置 SILENT 级别，不再落盘
+//
+// 该函数幂等：同一进程内重复调用安全，最终状态由最后一次决定。
+inline void ghv_init_libhv_log(lua_State* L) {
+    bool isdebug = false;
+    lua_getglobal(L, "gge");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "isdebug");
+        isdebug = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    if (!isdebug) {
+        // 非调试模式：彻底禁用 libhv 自带 logger，避免落盘 libhv.log
+        hlog_disable();
+    }
 }
 
 // ============================================================

@@ -695,6 +695,7 @@ static int l_tcp_server_new(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_TcpServer(lua_State* L)
 {
+    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
     luaL_Reg methods[] = {
         {"start",               l_tcp_server_start},
         {"stop",                l_tcp_server_stop},

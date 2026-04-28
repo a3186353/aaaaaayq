@@ -536,6 +536,7 @@ static int l_ws_server_newindex(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_WebSocketServer(lua_State* L)
 {
+    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
     luaL_Reg methods[] = {
         {"start",               l_ws_server_start},
         {"stop",                l_ws_server_stop},

@@ -303,6 +303,7 @@ static int l_download_new(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_download(lua_State* L)
 {
+    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
     luaL_Reg methods[] = {
         {"GetState", l_download_get_state},
         {"GetData",  l_download_get_data},

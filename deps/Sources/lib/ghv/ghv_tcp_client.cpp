@@ -725,6 +725,7 @@ static int l_tcp_client_new(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_TcpClient(lua_State* L)
 {
+    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
     luaL_Reg methods[] = {
         {"connect",            l_tcp_client_connect},
         {"disconnect",         l_tcp_client_disconnect},

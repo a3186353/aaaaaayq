@@ -242,6 +242,7 @@ static int l_http_cleanup_gc(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_HttpRequests(lua_State* L)
 {
+    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
     luaL_Reg funcs[] = {
         {"get",  l_http_get},
         {"head", l_http_head},
