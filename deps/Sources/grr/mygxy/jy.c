@@ -137,6 +137,23 @@ static JY_UserData* JY_Check(lua_State* L, int idx)
     return (JY_UserData*)p;
 }
 
+static void JY_UpdateFrameBounds(JY_UserData* ud, const JY_FrameInfo* f)
+{
+    if (!ud || !f || f->sw == 0 || f->sh == 0)
+        return;
+
+    if (f->sw > ud->max_frame_w) ud->max_frame_w = (Uint16)f->sw;
+    if (f->sh > ud->max_frame_h) ud->max_frame_h = (Uint16)f->sh;
+
+    if (f->key_x > ud->max_key_x) ud->max_key_x = f->key_x;
+    if (f->key_y > ud->max_key_y) ud->max_key_y = f->key_y;
+
+    Sint32 right = (Sint32)f->sw - f->key_x;
+    Sint32 bottom = (Sint32)f->sh - f->key_y;
+    if (right > ud->max_frame_right) ud->max_frame_right = right;
+    if (bottom > ud->max_frame_bottom) ud->max_frame_bottom = bottom;
+}
+
 /* ═══════════════════════════════════════════
  *  palette_mod auto-detection (matching view.py _load_palette)
  *  Scans palette from idx 255 downward to find last non-zero
@@ -1755,12 +1772,10 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
             jf->sy = y_offsets[img_idx] + (Uint32)sf_info->pos_y;
             jf->sw = (Uint32)sf_info->w;
             jf->sh = (Uint32)sf_info->h;
-            /* R9：累加单 act+dir 内所有帧的最大裁剪区，供 Lua 层紧致画布使用 */
-            if (jf->sw > ud->max_frame_w) ud->max_frame_w = (Uint16)jf->sw;
-            if (jf->sh > ud->max_frame_h) ud->max_frame_h = (Uint16)jf->sh;
         }
         jf->key_x = (Sint32)sf_info->key_x;
         jf->key_y = (Sint32)sf_info->key_y;
+        JY_UpdateFrameBounds(ud, jf);
     }
 
     SDL_free(y_offsets);
@@ -1777,7 +1792,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
      *      JY_StartWorkers 本身仍保留并在 Prefetch 内调用。 */
 
     /* ─── Build info return table (tcp compatible) ─── */
-    lua_createtable(L, 0, 8);
+    lua_createtable(L, 0, 16);
 
     lua_pushinteger(L, (lua_Integer)ud->group);
     lua_setfield(L, -2, "group");
@@ -1802,9 +1817,17 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     lua_setfield(L, -2, "max_frame_w");
     lua_pushinteger(L, (lua_Integer)ud->max_frame_h);
     lua_setfield(L, -2, "max_frame_h");
+    lua_pushinteger(L, (lua_Integer)ud->max_key_x);
+    lua_setfield(L, -2, "max_key_x");
+    lua_pushinteger(L, (lua_Integer)ud->max_key_y);
+    lua_setfield(L, -2, "max_key_y");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_right);
+    lua_setfield(L, -2, "max_frame_right");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
+    lua_setfield(L, -2, "max_frame_bottom");
 
-    /* DLL 版本标记：4 = R8 LRU + R9 紧致画布（max_frame_w/h 暴露） */
-    lua_pushinteger(L, 4);
+    /* DLL 版本标记：5 = R8 LRU + 真实合成边界 */
+    lua_pushinteger(L, 5);
     lua_setfield(L, -2, "depth_ver");
 
     return 2;
@@ -2067,10 +2090,6 @@ static int JY_NEW(lua_State* L)
             f->sh = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
 
-            /* R9：累加单 act+dir 内所有帧的最大裁剪区，供 Lua 层紧致画布使用 */
-            if (f->sw > ud->max_frame_w) ud->max_frame_w = (Uint16)f->sw;
-            if (f->sh > ud->max_frame_h) ud->max_frame_h = (Uint16)f->sh;
-
             lua_getfield(L, -1, "key_x");
             f->key_x = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
@@ -2078,6 +2097,8 @@ static int JY_NEW(lua_State* L)
             lua_getfield(L, -1, "key_y");
             f->key_y = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
+
+            JY_UpdateFrameBounds(ud, f);
         }
         lua_pop(L, 1);
     }
@@ -2090,7 +2111,7 @@ static int JY_NEW(lua_State* L)
     /* ★ H1: 不主动启动 worker（同 SPR 路径，参见上方注释） */
 
     /* ─── Build info return table (tcp compatible) ─── */
-    lua_createtable(L, 0, 8);
+    lua_createtable(L, 0, 16);
 
     lua_pushinteger(L, (lua_Integer)ud->group);
     lua_setfield(L, -2, "group");
@@ -2122,10 +2143,17 @@ static int JY_NEW(lua_State* L)
     lua_setfield(L, -2, "max_frame_w");
     lua_pushinteger(L, (lua_Integer)ud->max_frame_h);
     lua_setfield(L, -2, "max_frame_h");
+    lua_pushinteger(L, (lua_Integer)ud->max_key_x);
+    lua_setfield(L, -2, "max_key_x");
+    lua_pushinteger(L, (lua_Integer)ud->max_key_y);
+    lua_setfield(L, -2, "max_key_y");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_right);
+    lua_setfield(L, -2, "max_frame_right");
+    lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
+    lua_setfield(L, -2, "max_frame_bottom");
 
-    /* DLL 版本标记：4 = R8 LRU + R9 紧致画布（max_frame_w/h 暴露）
-     * 客户端可通过 jy_obj.depth_ver >= 4 判断新 DLL 是否落地 */
-    lua_pushinteger(L, 4);
+    /* DLL 版本标记：5 = R8 LRU + 真实合成边界 */
+    lua_pushinteger(L, 5);
     lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
