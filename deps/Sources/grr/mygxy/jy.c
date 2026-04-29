@@ -549,39 +549,29 @@ static int JY_CacheCopyInsert(JY_UserData* ud, Uint32 frame_id,
     return 1;
 }
 
-/* Porter-Duff over alpha composite — 提取为 inline 减少 Composite 内核函数行数
- * sa     : 源 alpha [1, 255]，调用方已保证非 0
- * lcolor : 源 ARGB（A 通道被忽略，最终 alpha 由 sa 决定）
- * da     : 目标 alpha [0, 255]
- * dpixel : 目标 ARGB
- * 返回   : 混合后的 ARGB
- *
- * 快路径：sa==255 或 da==0 → 直接覆盖（占像素绝大多数）
- * 慢路径：完整 Porter-Duff over（边缘抗锯齿） */
-static SDL_INLINE Uint32 JY_BlendPixel(Uint32 sa, Uint32 lcolor, Uint32 da, Uint32 dpixel)
+/* ═══════════════════════════════════════════
+ *  R10 Composite 内核辅助：8 槽插入排序 + 链式 over alpha
+ *  对齐 JS jinyi.min.js depthVs shader (sortSample + compare_color)
+ * ═══════════════════════════════════════════ */
+
+/* 单 layer 的 Composite 工作集（外层准备一次，内层热路径复用） */
+typedef struct
 {
-    if (da == 0 || sa == 255)
-        return (sa << 24) | (lcolor & 0x00FFFFFF);
-
-    Uint32 inv_sa = 255u - sa;
-    Uint32 out_a = sa + (da * inv_sa / 255u);
-    if (out_a > 255u) out_a = 255u;
-    if (out_a == 0)   return 0;
-
-    Uint32 sr = (lcolor >> 16) & 0xFF;
-    Uint32 sg = (lcolor >> 8)  & 0xFF;
-    Uint32 sb =  lcolor        & 0xFF;
-    Uint32 dr = (dpixel >> 16) & 0xFF;
-    Uint32 dg = (dpixel >> 8)  & 0xFF;
-    Uint32 db =  dpixel        & 0xFF;
-    Uint32 or_ = (sr * sa + dr * da * inv_sa / 255u) / out_a;
-    Uint32 og  = (sg * sa + dg * da * inv_sa / 255u) / out_a;
-    Uint32 ob  = (sb * sa + db * da * inv_sa / 255u) / out_a;
-    if (or_ > 255u) or_ = 255u;
-    if (og  > 255u) og  = 255u;
-    if (ob  > 255u) ob  = 255u;
-    return (out_a << 24) | (or_ << 16) | (og << 8) | ob;
-}
+    JY_UserData* ud;          /* 仅用于 owned 释放回调判断 */
+    const Uint8*  idx;
+    const Uint8*  alpha;
+    const Uint16* depth;
+    Uint16 lw, lh;
+    int    base_x, base_y;    /* off_x - key_x, off_y - key_y */
+    int    start_x, start_y;  /* 画布上有效像素起点（含） */
+    int    end_x, end_y;      /* 画布上有效像素终点（不含） */
+    Sint32 z_total;           /* frame.z + z_bias，每像素累加 */
+    int    index_offset;
+    int    transparent;       /* 0 / 1 透明遮罩标志 */
+    int    owned;             /* 1 = 调用方 free，0 = borrow */
+    const Uint32* pal;
+    Uint32 pmask;
+} JY_CompLayer;
 
 /* ═══════════════════════════════════════════
  *  Worker thread
@@ -1093,58 +1083,38 @@ static int JY_LUA_SetCacheCap(lua_State* L)
 
 /* ═══════════════════════════════════════════
  *  Lua API: Composite(canvas_w, canvas_h, layers_table)
- *  layers_table = { {ud, frame_id, z_offset, x, y}, ... }
- *  Per-pixel Z-test depth compositing (matching view.py OutfitComposer)
+ *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
+ *
+ *  ★ R10 (depth_ver=6)：与 JS jinyi.min.js depthVs shader 等价实现
+ *    1) 每像素维护 8 槽插入排序数组（dep 从大到小，远→近）
+ *    2) 逐层 over alpha 链式混合（compare_color 等价）
+ *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
+ *    4) transparent=1 时清空累积色（layer mask 路径）
+ *
+ *  effective_d = pixel_depth(G/B 通道) + frame.z + z_bias
  *  Returns: SDL_Surface* (composited ARGB8888)
  * ═══════════════════════════════════════════ */
 static int JY_Composite(lua_State* L)
 {
-    /* arg 1: self (jy ud — used as anchor + zbuf_cached 宿主) */
+    /* arg 1: self (jy ud — used as anchor / surface 工厂宿主) */
     JY_UserData* ud = JY_Check(L, 1);
+    (void)ud; /* self 仅作为 method 调度入口，不再持有 zbuf */
     int canvas_w = (int)luaL_checkinteger(L, 2);
     int canvas_h = (int)luaL_checkinteger(L, 3);
     luaL_checktype(L, 4, LUA_TTABLE);
 
-    int n = (int)lua_rawlen(L, 4);
-    if (n <= 0 || canvas_w <= 0 || canvas_h <= 0)
+    int layer_argc = (int)lua_rawlen(L, 4);
+    if (layer_argc <= 0 || canvas_w <= 0 || canvas_h <= 0)
         return 0;
 
-    /* Allocate result surface */
-    SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!result)
-        return luaL_error(L, "JY_Composite: failed to create result surface");
-    SDL_FillRect(result, NULL, 0);
+    /* ─── 阶段 1：构建 layer 工作集（解码 buffer + 几何裁剪） ─── */
+    JY_CompLayer* layers = (JY_CompLayer*)SDL_calloc(layer_argc, sizeof(JY_CompLayer));
+    if (!layers)
+        return luaL_error(L, "JY_Composite: failed to alloc layer set");
 
-    /* M3: 复用 zbuf_cached，避免每帧 malloc/free + 全量初始化抖动
-     *      首次 / 画布变大时按需扩容；初始化用 SDL_memset(0xFF) 等价 INT32_MIN
-     *      （0xFFFFFFFF = -1，与 INT32_MIN 不同——保留逐像素赋值以保证语义一致） */
-    Uint32 canvas_px = (Uint32)(canvas_w * canvas_h);
-    if (ud->zbuf_cached_size < canvas_px)
-    {
-        Sint32* nz = (Sint32*)SDL_realloc(ud->zbuf_cached, canvas_px * sizeof(Sint32));
-        if (!nz)
-        {
-            SDL_FreeSurface(result);
-            return luaL_error(L, "JY_Composite: failed to alloc z-buffer");
-        }
-        ud->zbuf_cached = nz;
-        ud->zbuf_cached_size = canvas_px;
-    }
-    Sint32* zbuf = ud->zbuf_cached;
-    /* P1: memset 0x80 → 0x80808080 = -2139062144（接近 INT32_MIN，留 ~8M 余量给 z_offset 负值）
-     *     语义等价：任何实际 effective_d 都 > -2139062144（z_offset 实际仅几千~几万范围）
-     *     性能：300×300 画布 ~0.5ms 逐像素写 → ~0.05ms memset，每帧节省 0.4ms */
-    SDL_memset(zbuf, 0x80, canvas_px * sizeof(Sint32));
+    int layer_n = 0; /* 实际有效 layer 数 */
 
-    if (SDL_MUSTLOCK(result))
-        SDL_LockSurface(result);
-
-    Uint32* dst_pixels = (Uint32*)result->pixels;
-    Uint32 dst_stride = (Uint32)(result->pitch / 4);
-
-    /* Process each layer */
-    for (int i = 1; i <= n; i++)
+    for (int i = 1; i <= layer_argc; i++)
     {
         lua_rawgeti(L, 4, i);
         if (!lua_istable(L, -1))
@@ -1153,41 +1123,32 @@ static int JY_Composite(lua_State* L)
             continue;
         }
 
-        /* Extract: {ud, frame_id, z_offset, x, y} */
-        lua_rawgeti(L, -1, 1); /* ud */
+        /* 7 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent} */
+        lua_rawgeti(L, -1, 1);
         JY_UserData* layer_ud = (JY_UserData*)luaL_testudata(L, -1, JY_MT);
         lua_pop(L, 1);
         if (!layer_ud) { lua_pop(L, 1); continue; }
 
-        lua_rawgeti(L, -1, 2); /* frame_id */
-        Uint32 frame_id = (Uint32)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-
-        lua_rawgeti(L, -1, 3); /* z_offset */
-        int z_offset = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-
-        lua_rawgeti(L, -1, 4); /* off_x */
-        int off_x = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-
-        lua_rawgeti(L, -1, 5); /* off_y */
-        int off_y = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
+        lua_rawgeti(L, -1, 2); Uint32 frame_id = (Uint32)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 3); int z_bias       = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 4); int off_x        = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 5); int off_y        = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 6); int index_offset = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 7); int transparent  = (int)lua_tointeger(L, -1); lua_pop(L, 1);
 
         lua_pop(L, 1); /* pop layer entry table */
 
         if (frame_id >= layer_ud->frame_count)
             continue;
 
-        /* ─── 取 layer 三 buffer：H6 双路径 + 用 helper 收敛 ───
-         *  Worker 启动：JY_CacheGetCopy 拷贝出锁防 UAF
-         *  Worker 未启动：直接 borrow cache 内 buffer，零拷贝 */
-        const Uint8*  layer_idx   = NULL;
-        const Uint8*  layer_alpha = NULL;
-        const Uint16* layer_depth = NULL;
+        /* 取 layer 三 buffer：H6 双路径
+         *   Worker 启动：JY_CacheGetCopy 拷贝出锁防 UAF
+         *   Worker 未启动：直接 borrow cache 内 buffer，零拷贝 */
+        const Uint8*  l_idx   = NULL;
+        const Uint8*  l_alpha = NULL;
+        const Uint16* l_depth = NULL;
         Uint16 lw16 = 0, lh16 = 0;
-        int layer_owned = 0;  /* 1 = 调用方 free；0 = borrow（cache 持有） */
+        int    owned = 0;
 
         if (layer_ud->cache && layer_ud->queue_mutex)
         {
@@ -1195,25 +1156,24 @@ static int JY_Composite(lua_State* L)
             Uint16* depth_c = NULL;
             if (JY_CacheGetCopy(layer_ud, frame_id, &idx_c, &alpha_c, &depth_c, &lw16, &lh16))
             {
-                layer_idx = idx_c; layer_alpha = alpha_c; layer_depth = depth_c;
-                layer_owned = 1;
+                l_idx = idx_c; l_alpha = alpha_c; l_depth = depth_c;
+                owned = 1;
             }
         }
         else if (layer_ud->cache)
         {
-            /* ★ H6 快路径：worker 未启动 → 无并发淘汰风险 → 零拷贝引用 */
             JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id);
             if (hit && hit->idx_pixels)
             {
-                layer_idx   = hit->idx_pixels;
-                layer_alpha = hit->alpha_pixels;
-                layer_depth = hit->depth;
+                l_idx   = hit->idx_pixels;
+                l_alpha = hit->alpha_pixels;
+                l_depth = hit->depth;
                 lw16 = hit->w; lh16 = hit->h;
             }
         }
 
         /* Cache miss → 同步解码 R8 三 buffer */
-        if (!layer_idx)
+        if (!l_idx)
         {
             Uint8 *decode_idx = NULL, *decode_alpha = NULL;
             Uint16* decode_depth = NULL;
@@ -1222,97 +1182,220 @@ static int JY_Composite(lua_State* L)
                                 &decode_idx, &decode_alpha, &decode_depth, &dw, &dh))
                 continue;
 
-            layer_idx = decode_idx; layer_alpha = decode_alpha; layer_depth = decode_depth;
+            l_idx = decode_idx; l_alpha = decode_alpha; l_depth = decode_depth;
             lw16 = dw; lh16 = dh;
-            layer_owned = 1;
+            owned = 1;
 
-            /* 插入 cache 供下次复用 */
             if (layer_ud->cache && layer_ud->queue_mutex)
             {
-                /* Worker 路径：副本进 cache，原 buffer 留给本帧 */
                 JY_CacheCopyInsert(layer_ud, frame_id, decode_idx, decode_alpha, decode_depth, dw, dh);
             }
             else if (layer_ud->cache)
             {
-                /* ★ H6 worker 未启动：直接转移所有权（零拷贝）
-                 *    insert 不会淘汰本次新条目，本帧引用安全 */
                 JY_CacheInsert(layer_ud, frame_id, decode_idx, decode_alpha, decode_depth, dw, dh);
-                layer_owned = 0;
+                owned = 0;
             }
         }
 
-        /* 锚点偏移（key_x, key_y）保证多件锦衣帧中心对齐，否则尺寸不同的帧之间会抖动 */
+        /* 几何：base = off - frame.key（每个 layer 自己的锚点对齐到外部传入 off）
+         *   等价 JS shader 中 keyX = I.x - F.x，画布上像素 px 对应 layer 局部 lx = px - base_x */
         int anchor_x = 0, anchor_y = 0;
+        Sint16 frame_z = 0;
         if (layer_ud->frames && frame_id < layer_ud->frame_count)
         {
             anchor_x = (int)layer_ud->frames[frame_id].key_x;
             anchor_y = (int)layer_ud->frames[frame_id].key_y;
+            frame_z  = layer_ud->frames[frame_id].z;
         }
         int base_x = off_x - anchor_x;
         int base_y = off_y - anchor_y;
-
         int lw = (int)lw16;
         int lh = (int)lh16;
 
-        /* 预算裁剪边界（避免每像素分支） */
-        int start_y = (base_y < 0) ? -base_y : 0;
-        int start_x = (base_x < 0) ? -base_x : 0;
-        int end_y = (base_y + lh > canvas_h) ? canvas_h - base_y : lh;
-        int end_x = (base_x + lw > canvas_w) ? canvas_w - base_x : lw;
-
-        /* 局部缓存调色板与 mask（避免内核循环每像素重复读 ud 字段）
-         * P2: pal_mod 由 JY_CalcPalMod 设定，仅 64/128/256 三个 2 的幂 → 用 (mod-1) mask 替代 % */
-        const Uint32* layer_pal = layer_ud->pal;
-        Uint32 layer_pmod = layer_ud->pal_mod ? layer_ud->pal_mod : 256;
-        Uint32 layer_pmask = layer_pmod - 1;  /* 64/128/256 → 63/127/255 */
-
-        for (int py = start_y; py < end_y; py++)
+        /* 画布裁剪边界（avoid per-pixel branch in inner loop） */
+        int sx = base_x < 0 ? 0 : base_x;
+        int sy = base_y < 0 ? 0 : base_y;
+        int ex = base_x + lw > canvas_w ? canvas_w : base_x + lw;
+        int ey = base_y + lh > canvas_h ? canvas_h : base_y + lh;
+        if (sx >= ex || sy >= ey)
         {
-            int dy = base_y + py;
-            const Uint8*  irow    = layer_idx + (size_t)py * lw;
-            const Uint8*  arow    = layer_alpha ? (layer_alpha + (size_t)py * lw) : NULL;
-            const Uint16* drow    = layer_depth ? (layer_depth + (size_t)py * lw) : NULL;
-            Uint32*       dst_row = dst_pixels + (size_t)dy * dst_stride;
-            Sint32*       zrow    = zbuf + (size_t)dy * canvas_w;
-
-            for (int px = start_x; px < end_x; px++)
-            {
-                /* P3 内核顺序：alpha → z-test → palette → blend
-                 *   (z 失败的像素不查调色板，每像素省一次间接寻址) */
-                Uint32 sa = arow ? arow[px] : 255;
-                if (sa == 0)
-                    continue;  /* 完全透明 */
-
-                Uint16 d = drow ? drow[px] : 0;
-                Sint32 effective_d = (Sint32)d + z_offset;
-
-                int dx = base_x + px;
-                Sint32* zp = &zrow[dx];
-                if (effective_d < *zp)
-                    continue;  /* z 失败 — 跳过调色板 + blend */
-
-                *zp = effective_d;
-
-                /* P2: pal_idx & mask（mod 必为 2 的幂） */
-                Uint32 lcolor = layer_pal[irow[px] & layer_pmask];
-
-                /* Porter-Duff over：用 inline 函数收敛快/慢路径 */
-                Uint32 dpixel = dst_row[dx];
-                Uint8  da = (Uint8)((dpixel >> 24) & 0xFF);
-                dst_row[dx] = JY_BlendPixel(sa, lcolor, da, dpixel);
-            }
+            if (owned) JY_FreeR8Triple((void*)l_idx, (void*)l_alpha, (void*)l_depth);
+            continue;
         }
 
-        /* H6: 仅在拥有所有权时释放（borrow 路径由 cache 持有） */
-        if (layer_owned)
-            JY_FreeR8Triple((void*)layer_idx, (void*)layer_alpha, (void*)layer_depth);
+        JY_CompLayer* L_slot = &layers[layer_n++];
+        L_slot->ud           = layer_ud;
+        L_slot->idx          = l_idx;
+        L_slot->alpha        = l_alpha;
+        L_slot->depth        = l_depth;
+        L_slot->lw           = lw16;
+        L_slot->lh           = lh16;
+        L_slot->base_x       = base_x;
+        L_slot->base_y       = base_y;
+        L_slot->start_x      = sx;
+        L_slot->start_y      = sy;
+        L_slot->end_x        = ex;
+        L_slot->end_y        = ey;
+        L_slot->z_total      = (Sint32)frame_z + z_bias;
+        L_slot->index_offset = index_offset;
+        L_slot->transparent  = transparent;
+        L_slot->owned        = owned;
+        L_slot->pal          = layer_ud->pal;
+        {
+            Uint32 pmod = layer_ud->pal_mod ? layer_ud->pal_mod : 256;
+            L_slot->pmask = pmod - 1;
+        }
+    }
+
+    /* ─── 阶段 2：合成结果 surface + 内核外层 pixel × 内层 layer ─── */
+    SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!result)
+    {
+        for (int i = 0; i < layer_n; i++)
+            if (layers[i].owned)
+                JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
+        SDL_free(layers);
+        return luaL_error(L, "JY_Composite: failed to create result surface");
+    }
+    SDL_FillRect(result, NULL, 0);
+
+    if (SDL_MUSTLOCK(result))
+        SDL_LockSurface(result);
+
+    Uint32* dst_pixels = (Uint32*)result->pixels;
+    Uint32 dst_stride = (Uint32)(result->pitch / 4);
+
+    /* 8 槽栈数组（per-pixel 局部，按 dep 从大到小排序）*/
+    for (int py = 0; py < canvas_h; py++)
+    {
+        Uint32* dst_row = dst_pixels + (size_t)py * dst_stride;
+        for (int px = 0; px < canvas_w; px++)
+        {
+            Sint32 dep_arr[8];
+            Uint32 col_arr[8];
+            Uint8  alf_arr[8];
+            Uint8  trs_arr[8];
+            int    n_slot = 0;
+
+            /* 内层 layer 遍历：累积该像素的所有可见层 */
+            for (int li = 0; li < layer_n; li++)
+            {
+                const JY_CompLayer* L_p = &layers[li];
+                if (px < L_p->start_x || px >= L_p->end_x ||
+                    py < L_p->start_y || py >= L_p->end_y)
+                    continue;
+
+                int lx = px - L_p->base_x;
+                int ly = py - L_p->base_y;
+                size_t loff = (size_t)ly * L_p->lw + lx;
+
+                Uint8 sa = L_p->alpha ? L_p->alpha[loff] : 255;
+                if (sa == 0)
+                    continue;
+
+                Uint16 d = L_p->depth ? L_p->depth[loff] : 0;
+                Sint32 dep = (Sint32)d + L_p->z_total;
+
+                /* 调色板查表（带 indexOffset，对齐 JS shader）*/
+                int pal_idx = (int)L_p->idx[loff] - L_p->index_offset;
+                if (pal_idx < 0) pal_idx = 0;
+                Uint32 col = L_p->pal[(Uint32)pal_idx & L_p->pmask];
+
+                /* 插入排序：找第一个 dep_arr[i] <= dep+0.1 的位置（对齐 JS sortSample 行为）
+                 *   dep_arr 维持从大到小排序，dep 大的最远先 over，dep 小的最近后 over 覆盖 */
+                int slot = (n_slot < 8) ? n_slot : 7;
+                for (int i = 0; i < n_slot; i++)
+                {
+                    if (dep <= dep_arr[i] /* + 0.1 ≈ shader epsilon，整数下相等也要插在右边 */)
+                    {
+                        slot = i + 1; /* dep ≤ 已有 → 插在它之后 */
+                    }
+                    else
+                    {
+                        slot = i;     /* dep > 已有 → 插在它之前 */
+                        break;
+                    }
+                }
+                if (slot > 7) continue; /* 8 槽满且 dep 最小 → 丢弃（与 shader 一致） */
+
+                /* shift [slot..min(n_slot,7)-1] 向右移到 [slot+1..min(n_slot+1,8)-1] */
+                int last = (n_slot < 8) ? n_slot : 7;
+                for (int i = last; i > slot; i--)
+                {
+                    dep_arr[i] = dep_arr[i-1];
+                    col_arr[i] = col_arr[i-1];
+                    alf_arr[i] = alf_arr[i-1];
+                    trs_arr[i] = trs_arr[i-1];
+                }
+                dep_arr[slot] = dep;
+                col_arr[slot] = col;
+                alf_arr[slot] = sa;
+                trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
+                if (n_slot < 8) n_slot++;
+            }
+
+            if (n_slot == 0)
+                continue;
+
+            /* compare_color：从 i=0（最远）→ n-1（最近）顺序 over alpha 混合
+             *   累积值在 premultiplied alpha 空间内运算，输出时反预乘
+             *   trans=1 时清空 cur_color（layer mask 行为，对齐 JS shader） */
+            Uint32 acc_a = 0, acc_r = 0, acc_g = 0, acc_b = 0;
+            for (int i = 0; i < n_slot; i++)
+            {
+                if (trs_arr[i])
+                {
+                    acc_a = acc_r = acc_g = acc_b = 0;
+                    continue;
+                }
+                Uint32 sa = alf_arr[i];
+                if (sa == 0) continue;
+
+                Uint32 c = col_arr[i];
+                Uint32 cr = (c >> 16) & 0xFF;
+                Uint32 cg = (c >> 8)  & 0xFF;
+                Uint32 cb =  c        & 0xFF;
+                /* 预乘：color.rgb *= sa */
+                Uint32 pr = (cr * sa + 127u) / 255u;
+                Uint32 pg = (cg * sa + 127u) / 255u;
+                Uint32 pb = (cb * sa + 127u) / 255u;
+                /* over: acc = acc*(1-sa/255) + (sa, pr, pg, pb) */
+                Uint32 inv = 255u - sa;
+                acc_a = (acc_a * inv + 127u) / 255u + sa;
+                acc_r = (acc_r * inv + 127u) / 255u + pr;
+                acc_g = (acc_g * inv + 127u) / 255u + pg;
+                acc_b = (acc_b * inv + 127u) / 255u + pb;
+                if (acc_a > 255u) acc_a = 255u;
+                if (acc_r > 255u) acc_r = 255u;
+                if (acc_g > 255u) acc_g = 255u;
+                if (acc_b > 255u) acc_b = 255u;
+            }
+            if (acc_a == 0)
+                continue;
+
+            /* 反预乘：ARGB8888 输出（PixiJS 默认管线非预乘）*/
+            Uint32 final_r = (acc_r * 255u + acc_a / 2u) / acc_a;
+            Uint32 final_g = (acc_g * 255u + acc_a / 2u) / acc_a;
+            Uint32 final_b = (acc_b * 255u + acc_a / 2u) / acc_a;
+            if (final_r > 255u) final_r = 255u;
+            if (final_g > 255u) final_g = 255u;
+            if (final_b > 255u) final_b = 255u;
+
+            dst_row[px] = (acc_a << 24) | (final_r << 16) | (final_g << 8) | final_b;
+        }
     }
 
     if (SDL_MUSTLOCK(result))
         SDL_UnlockSurface(result);
 
-    /* M3: zbuf 复用，不释放（JY_Reset 内统一释放） */
     SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
+
+    /* ─── 阶段 3：释放 owned buffer + layers 数组 ─── */
+    for (int i = 0; i < layer_n; i++)
+        if (layers[i].owned)
+            JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
+    SDL_free(layers);
 
     /* Push result as SDL_Surface userdata */
     SDL_Surface** sfud = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
@@ -1360,13 +1443,7 @@ static void JY_Reset(JY_UserData* ud)
         SDL_free(ud->depth_frames);
         ud->depth_frames = NULL;
     }
-    /* M3: 释放 zbuf 复用缓冲 */
-    if (ud->zbuf_cached)
-    {
-        SDL_free(ud->zbuf_cached);
-        ud->zbuf_cached = NULL;
-        ud->zbuf_cached_size = 0;
-    }
+    /* ★ R10: zbuf_cached 字段已删除（改为 per-pixel 栈分配 8 槽排序） */
 }
 
 static int JY_GC(lua_State* L)
@@ -1775,6 +1852,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         }
         jf->key_x = (Sint32)sf_info->key_x;
         jf->key_y = (Sint32)sf_info->key_y;
+        jf->z     = 0; /* SPR 14B 帧头无 z 字段，默认 0（与 JS 行为一致）*/
         JY_UpdateFrameBounds(ud, jf);
     }
 
@@ -1826,8 +1904,8 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
     lua_setfield(L, -2, "max_frame_bottom");
 
-    /* DLL 版本标记：5 = R8 LRU + 真实合成边界 */
-    lua_pushinteger(L, 5);
+    /* DLL 版本标记：6 = R10 sortSample 等价多层混合 + atlas frame.z 透传 */
+    lua_pushinteger(L, 6);
     lua_setfield(L, -2, "depth_ver");
 
     return 2;
@@ -2098,6 +2176,12 @@ static int JY_NEW(lua_State* L)
             f->key_y = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
 
+            /* ★ R10: atlas mc.animate.frames[i].z（逐帧深度偏移）——与 JS shader Rect.zOffset = -I.z 对齐
+             *   Lua 端解析Atlas帧 应试试传 z = tonumber(f.z) or 0，该字段为集成到 JY_FrameInfo */
+            lua_getfield(L, -1, "z");
+            f->z = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
             JY_UpdateFrameBounds(ud, f);
         }
         lua_pop(L, 1);
@@ -2152,8 +2236,8 @@ static int JY_NEW(lua_State* L)
     lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
     lua_setfield(L, -2, "max_frame_bottom");
 
-    /* DLL 版本标记：5 = R8 LRU + 真实合成边界 */
-    lua_pushinteger(L, 5);
+    /* DLL 版本标记：6 = R10 sortSample 等价多层混合 + atlas frame.z 透传 */
+    lua_pushinteger(L, 6);
     lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
