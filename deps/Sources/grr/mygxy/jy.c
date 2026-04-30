@@ -40,6 +40,7 @@ static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
 static int s_jy_composite_debug_prints = 0;
+static int s_jy_atlas_debug_prints = 0;
 
 static const luaL_Reg JY_FUNCS[] = {
     {"__gc",        JY_GC},
@@ -2106,6 +2107,19 @@ static int JY_NEW(lua_State* L)
 
     if (!ud->index_pixels)
         return luaL_error(L, "JY: failed to extract index pixels");
+
+    if (s_jy_atlas_debug_prints < 8)
+    {
+        s_jy_atlas_debug_prints++;
+        printf("[JY Atlas Debug] atlas=%ux%u index_bpp=%u alpha_bpp=%u has_alpha=%d depth_arg=%d\n",
+            (unsigned)ud->atlas_w,
+            (unsigned)ud->atlas_h,
+            (unsigned)ud->index_bpp,
+            (unsigned)ud->alpha_bpp,
+            ud->alpha_pixels ? 1 : 0,
+            (depth_data && depth_len > 0) ? 1 : 0);
+        fflush(stdout);
+    }
 
     if (depth_data && depth_len > 0)
     {
