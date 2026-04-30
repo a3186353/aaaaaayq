@@ -307,8 +307,16 @@ static int JY_DecodeFrame(
             Uint32 dst_off = y * f->sw + x;
             idx_buf[dst_off]   = pal_idx;
             alpha_buf[dst_off] = alpha;
-            /* depth：与原逻辑一致，alpha < 77 时 depth = 0 */
-            depth_buf[dst_off] = (alpha >= 77) ? (((Uint16)depth_hi << 8) | depth_lo) : 0;
+            /* JS shader: depth = (G/255)*65536 + (B/255)*256 ≈ G*257 + B */
+            if (alpha >= 77)
+            {
+                Uint32 depth_val = (Uint32)depth_hi * 257u + depth_lo;
+                depth_buf[dst_off] = (Uint16)(depth_val > 65535u ? 65535u : depth_val);
+            }
+            else
+            {
+                depth_buf[dst_off] = 0;
+            }
         }
     }
 
@@ -1315,7 +1323,7 @@ static int JY_Composite(lua_State* L)
                 size_t loff = (size_t)ly * L_p->lw + lx;
 
                 Uint8 sa = L_p->alpha ? L_p->alpha[loff] : 255;
-                if (sa == 0)
+                if (sa == 0 && !L_p->transparent)
                     continue;
 
                 Uint16 d = L_p->depth ? L_p->depth[loff] : 0;
