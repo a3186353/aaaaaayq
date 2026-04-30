@@ -39,8 +39,6 @@ static int JY_Composite(lua_State* L);
 static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
-static int s_jy_composite_debug_prints = 0;
-static int s_jy_atlas_debug_prints = 0;
 
 static const luaL_Reg JY_FUNCS[] = {
     {"__gc",        JY_GC},
@@ -1274,76 +1272,6 @@ static int JY_Composite(lua_State* L)
         }
     }
 
-    int has_transparent_layer = 0;
-    for (int i = 0; i < layer_n; i++)
-    {
-        if (layers[i].transparent)
-        {
-            has_transparent_layer = 1;
-            break;
-        }
-    }
-    if (has_transparent_layer && s_jy_composite_debug_prints < 5)
-    {
-        s_jy_composite_debug_prints++;
-        printf("[JY Composite Debug] canvas=%dx%d layers=%d\n", canvas_w, canvas_h, layer_n);
-        fflush(stdout);
-        for (int i = 0; i < layer_n; i++)
-        {
-            const JY_CompLayer* L_p = &layers[i];
-            Uint32 px_count = (Uint32)L_p->lw * (Uint32)L_p->lh;
-            Uint32 alpha_count = 0;
-            Uint32 depth_count = 0;
-            Uint32 alpha_no_depth_count = 0;
-            Uint32 zero_alpha_depth_count = 0;
-            Uint16 min_depth = 65535;
-            Uint16 max_depth = 0;
-            Sint32 min_dep = 2147483647;
-            Sint32 max_dep = -2147483647;
-            for (Uint32 p = 0; p < px_count; p++)
-            {
-                Uint8 alpha = L_p->alpha ? L_p->alpha[p] : 255;
-                Uint16 depth = L_p->depth ? L_p->depth[p] : 0;
-                if (alpha > 0) alpha_count++;
-                if (alpha > 0 && depth == 0) alpha_no_depth_count++;
-                if (depth > 0)
-                {
-                    Sint32 dep = (Sint32)depth + L_p->z_total;
-                    depth_count++;
-                    if (alpha == 0) zero_alpha_depth_count++;
-                    if (depth < min_depth) min_depth = depth;
-                    if (depth > max_depth) max_depth = depth;
-                    if (dep < min_dep) min_dep = dep;
-                    if (dep > max_dep) max_dep = dep;
-                }
-            }
-            if (depth_count == 0)
-            {
-                min_depth = max_depth = 0;
-                min_dep = max_dep = L_p->z_total;
-            }
-            printf("[JY Composite Debug] layer=%d trans=%d z_total=%d rect=(%d,%d)-(%d,%d) size=%dx%d alpha=%u depth=%u alphaNoDepth=%u zeroAlphaDepth=%u depthRange=%u..%u depRange=%d..%d\n",
-                i + 1,
-                L_p->transparent,
-                (int)L_p->z_total,
-                L_p->start_x,
-                L_p->start_y,
-                L_p->end_x,
-                L_p->end_y,
-                (int)L_p->lw,
-                (int)L_p->lh,
-                alpha_count,
-                depth_count,
-                alpha_no_depth_count,
-                zero_alpha_depth_count,
-                (unsigned)min_depth,
-                (unsigned)max_depth,
-                (int)min_dep,
-                (int)max_dep);
-            fflush(stdout);
-        }
-    }
-
     /* ─── 阶段 2：合成结果 surface + 内核外层 pixel × 内层 layer ─── */
     SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
         SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -2107,19 +2035,6 @@ static int JY_NEW(lua_State* L)
 
     if (!ud->index_pixels)
         return luaL_error(L, "JY: failed to extract index pixels");
-
-    if (s_jy_atlas_debug_prints < 8)
-    {
-        s_jy_atlas_debug_prints++;
-        printf("[JY Atlas Debug] atlas=%ux%u index_bpp=%u alpha_bpp=%u has_alpha=%d depth_arg=%d\n",
-            (unsigned)ud->atlas_w,
-            (unsigned)ud->atlas_h,
-            (unsigned)ud->index_bpp,
-            (unsigned)ud->alpha_bpp,
-            ud->alpha_pixels ? 1 : 0,
-            (depth_data && depth_len > 0) ? 1 : 0);
-        fflush(stdout);
-    }
 
     if (depth_data && depth_len > 0)
     {
