@@ -1293,6 +1293,7 @@ static int JY_Composite(lua_State* L)
             Uint32 px_count = (Uint32)L_p->lw * (Uint32)L_p->lh;
             Uint32 alpha_count = 0;
             Uint32 depth_count = 0;
+            Uint32 alpha_no_depth_count = 0;
             Uint32 zero_alpha_depth_count = 0;
             Uint16 min_depth = 65535;
             Uint16 max_depth = 0;
@@ -1303,6 +1304,7 @@ static int JY_Composite(lua_State* L)
                 Uint8 alpha = L_p->alpha ? L_p->alpha[p] : 255;
                 Uint16 depth = L_p->depth ? L_p->depth[p] : 0;
                 if (alpha > 0) alpha_count++;
+                if (alpha > 0 && depth == 0) alpha_no_depth_count++;
                 if (depth > 0)
                 {
                     Sint32 dep = (Sint32)depth + L_p->z_total;
@@ -1319,7 +1321,7 @@ static int JY_Composite(lua_State* L)
                 min_depth = max_depth = 0;
                 min_dep = max_dep = L_p->z_total;
             }
-            printf("[JY Composite Debug] layer=%d trans=%d z_total=%d rect=(%d,%d)-(%d,%d) size=%dx%d alpha=%u depth=%u zeroAlphaDepth=%u depthRange=%u..%u depRange=%d..%d\n",
+            printf("[JY Composite Debug] layer=%d trans=%d z_total=%d rect=(%d,%d)-(%d,%d) size=%dx%d alpha=%u depth=%u alphaNoDepth=%u zeroAlphaDepth=%u depthRange=%u..%u depRange=%d..%d\n",
                 i + 1,
                 L_p->transparent,
                 (int)L_p->z_total,
@@ -1331,6 +1333,7 @@ static int JY_Composite(lua_State* L)
                 (int)L_p->lh,
                 alpha_count,
                 depth_count,
+                alpha_no_depth_count,
                 zero_alpha_depth_count,
                 (unsigned)min_depth,
                 (unsigned)max_depth,
