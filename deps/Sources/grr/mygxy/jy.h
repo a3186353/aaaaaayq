@@ -29,7 +29,7 @@
 #define JY_CACHE_CAP_DEFAULT 32
 
 /* ─── 单帧在 Atlas 中的区域 ─── */
-/* ★ R10 (depth_ver=6)：增加 z 字段（atlas mc.animate.frames[i].z）
+/* ★ R10：增加 z 字段（atlas mc.animate.frames[i].z）
  *   用于 Composite 时与 pixel depth 叠加，对齐 JS sortSample(): dep = depth(px) + (-frame.z)
  *   SPR 模式下默认 0（SPR 14B 帧头无 z 字段，与 JS 行为一致：SPR 部件仅靠 pixel depth 排序） */
 typedef struct
@@ -117,7 +117,7 @@ typedef struct
     Uint32 task_cap;
     volatile int shutdown;
 
-    /* ★ R10 (depth_ver=6)：旧 zbuf_cached 已删除
+    /* ★ R10：旧 zbuf_cached 已删除
      *   - 旧策略：单 z-buffer 仅保留最深像素 → 半透明部件被遮挡时颜色丢失
      *   - 新策略：per-pixel 8 槽插入排序 + 链式 over alpha（栈分配，无堆开销）
      *   - 与 JS sortSample shader 等价 */

@@ -26,6 +26,7 @@
  *  Forward declarations
  * ═══════════════════════════════════════════ */
 static int JY_GetFrame(lua_State* L);
+static int JY_GetFrameInfo(lua_State* L);
 static int JY_SetPal(lua_State* L);
 static int JY_GetPal(lua_State* L);
 static int JY_SetPP(lua_State* L);
@@ -43,6 +44,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"__close",     JY_GC},
     {"GetFrame",    JY_GetFrame},
     {"get_frame",   JY_GetFrame},
+    {"GetFrameInfo", JY_GetFrameInfo},
     {"SetPal",      JY_SetPal},
     {"set_palette", JY_SetPalette},
     {"GetPal",      JY_GetPal},
@@ -565,7 +567,7 @@ typedef struct
     int    base_x, base_y;    /* off_x - key_x, off_y - key_y */
     int    start_x, start_y;  /* 画布上有效像素起点（含） */
     int    end_x, end_y;      /* 画布上有效像素终点（不含） */
-    Sint32 z_total;           /* frame.z + z_bias，每像素累加 */
+    Sint32 z_total;           /* -frame.z + z_bias，每像素累加 */
     int    index_offset;
     int    transparent;       /* 0 / 1 透明遮罩标志 */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
@@ -786,6 +788,28 @@ static int JY_GetFrame(lua_State* L)
     }
 
     return JY_PushFrame(L, sf, f);
+}
+
+static int JY_GetFrameInfo(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->frame_count)
+        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
+
+    JY_FrameInfo* f = &ud->frames[(Uint32)idx];
+    lua_createtable(L, 0, 5);
+    lua_pushinteger(L, (lua_Integer)f->sw);
+    lua_setfield(L, -2, "width");
+    lua_pushinteger(L, (lua_Integer)f->sh);
+    lua_setfield(L, -2, "height");
+    lua_pushinteger(L, (lua_Integer)f->key_x);
+    lua_setfield(L, -2, "x");
+    lua_pushinteger(L, (lua_Integer)f->key_y);
+    lua_setfield(L, -2, "y");
+    lua_pushinteger(L, (lua_Integer)f->z);
+    lua_setfield(L, -2, "z");
+    return 1;
 }
 
 /* ═══════════════════════════════════════════
@@ -1085,13 +1109,13 @@ static int JY_LUA_SetCacheCap(lua_State* L)
  *  Lua API: Composite(canvas_w, canvas_h, layers_table)
  *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
  *
- *  ★ R10 (depth_ver=6)：与 JS jinyi.min.js depthVs shader 等价实现
+ *  ★ R10：与 JS jinyi.min.js depthVs shader 等价实现
  *    1) 每像素维护 8 槽插入排序数组（dep 从大到小，远→近）
  *    2) 逐层 over alpha 链式混合（compare_color 等价）
  *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
  *    4) transparent=1 时清空累积色（layer mask 路径）
  *
- *  effective_d = pixel_depth(G/B 通道) + frame.z + z_bias
+ *  effective_d = pixel_depth(G/B 通道) - frame.z + z_bias
  *  Returns: SDL_Surface* (composited ARGB8888)
  * ═══════════════════════════════════════════ */
 static int JY_Composite(lua_State* L)
@@ -1236,7 +1260,7 @@ static int JY_Composite(lua_State* L)
         L_slot->start_y      = sy;
         L_slot->end_x        = ex;
         L_slot->end_y        = ey;
-        L_slot->z_total      = (Sint32)frame_z + z_bias;
+        L_slot->z_total      = z_bias - (Sint32)frame_z;
         L_slot->index_offset = index_offset;
         L_slot->transparent  = transparent;
         L_slot->owned        = owned;
@@ -1916,10 +1940,6 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
     lua_setfield(L, -2, "max_frame_bottom");
 
-    /* DLL 版本标记：6 = R10 sortSample 等价多层混合 + atlas frame.z 透传 */
-    lua_pushinteger(L, 6);
-    lua_setfield(L, -2, "depth_ver");
-
     return 2;
 }
 
@@ -2247,10 +2267,6 @@ static int JY_NEW(lua_State* L)
     lua_setfield(L, -2, "max_frame_right");
     lua_pushinteger(L, (lua_Integer)ud->max_frame_bottom);
     lua_setfield(L, -2, "max_frame_bottom");
-
-    /* DLL 版本标记：6 = R10 sortSample 等价多层混合 + atlas frame.z 透传 */
-    lua_pushinteger(L, 6);
-    lua_setfield(L, -2, "depth_ver");
 
     /* Return: userdata, info_table */
     return 2;
