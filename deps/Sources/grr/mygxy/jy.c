@@ -1302,43 +1302,55 @@ static int JY_Composite(lua_State* L)
                 if (pal_idx < 0) pal_idx = 0;
                 Uint32 col = L_p->pal[(Uint32)pal_idx & L_p->pmask];
 
-                /* 插入排序：找第一个 dep_arr[i] <= dep+0.1 的位置（对齐 JS sortSample 行为）
-                 *   dep_arr 维持从大到小排序，dep 大的最远先 over，dep 小的最近后 over 覆盖 */
-                int slot = (n_slot < 8) ? n_slot : 7;
-                for (int i = 0; i < n_slot; i++)
-                {
-                    if (dep <= dep_arr[i] /* + 0.1 ≈ shader epsilon，整数下相等也要插在右边 */)
-                    {
-                        slot = i + 1; /* dep ≤ 已有 → 插在它之后 */
-                    }
-                    else
-                    {
-                        slot = i;     /* dep > 已有 → 插在它之前 */
-                        break;
-                    }
-                }
-                if (slot > 7) continue; /* 8 槽满且 dep 最小 → 丢弃（与 shader 一致） */
+                /* sortSample：与 JS shader 完全等价
+                 *   dep_arr 维持升序：[0]=最小dep(最远)，[n-1]=最大dep(最近)
+                 *   后续 compare_color 从 i=0(远) over 到 i=n-1(近)，物理意义：远的在底、近的在顶
+                 *   8 槽满时丢弃最小 dep(最远，对最终颜色贡献最小)，与 JS sortSample 行为一致 */
+                int slot = 0;
+                while (slot < n_slot && dep >= dep_arr[slot]) slot++;
+                /* 现在 dep_arr[0..slot-1] <= dep < dep_arr[slot..n_slot-1] */
 
-                /* shift [slot..min(n_slot,7)-1] 向右移到 [slot+1..min(n_slot+1,8)-1] */
-                int last = (n_slot < 8) ? n_slot : 7;
-                for (int i = last; i > slot; i--)
+                if (n_slot < 8)
                 {
-                    dep_arr[i] = dep_arr[i-1];
-                    col_arr[i] = col_arr[i-1];
-                    alf_arr[i] = alf_arr[i-1];
-                    trs_arr[i] = trs_arr[i-1];
+                    /* 槽未满：[slot..n_slot-1] 后移到 [slot+1..n_slot]，新元素插入 dep_arr[slot] */
+                    for (int i = n_slot; i > slot; i--)
+                    {
+                        dep_arr[i] = dep_arr[i-1];
+                        col_arr[i] = col_arr[i-1];
+                        alf_arr[i] = alf_arr[i-1];
+                        trs_arr[i] = trs_arr[i-1];
+                    }
+                    dep_arr[slot] = dep;
+                    col_arr[slot] = col;
+                    alf_arr[slot] = sa;
+                    trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
+                    n_slot++;
                 }
-                dep_arr[slot] = dep;
-                col_arr[slot] = col;
-                alf_arr[slot] = sa;
-                trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
-                if (n_slot < 8) n_slot++;
+                else
+                {
+                    /* 8 槽满：要么新元素 dep 最小自己丢弃，要么挤掉 dep_arr[0]（最远） */
+                    if (slot == 0) continue; /* 新元素是最远的，丢弃 */
+                    /* [1..slot-1] 前移到 [0..slot-2]，新元素插入 dep_arr[slot-1] */
+                    for (int i = 0; i < slot - 1; i++)
+                    {
+                        dep_arr[i] = dep_arr[i+1];
+                        col_arr[i] = col_arr[i+1];
+                        alf_arr[i] = alf_arr[i+1];
+                        trs_arr[i] = trs_arr[i+1];
+                    }
+                    dep_arr[slot - 1] = dep;
+                    col_arr[slot - 1] = col;
+                    alf_arr[slot - 1] = sa;
+                    trs_arr[slot - 1] = (Uint8)(L_p->transparent ? 1 : 0);
+                    /* n_slot 仍为 8 */
+                }
             }
 
             if (n_slot == 0)
                 continue;
 
             /* compare_color：从 i=0（最远）→ n-1（最近）顺序 over alpha 混合
+             *   over 算子 acc = acc*(1-sa) + new：最后参与循环的(最近)在视觉最上层
              *   累积值在 premultiplied alpha 空间内运算，输出时反预乘
              *   trans=1 时清空 cur_color（layer mask 行为，对齐 JS shader） */
             Uint32 acc_a = 0, acc_r = 0, acc_g = 0, acc_b = 0;
