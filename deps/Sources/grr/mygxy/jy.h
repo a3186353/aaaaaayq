@@ -6,15 +6,6 @@
 #include "lua_proxy.h"
 #include "sdl_proxy.h"
 
-/* Threading: sdl_proxy doesn't cover thread APIs.
- * On non-Android, SDL.h is already included via sdl_proxy.h.
- * On Android, we include the thread headers directly (they're
- * in the NDK SDL include path and don't need proxy). */
-#if defined(__ANDROID__)
-#include "SDL_thread.h"
-#include "SDL_mutex.h"
-#endif
-
 #define JY_MT "xyq_jy"
 
 /* ─── LRU 缓存容量默认值 ───
@@ -56,14 +47,6 @@ typedef struct
     /* pal_ver 字段移除：cache 内容与调色板解耦，染色变化零失效 */
     Uint32  lru_tick;
 } JY_CacheEntry;
-
-/* ─── 异步任务 ─── */
-typedef struct
-{
-    Uint32 frame_id;
-    /* pal_ver 字段移除：worker 解码 R8，与调色板版本无关 */
-    volatile int done;         /* 0=pending, 1=done, -1=canceled */
-} JY_AsyncTask;
 
 /* ─── 主 UserData ─── */
 typedef struct
@@ -107,15 +90,6 @@ typedef struct
     JY_CacheEntry* cache;
     Uint32 cache_cap;          /* 默认 JY_CACHE_CAP_DEFAULT (32)，运行时可按需调整 */
     Uint32 cache_tick;
-
-    /* 工作线程（仅在 :Prefetch 调用时延迟启动；客户端不调用时全程 NULL） */
-    SDL_Thread*  workers[2];
-    SDL_mutex*   queue_mutex;
-    SDL_cond*    queue_cond;
-    JY_AsyncTask* task_queue;
-    Uint32 task_count;
-    Uint32 task_cap;
-    volatile int shutdown;
 
     /* ★ R10：旧 zbuf_cached 已删除
      *   - 旧策略：单 z-buffer 仅保留最深像素 → 半透明部件被遮挡时颜色丢失

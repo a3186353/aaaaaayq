@@ -467,91 +467,6 @@ static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth)
     if (depth) SDL_free(depth);
 }
 
-/* 从 cache 取一帧并深拷贝到调用方 buffer
- * - 调用方拥有 *out_idx / *out_alpha / *out_depth 所有权（用 JY_FreeR8Triple 释放）
- * - 返回 1 = 命中且拷贝成功；0 = 未命中 / 无锁 / 拷贝失败
- * - 锁内只做 lookup + memcpy，临界区短，避免持锁渲染 */
-static int JY_CacheGetCopy(JY_UserData* ud, Uint32 frame_id,
-                           Uint8** out_idx, Uint8** out_alpha, Uint16** out_depth,
-                           Uint16* out_w, Uint16* out_h)
-{
-    if (!ud->cache || !ud->queue_mutex) return 0;
-
-    SDL_LockMutex(ud->queue_mutex);
-    JY_CacheEntry* hit = JY_CacheLookup(ud, frame_id);
-    if (!hit || !hit->idx_pixels)
-    {
-        SDL_UnlockMutex(ud->queue_mutex);
-        return 0;
-    }
-
-    Uint16 w = hit->w, h = hit->h;
-    Uint32 npx = (Uint32)w * (Uint32)h;
-    Uint8*  idx_copy   = (Uint8*)SDL_malloc(npx);
-    Uint8*  alpha_copy = NULL;
-    Uint16* depth_copy = NULL;
-
-    if (idx_copy)
-        SDL_memcpy(idx_copy, hit->idx_pixels, npx);
-    if (hit->alpha_pixels)
-    {
-        alpha_copy = (Uint8*)SDL_malloc(npx);
-        if (alpha_copy)
-            SDL_memcpy(alpha_copy, hit->alpha_pixels, npx);
-    }
-    if (hit->depth)
-    {
-        depth_copy = (Uint16*)SDL_malloc(npx * sizeof(Uint16));
-        if (depth_copy)
-            SDL_memcpy(depth_copy, hit->depth, npx * sizeof(Uint16));
-    }
-    SDL_UnlockMutex(ud->queue_mutex);
-
-    if (!idx_copy)
-    {
-        /* idx 拷贝失败：释放可能已分配的 alpha/depth 防泄漏 */
-        JY_FreeR8Triple(NULL, alpha_copy, depth_copy);
-        return 0;
-    }
-
-    *out_idx   = idx_copy;
-    *out_alpha = alpha_copy;
-    *out_depth = depth_copy;
-    *out_w = w;
-    *out_h = h;
-    return 1;
-}
-
-/* 把外部 buffer 深拷贝插入 cache（不接管参数所有权）
- * - 用于 GetFrame / Composite 的 cache miss 路径：原 buffer 留给本帧渲染，副本进 cache
- * - 仅在 worker 启动（queue_mutex 非空）时使用；worker 未启动时调用方应直接转移所有权
- * - 返回 1 = 插入成功；0 = 拷贝失败（cache 不更新） */
-static int JY_CacheCopyInsert(JY_UserData* ud, Uint32 frame_id,
-                              const Uint8* idx, const Uint8* alpha, const Uint16* depth,
-                              Uint16 w, Uint16 h)
-{
-    if (!ud->cache || !ud->queue_mutex || !idx) return 0;
-
-    Uint32 npx = (Uint32)w * (Uint32)h;
-    Uint8*  ic = (Uint8*) SDL_malloc(npx);
-    Uint8*  ac = (alpha) ? (Uint8*) SDL_malloc(npx) : NULL;
-    Uint16* dc = (depth) ? (Uint16*)SDL_malloc(npx * sizeof(Uint16)) : NULL;
-
-    if (!ic)
-    {
-        JY_FreeR8Triple(NULL, ac, dc);
-        return 0;
-    }
-    SDL_memcpy(ic, idx, npx);
-    if (ac && alpha) SDL_memcpy(ac, alpha, npx);
-    if (dc && depth) SDL_memcpy(dc, depth, npx * sizeof(Uint16));
-
-    SDL_LockMutex(ud->queue_mutex);
-    JY_CacheInsert(ud, frame_id, ic, ac, dc, w, h);
-    SDL_UnlockMutex(ud->queue_mutex);
-    return 1;
-}
-
 /* ═══════════════════════════════════════════
  *  R10 Composite 内核辅助：8 槽插入排序 + 链式 over alpha
  *  对齐 JS jinyi.min.js depthVs shader (sortSample + compare_color)
@@ -572,122 +487,11 @@ typedef struct
     int    index_offset;
     int    transparent;       /* 0 / 1 透明遮罩标志 */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
+    Uint32 frame_id;
+    int    cache_after;
     const Uint32* pal;
     Uint32 pmask;
 } JY_CompLayer;
-
-/* ═══════════════════════════════════════════
- *  Worker thread
- * ═══════════════════════════════════════════ */
-static int JY_WorkerFunc(void* data)
-{
-    JY_UserData* ud = (JY_UserData*)data;
-
-    while (!ud->shutdown)
-    {
-        SDL_LockMutex(ud->queue_mutex);
-
-        /* Wait for work */
-        while (ud->task_count == 0 && !ud->shutdown)
-            SDL_CondWait(ud->queue_cond, ud->queue_mutex);
-
-        if (ud->shutdown)
-        {
-            SDL_UnlockMutex(ud->queue_mutex);
-            break;
-        }
-
-        /* Dequeue task */
-        JY_AsyncTask task = {0};
-        int has_task = 0;
-        if (ud->task_count > 0)
-        {
-            task = ud->task_queue[0];
-            ud->task_count--;
-            if (ud->task_count > 0)
-                SDL_memmove(&ud->task_queue[0], &ud->task_queue[1],
-                            ud->task_count * sizeof(JY_AsyncTask));
-            has_task = 1;
-        }
-
-        SDL_UnlockMutex(ud->queue_mutex);
-
-        if (!has_task)
-            continue;
-
-        /* 已缓存则跳过（无需 pal_ver 比对） */
-        SDL_LockMutex(ud->queue_mutex);
-        JY_CacheEntry* hit = JY_CacheLookup(ud, task.frame_id);
-        SDL_UnlockMutex(ud->queue_mutex);
-
-        if (hit)
-            continue;
-
-        /* 解码到 R8 三 buffer（与调色板版本无关）*/
-        Uint8 *idx = NULL, *alpha = NULL;
-        Uint16* depth = NULL;
-        Uint16 w = 0, h = 0;
-        if (JY_DecodeFrame(ud, task.frame_id, &idx, &alpha, &depth, &w, &h))
-        {
-            SDL_LockMutex(ud->queue_mutex);
-            /* CacheInsert 接管 idx + alpha + depth 所有权 */
-            JY_CacheInsert(ud, task.frame_id, idx, alpha, depth, w, h);
-            SDL_UnlockMutex(ud->queue_mutex);
-        }
-        /* 解码失败时 JY_DecodeFrame 内部已统一回滚释放，此处无需额外清理 */
-    }
-    return 0;
-}
-
-static void JY_StartWorkers(JY_UserData* ud)
-{
-    if (ud->queue_mutex)
-        return; /* Already started */
-
-    ud->queue_mutex = SDL_CreateMutex();
-    ud->queue_cond = SDL_CreateCond();
-    ud->task_cap = 64;
-    ud->task_queue = (JY_AsyncTask*)SDL_calloc(ud->task_cap, sizeof(JY_AsyncTask));
-    ud->task_count = 0;
-    ud->shutdown = 0;
-
-    for (int i = 0; i < 2; i++)
-    {
-        char name[32];
-        SDL_snprintf(name, sizeof(name), "jy_worker_%d", i);
-        ud->workers[i] = SDL_CreateThread(JY_WorkerFunc, name, ud);
-    }
-}
-
-static void JY_StopWorkers(JY_UserData* ud)
-{
-    if (!ud->queue_mutex)
-        return;
-
-    ud->shutdown = 1;
-    SDL_CondBroadcast(ud->queue_cond);
-
-    for (int i = 0; i < 2; i++)
-    {
-        if (ud->workers[i])
-        {
-            SDL_WaitThread(ud->workers[i], NULL);
-            ud->workers[i] = NULL;
-        }
-    }
-
-    SDL_DestroyMutex(ud->queue_mutex);
-    ud->queue_mutex = NULL;
-    SDL_DestroyCond(ud->queue_cond);
-    ud->queue_cond = NULL;
-
-    if (ud->task_queue)
-    {
-        SDL_free(ud->task_queue);
-        ud->task_queue = NULL;
-    }
-    ud->task_count = 0;
-}
 
 /* ═══════════════════════════════════════════
  *  Lua API: GetFrame(id) → SDL_Surface*, {x,y,width,height}
@@ -729,24 +533,8 @@ static int JY_GetFrame(lua_State* L)
     /* ─── Cache 命中：按当前 pal[] 实时反查生成 ARGB8888 surface ───
      * R8 优化的核心：cache 内只存 idx + alpha + depth，不存 ARGB
      * 染色变化（pal_version++）后 cache 仍命中，省一次完整 DecodeFrame */
-    if (ud->cache && ud->queue_mutex)
+    if (ud->cache)
     {
-        /* Worker 路径：拷贝出锁防 UAF（worker 可能并发淘汰 hit） */
-        Uint8 *idx_c = NULL, *alpha_c = NULL;
-        Uint16* depth_c = NULL;
-        Uint16 w = 0, h = 0;
-        if (JY_CacheGetCopy(ud, id, &idx_c, &alpha_c, &depth_c, &w, &h))
-        {
-            SDL_Surface* sf = JY_RenderFrameToSurface(ud, idx_c, alpha_c, w, h);
-            JY_FreeR8Triple(idx_c, alpha_c, depth_c);
-            if (sf)
-                return JY_PushFrame(L, sf, f);
-            /* 渲染失败回退到 cache miss 路径重新解码 */
-        }
-    }
-    else if (ud->cache)
-    {
-        /* Worker 未启动：无并发，直接 borrow cache 内 buffer 反查（零拷贝） */
         JY_CacheEntry* hit = JY_CacheLookup(ud, id);
         if (hit && hit->idx_pixels)
         {
@@ -771,16 +559,9 @@ static int JY_GetFrame(lua_State* L)
         return 0;
     }
 
-    /* cache 接管 R8 三 buffer 所有权；无 cache 或拷贝失败时直接释放 */
-    if (ud->cache && ud->queue_mutex)
+    /* cache 接管 R8 三 buffer 所有权；无 cache 时直接释放 */
+    if (ud->cache)
     {
-        /* Worker 路径：buffer 留给本帧渲染（已出 surface），副本进 cache */
-        JY_CacheCopyInsert(ud, id, idx_buf, alpha_buf, depth_buf, w, h);
-        JY_FreeR8Triple(idx_buf, alpha_buf, depth_buf);
-    }
-    else if (ud->cache)
-    {
-        /* Worker 未启动：直接转移所有权到 cache（零拷贝） */
         JY_CacheInsert(ud, id, idx_buf, alpha_buf, depth_buf, w, h);
     }
     else
@@ -931,7 +712,7 @@ static int JY_SetPalette(lua_State* L)
 }
 
 /* ═══════════════════════════════════════════
- *  Lua API: Prefetch(from, to) — async preload
+ *  Lua API: Prefetch(from, to) — sync fill cache
  * ═══════════════════════════════════════════ */
 static int JY_Prefetch(lua_State* L)
 {
@@ -942,12 +723,6 @@ static int JY_Prefetch(lua_State* L)
     if (from > to || to >= ud->frame_count)
         return 0;
 
-    /* Ensure workers are running */
-    if (!ud->queue_mutex)
-        JY_StartWorkers(ud);
-
-    SDL_LockMutex(ud->queue_mutex);
-
     for (Uint32 id = from; id <= to; id++)
     {
         /* 已缓存则跳过（R8 cache 与调色板版本无关）*/
@@ -955,26 +730,17 @@ static int JY_Prefetch(lua_State* L)
         if (hit)
             continue;
 
-        /* Grow queue if needed */
-        if (ud->task_count >= ud->task_cap)
+        Uint8 *idx = NULL, *alpha = NULL;
+        Uint16* depth = NULL;
+        Uint16 w = 0, h = 0;
+        if (JY_DecodeFrame(ud, id, &idx, &alpha, &depth, &w, &h))
         {
-            Uint32 new_cap = ud->task_cap * 2;
-            JY_AsyncTask* new_q = (JY_AsyncTask*)SDL_realloc(
-                ud->task_queue, new_cap * sizeof(JY_AsyncTask));
-            if (!new_q)
-                break;
-            ud->task_queue = new_q;
-            ud->task_cap = new_cap;
+            if (ud->cache)
+                JY_CacheInsert(ud, id, idx, alpha, depth, w, h);
+            else
+                JY_FreeR8Triple(idx, alpha, depth);
         }
-
-        JY_AsyncTask* t = &ud->task_queue[ud->task_count++];
-        t->frame_id = id;
-        /* pal_ver 字段已移除：worker 解码 R8，与调色板无关 */
-        t->done = 0;
     }
-
-    SDL_CondBroadcast(ud->queue_cond);
-    SDL_UnlockMutex(ud->queue_mutex);
 
     return 0;
 }
@@ -1001,7 +767,7 @@ static int JY_LUA_CacheClear(lua_State* L)
  *     - 霓裳宝阁拖动预览：可临时调高到 64~128 减少重解码
  *     - 内存压力微高：可调低到 16 进一步压缩
  *  边界：1 ≤ cap ≤ 256（其它越界值被限位到此区间）
- *  线程安全：worker 启动后需加锁，避免解码线程访问被 realloc 后的旧指针
+ * 线程安全：当前 jy cache 仅在主 Lua 线程访问，不再启动后台解码线程
  *  返回值：boolean（true=调整成功，false=参数无效 / realloc 失败）
  * ══════════════════════════════════════════ */
 static int JY_LUA_SetCacheCap(lua_State* L)
@@ -1024,9 +790,6 @@ static int JY_LUA_SetCacheCap(lua_State* L)
         lua_pushboolean(L, 1);
         return 1;
     }
-
-    /* worker 启动时加锁防止并发访问被 realloc 后的旧指针 */
-    if (ud->queue_mutex) SDL_LockMutex(ud->queue_mutex);
 
     int ok = 1;
 
@@ -1100,8 +863,6 @@ static int JY_LUA_SetCacheCap(lua_State* L)
             ok = 0;
     }
 
-    if (ud->queue_mutex) SDL_UnlockMutex(ud->queue_mutex);
-
     lua_pushboolean(L, ok);
     return 1;
 }
@@ -1166,26 +927,15 @@ static int JY_Composite(lua_State* L)
         if (frame_id >= layer_ud->frame_count)
             continue;
 
-        /* 取 layer 三 buffer：H6 双路径
-         *   Worker 启动：JY_CacheGetCopy 拷贝出锁防 UAF
-         *   Worker 未启动：直接 borrow cache 内 buffer，零拷贝 */
+        /* 取 layer 三 buffer：单线程缓存路径，直接 borrow cache 内 buffer */
         const Uint8*  l_idx   = NULL;
         const Uint8*  l_alpha = NULL;
         const Uint16* l_depth = NULL;
         Uint16 lw16 = 0, lh16 = 0;
         int    owned = 0;
+        int    cache_after = 0;
 
-        if (layer_ud->cache && layer_ud->queue_mutex)
-        {
-            Uint8 *idx_c = NULL, *alpha_c = NULL;
-            Uint16* depth_c = NULL;
-            if (JY_CacheGetCopy(layer_ud, frame_id, &idx_c, &alpha_c, &depth_c, &lw16, &lh16))
-            {
-                l_idx = idx_c; l_alpha = alpha_c; l_depth = depth_c;
-                owned = 1;
-            }
-        }
-        else if (layer_ud->cache)
+        if (layer_ud->cache)
         {
             JY_CacheEntry* hit = JY_CacheLookup(layer_ud, frame_id);
             if (hit && hit->idx_pixels)
@@ -1210,16 +960,8 @@ static int JY_Composite(lua_State* L)
             l_idx = decode_idx; l_alpha = decode_alpha; l_depth = decode_depth;
             lw16 = dw; lh16 = dh;
             owned = 1;
-
-            if (layer_ud->cache && layer_ud->queue_mutex)
-            {
-                JY_CacheCopyInsert(layer_ud, frame_id, decode_idx, decode_alpha, decode_depth, dw, dh);
-            }
-            else if (layer_ud->cache)
-            {
-                JY_CacheInsert(layer_ud, frame_id, decode_idx, decode_alpha, decode_depth, dw, dh);
-                owned = 0;
-            }
+            if (layer_ud->cache)
+                cache_after = 1;
         }
 
         /* 几何：base = off - frame.key（每个 layer 自己的锚点对齐到外部传入 off）
@@ -1265,6 +1007,8 @@ static int JY_Composite(lua_State* L)
         L_slot->index_offset = index_offset;
         L_slot->transparent  = transparent;
         L_slot->owned        = owned;
+        L_slot->frame_id     = frame_id;
+        L_slot->cache_after  = cache_after;
         L_slot->pal          = layer_ud->pal;
         {
             Uint32 pmod = layer_ud->pal_mod ? layer_ud->pal_mod : 256;
@@ -1290,11 +1034,33 @@ static int JY_Composite(lua_State* L)
 
     Uint32* dst_pixels = (Uint32*)result->pixels;
     Uint32 dst_stride = (Uint32)(result->pitch / 4);
+    int* active_layers = NULL;
+    if (layer_n > 0)
+        active_layers = (int*)SDL_malloc((size_t)layer_n * sizeof(int));
+    if (layer_n > 0 && !active_layers)
+    {
+        if (SDL_MUSTLOCK(result))
+            SDL_UnlockSurface(result);
+        SDL_FreeSurface(result);
+        for (int i = 0; i < layer_n; i++)
+            if (layers[i].owned)
+                JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
+        SDL_free(layers);
+        return luaL_error(L, "JY_Composite: failed to alloc active layer list");
+    }
 
     /* 8 槽栈数组（per-pixel 局部，按 dep 从大到小排序）*/
     for (int py = 0; py < canvas_h; py++)
     {
         Uint32* dst_row = dst_pixels + (size_t)py * dst_stride;
+        int active_n = 0;
+        for (int li = 0; li < layer_n; li++)
+        {
+            const JY_CompLayer* L_p = &layers[li];
+            if (py >= L_p->start_y && py < L_p->end_y)
+                active_layers[active_n++] = li;
+        }
+
         for (int px = 0; px < canvas_w; px++)
         {
             Sint32 dep_arr[8];
@@ -1303,12 +1069,10 @@ static int JY_Composite(lua_State* L)
             Uint8  trs_arr[8];
             int    n_slot = 0;
 
-            /* 内层 layer 遍历：累积该像素的所有可见层 */
-            for (int li = 0; li < layer_n; li++)
+            for (int ai = 0; ai < active_n; ai++)
             {
-                const JY_CompLayer* L_p = &layers[li];
-                if (px < L_p->start_x || px >= L_p->end_x ||
-                    py < L_p->start_y || py >= L_p->end_y)
+                const JY_CompLayer* L_p = &layers[active_layers[ai]];
+                if (px < L_p->start_x || px >= L_p->end_x)
                     continue;
 
                 int lx = px - L_p->base_x;
@@ -1427,11 +1191,25 @@ static int JY_Composite(lua_State* L)
         SDL_UnlockSurface(result);
 
     SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
+    SDL_free(active_layers);
 
     /* ─── 阶段 3：释放 owned buffer + layers 数组 ─── */
     for (int i = 0; i < layer_n; i++)
+    {
         if (layers[i].owned)
-            JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
+        {
+            if (layers[i].cache_after && layers[i].ud && layers[i].ud->cache)
+            {
+                JY_CacheInsert(layers[i].ud, layers[i].frame_id,
+                               (Uint8*)layers[i].idx, (Uint8*)layers[i].alpha,
+                               (Uint16*)layers[i].depth, layers[i].lw, layers[i].lh);
+            }
+            else
+            {
+                JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
+            }
+        }
+    }
     SDL_free(layers);
 
     /* Push result as SDL_Surface userdata */
@@ -1447,7 +1225,6 @@ static int JY_Composite(lua_State* L)
  * ═══════════════════════════════════════════ */
 static void JY_Reset(JY_UserData* ud)
 {
-    JY_StopWorkers(ud);
     JY_CacheClear(ud);
 
     if (ud->cache)
@@ -1902,9 +1679,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 
-    /* ★ H1: 不主动启动 worker，仅在 :Prefetch 调用时延迟启动。
-     *      客户端不调用时零内核线程/锁对象，避免最多 512 个闲置线程。
-     *      JY_StartWorkers 本身仍保留并在 Prefetch 内调用。 */
+    /* cache 按需同步填充，Prefetch 仅提前解码到同一 LRU */
 
     /* ─── Build info return table (tcp compatible) ─── */
     lua_createtable(L, 0, 16);
@@ -2225,7 +2000,7 @@ static int JY_NEW(lua_State* L)
     ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
     ud->cache_tick = 0;
 
-    /* ★ H1: 不主动启动 worker（同 SPR 路径，参见上方注释） */
+    /* cache 按需同步填充，Prefetch 仅提前解码到同一 LRU */
 
     /* ─── Build info return table (tcp compatible) ─── */
     lua_createtable(L, 0, 16);
