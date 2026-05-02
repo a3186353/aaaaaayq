@@ -486,6 +486,7 @@ typedef struct
     Sint32 z_total;           /* -frame.z + z_bias，每像素累加 */
     int    index_offset;
     int    transparent;       /* 0 / 1 透明遮罩标志 */
+    int    depth_src;         /* 深度源: 0=depth buffer(默认/png G/B); 1=alpha buffer(graypng 作深度) */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
     Uint32 frame_id;
     int    cache_after;
@@ -869,13 +870,20 @@ static int JY_LUA_SetCacheCap(lua_State* L)
 
 /* ═══════════════════════════════════════════
  *  Lua API: Composite(canvas_w, canvas_h, layers_table)
- *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
+ *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent, depth_src?}, ... }
  *
  *  ★ R10：与 JS jinyi.min.js depthVs shader 等价实现
  *    1) 每像素维护 8 槽插入排序数组（dep 从大到小，远→近）
  *    2) 逐层 over alpha 链式混合（compare_color 等价）
  *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
  *    4) transparent=1 时清空累积色（layer mask 路径）
+ *
+ *  ★ R11：新增 depth_src 字段（可选第 8 字段，默认 0）
+ *    - 0：depth 从 depth buffer 采样（维持现行行为；png G/B 或独立 depth atlas）
+ *    - 1：depth 从 alpha buffer 采样（graypng 8-bit 扩展 *257 为 16-bit 深度）
+ *    用例：主体 atlas 作 transparent 深度遮罩 fallback 时 png G/B 无深度，
+ *          改用 graypng(alpha 蒙版) 作二值深度：身体区 depth=65535 进入最近槽，
+ *          compare_color 末位 trs=1 清空 acc 才能有效遮挡角色对应像素。
  *
  *  effective_d = pixel_depth(G/B 通道) - frame.z + z_bias
  *  Returns: SDL_Surface* (composited ARGB8888)
@@ -909,7 +917,7 @@ static int JY_Composite(lua_State* L)
             continue;
         }
 
-        /* 7 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent} */
+        /* 7/8 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent, depth_src?} */
         lua_rawgeti(L, -1, 1);
         JY_UserData* layer_ud = (JY_UserData*)luaL_testudata(L, -1, JY_MT);
         lua_pop(L, 1);
@@ -921,6 +929,10 @@ static int JY_Composite(lua_State* L)
         lua_rawgeti(L, -1, 5); int off_y        = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 6); int index_offset = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 7); int transparent  = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        /* ★ 可选第 8 字段 depth_src：缺省为 0（向后兼容 7 字段 entry） */
+        lua_rawgeti(L, -1, 8);
+        int depth_src = lua_isnil(L, -1) ? 0 : (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
 
         lua_pop(L, 1); /* pop layer entry table */
 
@@ -1006,6 +1018,7 @@ static int JY_Composite(lua_State* L)
         L_slot->z_total      = z_bias - (Sint32)frame_z;
         L_slot->index_offset = index_offset;
         L_slot->transparent  = transparent;
+        L_slot->depth_src    = depth_src;
         L_slot->owned        = owned;
         L_slot->frame_id     = frame_id;
         L_slot->cache_after  = cache_after;
@@ -1083,7 +1096,15 @@ static int JY_Composite(lua_State* L)
                 if (sa == 0 && !L_p->transparent)
                     continue;
 
-                Uint16 d = L_p->depth ? L_p->depth[loff] : 0;
+                /* ★ R11 深度采样：depth_src=1 时用 alpha 作 depth 源
+                 *   8-bit alpha [0,255] 扩展为 16-bit depth: sa*257 → [0, 65535]
+                 *   适用场景：transparent 遮罩部件的深度源是 graypng(alpha 蒙版)，
+                 *   身体区域 sa=255 → dep=65535 进最近槽，遮挡才能生效 */
+                Uint16 d;
+                if (L_p->depth_src == 1 && L_p->alpha)
+                    d = (Uint16)((Uint32)sa * 257u);
+                else
+                    d = L_p->depth ? L_p->depth[loff] : 0;
                 Sint32 dep = (Sint32)d + L_p->z_total;
 
                 /* 调色板查表（带 indexOffset，对齐 JS shader）*/
