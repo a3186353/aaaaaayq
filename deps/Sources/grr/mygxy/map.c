@@ -1276,48 +1276,97 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
     return dedata;
 }
 
-//扫描 2bpp alpha 数组判定遮罩底层属性（与原 Lua 启发式对齐）
-//   alpha 值: 0=透明, 1=排序线, 2=半透?, 3=solid(渲染为 alpha 150)
-//   逻辑:
-//     - 任意采样列存在 alpha==1 像素 → 非底层（有排序线，参与 Y 排序）
-//     - 否则 cov = #(alpha==3) / total_sampled, cov < 0.25 → 底层（零碎装饰型）
-//     - 其他视为非底层（保守）
-//   网格步长: step_x = max(1, w/32), step_y = max(1, h/64)，单遮罩 ~1024 次字节读
-static Sint8 _compute_mask_is_bottom(const Uint8* alpha, int w, int h)
+//扫描 2bpp alpha 数组判定遮罩底层属性（与原 Lua _estimate_alpha_* 启发式完全对齐）
+//   2bpp alpha 值: 0=透明, 1=排序线(挡人), 2=半透, 3=solid(渲染为 alpha 150)
+//   注意：C 层直接用 2bpp 原值，对应原 Lua 中 surface alpha >= 150 的 solid 判定即 a==3
+//
+//   判定顺序（任一命中即返回）:
+//     A. 任意采样列存在 alpha==1 像素 → 非底层（有排序线，按 Y 参与深度排序）
+//     B. cov < 0.25                  → 底层（零碎装饰：花朵/灯笼/小石）
+//     C. offset < 200000 且 cov >= 0.30 且
+//        (bottom_ratio <= 0.02 或 top_ratio >= bottom_ratio)
+//                                    → 底层（大面积半透明地面/桥面/大台阶）
+//     D. cov >= 0.25 且 bottom_ratio >= 0.78 且 top_ratio <= 0.12 且 center_y >= 0.75
+//                                    → 底层（底重墙根/厚基座）
+//     E. cov >= 0.25                 → 非底层（普通墙体/树木/屋顶）
+//     F. 兜底                        → 底层
+//   开销：列扫描 ≤ 32 × h + 网格采样 ≤ 64×64，总计 <3000 字节读/遮罩
+static Sint8 _compute_mask_is_bottom(const Uint8* alpha, int w, int h, Uint32 offset)
 {
     if (!alpha || w <= 0 || h <= 0)
         return -1;
 
-    int step_x = w / 32; if (step_x < 1) step_x = 1;
-    int step_y = h / 64; if (step_y < 1) step_y = 1;
-
-    int total = 0;
-    int solid = 0;
-    int has_sortline = 0;
-
-    for (int y = 0; y < h && !has_sortline; y += step_y) {
-        const Uint8* row = alpha + (size_t)y * w;
-        for (int x = 0; x < w; x += step_x) {
-            Uint8 a = row[x];
-            total++;
-            if (a == 1) {
-                has_sortline = 1;
-                break;
-            }
-            if (a == 3)
-                solid++;
+    /* ---- A. 列扫描找排序线（alpha==1）---- */
+    int col_step = w / 32; if (col_step < 1) col_step = 1;
+    for (int x = 0; x < w; x += col_step) {
+        /* 从底向上扫，桥面/地面无此值，墙体/树有 */
+        for (int y = h - 1; y >= 0; y--) {
+            if (alpha[(size_t)y * w + x] == 1)
+                return 0; /* 有排序线 → 普通遮挡型 */
         }
     }
 
-    if (has_sortline)
-        return 0; /* 有排序线 → 普通遮挡型 */
+    /* ---- 网格采样：一次遍历同时算 cov / top_ratio / bottom_ratio / center_y ---- */
+    int step_x = w / 64; if (step_x < 4) step_x = 4;
+    int step_y = h / 64; if (step_y < 4) step_y = 4;
+
+    int top_y = (int)(h * 0.25);      /* 上 25% 分界 */
+    int bottom_y_line = (int)(h * 0.75); /* 下 75% 分界 */
+
+    int total = 0;
+    int solid = 0;
+    int top_cnt = 0;
+    int bottom_cnt = 0;
+    long sum_y = 0;   /* solid 像素 Y 坐标累加，算 center_y */
+
+    for (int y = 0; y < h; y += step_y) {
+        const Uint8* row = alpha + (size_t)y * w;
+        for (int x = 0; x < w; x += step_x) {
+            total++;
+            if (row[x] == 3) { /* 2bpp solid → surface alpha=150 */
+                solid++;
+                sum_y += y;
+                if (y <= top_y) top_cnt++;
+                if (y >= bottom_y_line) bottom_cnt++;
+            }
+        }
+    }
+
     if (total <= 0)
         return -1;
 
-    /* 覆盖率低（< 0.25）多为零碎装饰类底层；其余视为遮挡型 */
-    if (solid * 4 < total)
+    double cov = (double)solid / (double)total;
+
+    /* ---- B. cov < 0.25 → 底层（零碎装饰） ---- */
+    if (cov < 0.25)
         return 1;
-    return 0;
+
+    /* solid==0 已经在 cov<0.25 里排除，以下 solid>0 */
+    double top_ratio = (double)top_cnt / (double)solid;
+    double bottom_ratio = (double)bottom_cnt / (double)solid;
+
+    /* ---- C. 大面积半透明地面/桥面 ----
+       原 Lua 条件 prof.r150 >= 0.97 && prof.r255 <= 0.03 在 C 层恒成立
+       （2bpp 解码值只有 0/1/2/3，不存在 alpha=255），故省略 */
+    if (offset < 200000u && cov >= 0.30) {
+        if (bottom_ratio <= 0.02 || top_ratio >= bottom_ratio)
+            return 1;
+    }
+
+    /* ---- D. 底重墙根 ---- */
+    if (cov >= 0.25 && bottom_ratio >= 0.78 && top_ratio <= 0.12) {
+        double denom = (h - 1) > 0 ? (double)(h - 1) : 1.0;
+        double center_y = ((double)sum_y / (double)solid) / denom;
+        if (center_y >= 0.75)
+            return 1;
+    }
+
+    /* ---- E. cov >= 0.25 且未命中 C/D → 非底层 ---- */
+    if (cov >= 0.25)
+        return 0;
+
+    /* ---- F. 兜底 ---- */
+    return 1;
 }
 
 //取遮罩（tmem: 临时缓冲区，传 NULL 使用 ud->mem）
@@ -1329,8 +1378,9 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
     if (!alpha)
         return 0;
 
-    /* 在 alpha 释放前扫描一次写入 is_bottom，避免 Lua 层重复像素读 */
-    mask->info.is_bottom = _compute_mask_is_bottom(alpha, rect->w, rect->h);
+    /* 在 alpha 释放前扫描一次写入 is_bottom，避免 Lua 层重复像素读
+       offset 参与判据 C（offset < 200000 才允许走"大面积地面/桥面"分支，避免误判高 offset 资源） */
+    mask->info.is_bottom = _compute_mask_is_bottom(alpha, rect->w, rect->h, mask->info.offset);
 
     int is_async = (tmem != NULL);
 
