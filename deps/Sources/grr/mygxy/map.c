@@ -1058,6 +1058,7 @@ static int _getmaskinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, SDL_RWo
         info->size = 0;
         info->mode = 0;
         info->head = 20;
+        info->is_bottom = -1; /* -1=未解码，由 _getmasksf 在像素就绪后写入 0/1 */
 
         if (SDL_RWread(rw, (void*)&info->rect, sizeof(SDL_Rect), 1) != 1)
             goto end;
@@ -1081,6 +1082,7 @@ static int _getmaskinfo(MAP_UserData* ud, Uint32 id, MAP_MaskInfo* info, SDL_RWo
         info->size -= 16;
         info->head = 20;
         info->mode = 0;
+        info->is_bottom = -1; /* -1=未解码，由 _getmasksf 在像素就绪后写入 0/1 */
         int x = (id % ud->colnum) * 320;
         int y = (id / ud->colnum) * 240;
         info->rect.x += x;
@@ -1273,6 +1275,51 @@ static Uint8* _getmaskdata(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem
 
     return dedata;
 }
+
+//扫描 2bpp alpha 数组判定遮罩底层属性（与原 Lua 启发式对齐）
+//   alpha 值: 0=透明, 1=排序线, 2=半透?, 3=solid(渲染为 alpha 150)
+//   逻辑:
+//     - 任意采样列存在 alpha==1 像素 → 非底层（有排序线，参与 Y 排序）
+//     - 否则 cov = #(alpha==3) / total_sampled, cov < 0.25 → 底层（零碎装饰型）
+//     - 其他视为非底层（保守）
+//   网格步长: step_x = max(1, w/32), step_y = max(1, h/64)，单遮罩 ~1024 次字节读
+static Sint8 _compute_mask_is_bottom(const Uint8* alpha, int w, int h)
+{
+    if (!alpha || w <= 0 || h <= 0)
+        return -1;
+
+    int step_x = w / 32; if (step_x < 1) step_x = 1;
+    int step_y = h / 64; if (step_y < 1) step_y = 1;
+
+    int total = 0;
+    int solid = 0;
+    int has_sortline = 0;
+
+    for (int y = 0; y < h && !has_sortline; y += step_y) {
+        const Uint8* row = alpha + (size_t)y * w;
+        for (int x = 0; x < w; x += step_x) {
+            Uint8 a = row[x];
+            total++;
+            if (a == 1) {
+                has_sortline = 1;
+                break;
+            }
+            if (a == 3)
+                solid++;
+        }
+    }
+
+    if (has_sortline)
+        return 0; /* 有排序线 → 普通遮挡型 */
+    if (total <= 0)
+        return -1;
+
+    /* 覆盖率低（< 0.25）多为零碎装饰类底层；其余视为遮挡型 */
+    if (solid * 4 < total)
+        return 1;
+    return 0;
+}
+
 //取遮罩（tmem: 临时缓冲区，传 NULL 使用 ud->mem）
 static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tmem, SDL_RWops* rw)
 {
@@ -1281,6 +1328,9 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 
     if (!alpha)
         return 0;
+
+    /* 在 alpha 释放前扫描一次写入 is_bottom，避免 Lua 层重复像素读 */
+    mask->info.is_bottom = _compute_mask_is_bottom(alpha, rect->w, rect->h);
 
     int is_async = (tmem != NULL);
 
@@ -1469,7 +1519,11 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
                     }
                     
                     _getmasksf(ud, time->id, &mdata, time->mem, task_rw);
-                        
+
+                    /* 把 _getmasksf 写入的 is_bottom 回写到主线程消费的 result_mask
+                       （mdata.info 是 result_mask[i] 的拷贝，不回写则 push 到 lua 时丢失） */
+                    time->result_mask[i].is_bottom = mdata.info.is_bottom;
+
                     fm->mask_raws[i] = mdata.raw;
                 }
             }
@@ -1642,13 +1696,15 @@ static int LUA_Run(lua_State* L)
                 for (Uint32 i = 0; i < time->result_masknum; i++)
                 {
                     MAP_MaskInfo* info = &time->result_mask[i];
-                    lua_createtable(L, 0, 8);
+                    lua_createtable(L, 0, 9);
                     lua_pushinteger(L, id);
                     lua_setfield(L, -2, "id");
                     lua_pushinteger(L, info->offset);
                     lua_setfield(L, -2, "offset");
                     lua_pushinteger(L, info->mode);
                     lua_setfield(L, -2, "mode");
+                    lua_pushinteger(L, info->is_bottom);
+                    lua_setfield(L, -2, "is_bottom");
                     lua_pushinteger(L, info->rect.x);
                     lua_setfield(L, -2, "x");
                     lua_pushinteger(L, info->rect.y);
@@ -1960,13 +2016,15 @@ static int LUA_GetMapInfo(lua_State* L)
     for (Uint32 i = 0; i < num; i++)
     {
         MAP_MaskInfo* info = &mask[i];
-        lua_createtable(L, 0, 7);
+        lua_createtable(L, 0, 8);
         lua_pushinteger(L, id);
         lua_setfield(L, -2, "id");
         lua_pushinteger(L, info->offset);
         lua_setfield(L, -2, "offset");
         lua_pushinteger(L, info->mode);
         lua_setfield(L, -2, "mode");
+        lua_pushinteger(L, info->is_bottom);
+        lua_setfield(L, -2, "is_bottom");
         lua_pushinteger(L, info->rect.x);
         lua_setfield(L, -2, "x");
         lua_pushinteger(L, info->rect.y);
@@ -2000,13 +2058,15 @@ static int LUA_GetMaskInfo(lua_State* L)
     for (Uint32 i = 0; i < num; i++)
     {
         MAP_MaskInfo* info = &mask[i];
-        lua_createtable(L, 0, 7);
+        lua_createtable(L, 0, 8);
         lua_pushinteger(L, id);
         lua_setfield(L, -2, "id");
         lua_pushinteger(L, info->offset);
         lua_setfield(L, -2, "offset");
         lua_pushinteger(L, info->mode);
         lua_setfield(L, -2, "mode");
+        lua_pushinteger(L, info->is_bottom);
+        lua_setfield(L, -2, "is_bottom");
         lua_pushinteger(L, info->rect.x);
         lua_setfield(L, -2, "x");
         lua_pushinteger(L, info->rect.y);
@@ -2087,6 +2147,7 @@ static int LUA_GetMask(lua_State* L)
         MASK_Data mask;
         SDL_memset(&mask, 0, sizeof(MASK_Data));
         mask.info.offset = offset;
+        mask.info.is_bottom = -1;
 
         SDL_LockMutex(ud->mutex);
         if (!ud->closing && ud->file)
@@ -2097,6 +2158,13 @@ static int LUA_GetMask(lua_State* L)
 
         if (!mask.sf)
             return 0;
+
+        /* 把 _getmasksf 扫描的 is_bottom 写回入参 maskinfo 表
+           （同步路径下 LUA_GetMaskInfo 仅读 header 拿到 -1，这里补齐） */
+        if (lua_istable(L, 2)) {
+            lua_pushinteger(L, mask.info.is_bottom);
+            lua_setfield(L, 2, "is_bottom");
+        }
 
         SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
         *sf = mask.sf;

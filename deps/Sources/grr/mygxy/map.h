@@ -71,6 +71,7 @@ typedef struct
     Uint32 size;
     Uint32 head;
     Uint32 mode;
+    Sint8  is_bottom;   /* -1=未计算/未解码, 0=普通遮挡型, 1=底层装饰型 */
 } MAP_MaskInfo;
 
 /* 全局遮罩信息（Z排序用，仅 M1.0 格式）
