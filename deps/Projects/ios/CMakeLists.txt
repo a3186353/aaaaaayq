@@ -17,7 +17,7 @@
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.21)
-project(GGELUA3_iOS C CXX ASM)  # ASM: mpg123 NEON64 汇编 (.S)
+project(GGELUA3_iOS C CXX)
 
 
 # --- 路径定义 ---
