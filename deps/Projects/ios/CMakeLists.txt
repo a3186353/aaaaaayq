@@ -1244,16 +1244,7 @@ target_include_directories(SDL_Mixer_X_fw PRIVATE
 )
 target_compile_definitions(SDL_Mixer_X_fw PRIVATE
     MUSIC_MOD_MODPLUG MUSIC_WAV MUSIC_OGG MUSIC_FLAC
-    # ★ iOS 真机 mp3 解码诊断: 仅启用 mpg123, 暂时禁用 dr_mp3
-    #   原因: SDL_Mixer_X 的 s_music_interfaces[] 注册顺序中 DRMP3 在 MPG123 之前 (优先级更高),
-    #   当两者都启用时 mp3 实际由 dr_mp3 (minimp3 fork, 单头文件) 解码;
-    #   PC 和 Android 也启用了相同两个解码器, 但 Android 用预编译 libSDL_mixer.so (上游稳定版,
-    #   配置可能仅含 mpg123), PC 路径与 iOS 真机 ARM64 NEON 浮点行为不同.
-    #   移除 MUSIC_MP3_DRMP3 宏 → music_drmp3.c 整文件被 #ifdef 包围预处理为空,
-    #   SDL_Mixer_X 走 mpg123 (纯 C OPT_GENERIC_DITHER) 解码 mp3,
-    #   验证 iOS 持续电流声 / 启动滋啦声是否由 dr_mp3 引起.
-    #   验证通过后此注释保留以记录决策原因; 验证不通过可恢复 MUSIC_MP3_DRMP3.
-    MUSIC_FLAC_DRFLAC MUSIC_MP3_MPG123
+    MUSIC_FLAC_DRFLAC MUSIC_MP3_MPG123 MUSIC_MP3_DRMP3
     MUSIC_MID_TIMIDITY MODPLUG_STATIC
     HAVE_INTTYPES_H HAVE_SETENV HAVE_SINF PIC _REENTRANT
     _USE_MATH_DEFINES OGG_USE_TREMOR OGG_HEADER=<ivorbisfile.h>
