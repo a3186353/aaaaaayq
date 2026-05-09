@@ -185,9 +185,14 @@ if(EXISTS "${OPENSSL_SSL_LIB}")
     target_link_libraries(ghv PRIVATE "${OPENSSL_SSL_LIB}")
     message(STATUS "[ghv] 链接 OpenSSL SSL: ${OPENSSL_SSL_LIB}")
 else()
-    message(WARNING "[ghv] libssl.a 未找到: ${OPENSSL_SSL_LIB}\n"
-                    "  HTTPS 功能将不可用\n"
-                    "  使用 -DOPENSSL_SSL_LIB=<path> 指定路径")
+    # 历史教训: 此处曾为 WARNING, 导致 libhv ssl/openssl.c 未链接 libssl 时
+    # 仅产生 dyld dynamic_lookup stub, 锦衣 HTTPS CDN 下载首次触发 hssl_ctx_new
+    # 即触发 _dyld_missing_symbol_abort SIGABRT (iOS 18 实测)
+    message(FATAL_ERROR
+        "[ghv] libssl.a 未找到: '${OPENSSL_SSL_LIB}'\n"
+        "  libhv ssl/openssl.c 依赖 SSL_CTX_new / SSL_connect 等 libssl 符号\n"
+        "  锦衣 / 祥瑞 / CDN 下载需要 HTTPS 客户端\n"
+        "  请先运行 build_openssl_ios.sh 生成 libssl.a, 或使用 -DOPENSSL_SSL_LIB=<path> 指定路径")
 endif()
 
 # ============================================================================
@@ -926,7 +931,9 @@ endmacro()
 
 # ============================================================================
 # F1. libggelua.framework — 引擎核心
-#     静态链接: lua54 + zlib + ghv + libhv + libcrypto
+#     静态链接: lua54 + zlib + ghv + libhv + libcrypto + libssl
+#     注意: libhv ssl/openssl.c 必须使用 WITH_OPENSSL 编译, 并链接 libssl,
+#     否则 hssl_* 系列符号未实现, HTTPS 客户端首次调用即 dyld abort
 # ============================================================================
 add_library(ggelua_fw SHARED
     ${GGELUA_SOURCES}
@@ -962,7 +969,11 @@ target_compile_definitions(ggelua_fw PRIVATE
     LUA_USE_IOS LUA_COMPAT_APIINTCASTS
     LUA_USE_POSIX
     HAS_AES_HARDWARE=0
-    HV_STATICLIB HV_WITHOUT_SSL EVENT_KQUEUE
+    # ★ 必须使用 WITH_OPENSSL: ggelua_fw 重新编译 LIBHV_SOURCES (含 ssl/openssl.c),
+    #   该文件整体被 #ifdef WITH_OPENSSL 包围, 缺此宏则 hssl_* 函数体为空,
+    #   HttpClient.cpp 引用的所有 SSL 符号将变成 dyld dynamic_lookup stub,
+    #   锦衣 CDN HTTPS 下载首次触发 hssl_ctx_new 即 _dyld_missing_symbol_abort
+    HV_STATICLIB WITH_OPENSSL EVENT_KQUEUE
     # PhysFS archiver 控制宏 (仅启用 ZIP + 目录)
     PHYSFS_SUPPORTS_ZIP=1
     PHYSFS_SUPPORTS_7Z=0 PHYSFS_SUPPORTS_GRP=0 PHYSFS_SUPPORTS_WAD=0
@@ -976,9 +987,18 @@ target_compile_definitions(ggelua_fw PRIVATE
 # iOS (Mach-O) 不会自动导出。此处显式覆盖，确保 luaopen_ggelua 等符号可见。
 target_compile_options(ggelua_fw PRIVATE "-fvisibility=default")
 add_dependencies(ggelua_fw SDL2_fw)
+# ★ ggelua_fw 内嵌的 ssl/openssl.c 引用 SSL_CTX_new / SSL_connect 等 libssl 符号,
+#   必须显式链接 libssl.a (libcrypto.a 不含这些 SSL_* 符号, 它只提供 EVP/X509/RSA 等)
+if(NOT EXISTS "${OPENSSL_SSL_LIB}")
+    message(FATAL_ERROR
+        "[ggelua_fw] libssl.a 未找到: '${OPENSSL_SSL_LIB}'\n"
+        "  libhv HTTPS 客户端 (锦衣 / 祥瑞 CDN 下载) 需要 libssl.a\n"
+        "  请先运行 build_openssl_ios.sh")
+endif()
 target_link_libraries(ggelua_fw PRIVATE
     "-Wl,-undefined,dynamic_lookup"
     "${OPENSSL_CRYPTO_LIB}"
+    "${OPENSSL_SSL_LIB}"
     ${IOS_SYSTEM_FRAMEWORKS}
     SDL2_fw
 )

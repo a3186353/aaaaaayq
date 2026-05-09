@@ -38,15 +38,32 @@ echo -e "${CYAN} 配置: ${CONFIGURATION}${NC}"
 echo -e "${CYAN}========================================${NC}"
 
 # --- OpenSSL for iOS ---
+# 注意: 必须同时提供 libcrypto.a 和 libssl.a:
+#   libcrypto.a — ghv_crypto.cpp 的 AEAD/X25519/Ed25519 业务加密 (EVP/X509/RSA 符号)
+#   libssl.a    — libhv HTTPS 客户端 (SSL_CTX_new / SSL_connect / TLS_client_method 符号),
+#                 锦衣 / 祥瑞 / CDN 资源下载链路依赖
+# 历史教训: 仅提供 libcrypto 时, libhv ssl/openssl.c 引用的 SSL_* 符号会被 Apple ld 标记为
+#   dyld dynamic_lookup, 运行时首次 hssl_ctx_new 调用即触发 _dyld_missing_symbol_abort SIGABRT
 OPENSSL_CRYPTO_LIB="${OPENSSL_CRYPTO_LIB:-${ENGINE_ROOT}/Dependencies/openssl/ios/lib/libcrypto.a}"
+OPENSSL_SSL_LIB="${OPENSSL_SSL_LIB:-${ENGINE_ROOT}/Dependencies/openssl/ios/lib/libssl.a}"
 CMAKE_EXTRA_ARGS=()
 if [ -f "${OPENSSL_CRYPTO_LIB}" ]; then
     echo -e "${GREEN}[OpenSSL] 发现 libcrypto.a: ${OPENSSL_CRYPTO_LIB}${NC}"
     CMAKE_EXTRA_ARGS+=("-DOPENSSL_CRYPTO_LIB=${OPENSSL_CRYPTO_LIB}")
 else
-    echo -e "${YELLOW}[OpenSSL] libcrypto.a 未找到: ${OPENSSL_CRYPTO_LIB}${NC}"
-    echo -e "${YELLOW}  ghv_crypto.cpp 将编译但最终链接时需要提供 libcrypto.a${NC}"
-    echo -e "${YELLOW}  设置 OPENSSL_CRYPTO_LIB 环境变量以指定路径${NC}"
+    echo -e "${RED}[OpenSSL] libcrypto.a 未找到: ${OPENSSL_CRYPTO_LIB}${NC}"
+    echo -e "${RED}  ghv_crypto.cpp 业务加密层依赖 libcrypto${NC}"
+    echo -e "${RED}  请先运行 build_openssl_ios.sh 生成 OpenSSL 静态库${NC}"
+    exit 1
+fi
+if [ -f "${OPENSSL_SSL_LIB}" ]; then
+    echo -e "${GREEN}[OpenSSL] 发现 libssl.a: ${OPENSSL_SSL_LIB}${NC}"
+    CMAKE_EXTRA_ARGS+=("-DOPENSSL_SSL_LIB=${OPENSSL_SSL_LIB}")
+else
+    echo -e "${RED}[OpenSSL] libssl.a 未找到: ${OPENSSL_SSL_LIB}${NC}"
+    echo -e "${RED}  libhv HTTPS 客户端 (锦衣 / 祥瑞 CDN 下载) 必须链接 libssl${NC}"
+    echo -e "${RED}  请先运行 build_openssl_ios.sh 生成 OpenSSL 静态库${NC}"
+    exit 1
 fi
 
 # 预期产出的动态 framework 列表（与 CMakeLists.txt install(TARGETS ...) 保持同步）

@@ -158,8 +158,33 @@ if [ -f "$LIBSSL" ]; then
     SIZE=$(stat -f%z "$LIBSSL" 2>/dev/null || stat -c%s "$LIBSSL" 2>/dev/null)
     SIZE_KB=$((SIZE / 1024))
     echo -e "${GREEN}  ✅ libssl.a (${SIZE_KB} KB)${NC}"
+
+    # 验证 libhv HTTPS 客户端依赖的关键 SSL 符号
+    # 历史教训: 缺这些符号时 libhv ssl/openssl.c 链接产生 dyld dynamic_lookup stub,
+    #          运行时锦衣 CDN 下载首次调用即 _dyld_missing_symbol_abort
+    echo -e "${CYAN}  验证 libhv HTTPS 客户端依赖的关键 SSL 符号:${NC}"
+    SSL_SYMS_OK=1
+    for SYM in SSL_CTX_new SSL_CTX_free SSL_new SSL_free SSL_connect \
+               SSL_set_fd SSL_set_tlsext_host_name SSL_read SSL_write \
+               SSL_shutdown SSL_get_error TLS_client_method; do
+        if nm "$LIBSSL" 2>/dev/null | grep -q " T _${SYM}$\| T ${SYM}$"; then
+            echo -e "    ${GREEN}✓ ${SYM}${NC}"
+        else
+            echo -e "    ${RED}✗ ${SYM} (缺失!)${NC}"
+            SSL_SYMS_OK=0
+        fi
+    done
+    if [ "${SSL_SYMS_OK}" -ne 1 ]; then
+        echo -e "${RED}  ✗ libssl.a 关键符号缺失, 请检查 OpenSSL Configure 选项${NC}"
+        exit 1
+    fi
 else
-    echo -e "${YELLOW}  ⚠ libssl.a 未生成 (非必须，ghv 只依赖 libcrypto)${NC}"
+    # libssl.a 是 libhv HTTPS 客户端 (锦衣 / 祥瑞 CDN 下载) 的必需依赖,
+    # 不是历史注释里说的"非必须"。OpenSSL Configure 默认会同时产出 libcrypto + libssl,
+    # 此处缺失通常意味着 make install 中断或产物路径异常, 必须排查后才能继续构建 iOS framework
+    echo -e "${RED}  ✗ libssl.a 未生成! libhv HTTPS 客户端 (锦衣 CDN 下载) 必需${NC}"
+    echo -e "${RED}    请检查 OpenSSL Configure 选项与 make install 输出${NC}"
+    exit 1
 fi
 
 echo -e "\n${GREEN}========================================${NC}"
