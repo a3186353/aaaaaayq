@@ -727,11 +727,21 @@ target_compile_definitions(modplug PRIVATE
 target_compile_options(modplug PRIVATE "-fvisibility=default")
 
 # ============================================================================
-# 16d. libmpg123 静态库 (MP3 解码器 — ARM64 NEON 优化)
+# 16d. libmpg123 静态库 (MP3 解码器 — 纯 C OPT_GENERIC 实现)
+# ----------------------------------------------------------------------------
+# 历史教训: 08ec276 曾尝试启用 NEON64 .S 汇编优化 (project ... ASM),
+# 但运行时音频输出出现滋啦声/电流噪音 (NEON 实现与 libmpg123
+# float pipeline 交互有精度 / calling convention 问题), c0607f7 revert
+# 了 ASM 语言支持。但仅 revert project 行会遗留: NEON .S 仍在源列表
+# 但被 CMake 静默忽略, OPT_NEON64 宏仍使 optimize.c / synth.c 生成
+# NEON 函数调用, 导致 link 阶段 _INT123_*_neon64 / check_neon 未定义。
+# 此处完整移除 NEON64 路径: 去掉 .S 文件、getcpuflags_arm.c (仅为 NEON
+# 检测服务) 及 OPT_NEON64 宏, mpg123 完全走纯 C OPT_GENERIC + DITHER 路径,
+# iOS 上 MP3 解码性能足够且音质正常。
 # ============================================================================
 set(MPG123_DIR "${AUDIO_CODECS_DIR}/mpg123-1.25.13")
 
-# 公共源文件 (与 Android.mk 对齐)
+# 公共源文件 (纯 C, 与 Android.mk 对齐; 已移除 getcpuflags_arm.c 避免引用 check_neon)
 set(MPG123_SOURCES
     "${MPG123_DIR}/src/libmpg123/parse.c"
     "${MPG123_DIR}/src/libmpg123/frame.c"
@@ -746,7 +756,6 @@ set(MPG123_SOURCES
     "${MPG123_DIR}/src/libmpg123/index.c"
     "${MPG123_DIR}/src/compat/compat_str.c"
     "${MPG123_DIR}/src/compat/compat.c"
-    # ARM64 NEON 优化源文件 (iOS 真机)
     "${MPG123_DIR}/src/libmpg123/stringbuf.c"
     "${MPG123_DIR}/src/libmpg123/icy.c"
     "${MPG123_DIR}/src/libmpg123/icy2utf8.c"
@@ -760,23 +769,7 @@ set(MPG123_SOURCES
     "${MPG123_DIR}/src/libmpg123/synth_real.c"
     "${MPG123_DIR}/src/libmpg123/dither.c"
     "${MPG123_DIR}/src/libmpg123/feature.c"
-    "${MPG123_DIR}/src/libmpg123/getcpuflags_arm.c"
 )
-
-# NEON64 汇编文件 (仅 ARM64)
-set(MPG123_NEON64_ASM
-    "${MPG123_DIR}/src/libmpg123/dct36_neon64.S"
-    "${MPG123_DIR}/src/libmpg123/dct64_neon64_float.S"
-    "${MPG123_DIR}/src/libmpg123/synth_neon64_float.S"
-    "${MPG123_DIR}/src/libmpg123/synth_neon64_s32.S"
-    "${MPG123_DIR}/src/libmpg123/synth_stereo_neon64_float.S"
-    "${MPG123_DIR}/src/libmpg123/synth_stereo_neon64_s32.S"
-    "${MPG123_DIR}/src/libmpg123/dct64_neon64.S"
-    "${MPG123_DIR}/src/libmpg123/synth_neon64.S"
-    "${MPG123_DIR}/src/libmpg123/synth_stereo_neon64.S"
-    "${MPG123_DIR}/src/libmpg123/check_neon.S"
-)
-list(APPEND MPG123_SOURCES ${MPG123_NEON64_ASM})
 
 add_library(mpg123 STATIC ${MPG123_SOURCES})
 target_include_directories(mpg123 PUBLIC
@@ -785,8 +778,11 @@ target_include_directories(mpg123 PUBLIC
     "${MPG123_DIR}/src/compat"
     "${MPG123_DIR}/src/libmpg123"
 )
+# ★ 不定义 OPT_NEON64: optimize.c / synth.c / layer3.c 多处 #ifdef OPT_NEON64 分支
+#   会生成对 _INT123_dct36_neon64 / synth_1to1_neon64 / check_neon 等汇编符号的
+#   外部引用, 本项目不编译 .S 汇编文件, 以避免 link 未定义
 target_compile_definitions(mpg123 PRIVATE
-    OPT_MULTI OPT_GENERIC OPT_GENERIC_DITHER OPT_NEON64
+    OPT_MULTI OPT_GENERIC OPT_GENERIC_DITHER
     REAL_IS_FLOAT
 )
 target_compile_options(mpg123 PRIVATE "-fvisibility=default")
