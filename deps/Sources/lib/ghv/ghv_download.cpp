@@ -37,7 +37,7 @@ struct LuaDownload {
         std::string url;
         std::string filepath;   // empty = download to memory
         std::string range;
-        int         timeout{36000}; 
+        int         timeout{60};
 
         std::atomic<int64_t> current_size{0};
         std::atomic<int64_t> total_size{0};
@@ -60,7 +60,11 @@ struct LuaDownload {
             if (core->status.load() == 100 || core->status.load() < 0) {
                 worker.join();
             } else {
-                for (int i = 0; i < 50; ++i) {
+                // hv::HttpClient::send 同步阻塞中, cancelled 标志只能在 http_cb
+                // 回调里检查 — TLS 握手 / body 接收阶段时根本到不了回调.
+                // 短等 100ms 后 detach: timeout 已收紧到 60s, detached worker 最多
+                // 再活 60s 就自然退出, 不会无限堆积线程.
+                for (int i = 0; i < 10; ++i) {
                     if (core->status.load() == 100 || core->status.load() < 0) break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
@@ -285,7 +289,7 @@ static int l_download_new(lua_State* L) {
     const char* url = luaL_checkstring(L, 1);
     const char* filepath = luaL_optstring(L, 2, NULL);
     const char* range = luaL_optstring(L, 3, NULL);
-    int timeout = (int)luaL_optinteger(L, 4, 36000);
+    int timeout = (int)luaL_optinteger(L, 4, 60);
 
     LuaDownload* self = new LuaDownload();
     self->core->url = url;
