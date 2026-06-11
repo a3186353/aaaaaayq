@@ -408,6 +408,7 @@ set(MYGXY_SRC_DIR "${SOURCES_DIR}/grr/mygxy")
 add_library(mygxy SHARED
     # 核心源文件
     "${MYGXY_SRC_DIR}/fsb.c"
+    "${MYGXY_SRC_DIR}/asset.c"
     "${MYGXY_SRC_DIR}/hash.c"
     "${MYGXY_SRC_DIR}/lua_proxy.c"
     "${MYGXY_SRC_DIR}/sdl_proxy.c"
@@ -449,7 +450,7 @@ target_include_directories(mygxy PRIVATE
     "${PHYSFS_SRC_DIR}"                       # physfs.h (wpk.c 条件编译 WPK_USE_PHYSFS)
     "${ENGINE_ROOT}/external/vgmstream/src"
 )
-target_link_libraries(mygxy PUBLIC lua54 PRIVATE log physfs webp_decode)
+target_link_libraries(mygxy PUBLIC lua54 PRIVATE log m physfs webp_decode)
 target_link_libraries(mygxy PRIVATE SDL2_prebuilt SDL_image_prebuilt)
 target_compile_definitions(mygxy PRIVATE
     MYGXY_USE_DYNAMIC_PROXY=1
@@ -614,4 +615,3 @@ endforeach()
 message(STATUS "=== GGELUA3 Android ${ANDROID_ABI} (${CMAKE_BUILD_TYPE}) ===")
 message(STATUS "  Shared: ${SHARED_TARGETS}")
 message(STATUS "  Static: zlib libhv ghv hiredis sqlite3 physfs")
-

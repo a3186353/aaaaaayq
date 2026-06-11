@@ -29,6 +29,9 @@
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\fsb.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\asset.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\hash.c">
       <Filter>源文件</Filter>
     </ClCompile>

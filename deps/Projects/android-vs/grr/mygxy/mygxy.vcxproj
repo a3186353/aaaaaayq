@@ -37,6 +37,7 @@
   <!-- mygxy sources -->
   <ItemGroup>
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\fsb.c" />
+    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\asset.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\hash.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\map.c" />
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\SDL_list.c" />
