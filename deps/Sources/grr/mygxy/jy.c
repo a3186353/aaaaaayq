@@ -36,6 +36,7 @@ static int JY_Prefetch(lua_State* L);
 static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
+static int JY_CompositeTo(lua_State* L);
 static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
@@ -55,6 +56,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"CacheClear",  JY_LUA_CacheClear},
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
+    {"CompositeTo", JY_CompositeTo},
     {NULL, NULL},
 };
 
@@ -468,7 +470,7 @@ static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth)
 }
 
 /* ═══════════════════════════════════════════
- *  R10 Composite 内核辅助：8 槽插入排序 + 链式 over alpha
+ *  R10/R12 Composite 内核辅助：全 layer 插入排序 + 链式 over alpha
  *  对齐 JS jinyi.min.js depthVs shader (sortSample + compare_color)
  * ═══════════════════════════════════════════ */
 
@@ -868,41 +870,45 @@ static int JY_LUA_SetCacheCap(lua_State* L)
 }
 
 /* ═══════════════════════════════════════════
- *  Lua API: Composite(canvas_w, canvas_h, layers_table)
+ *  Lua API: Composite / CompositeTo  ★ R11：抽出三阶段辅助函数,支持 surface 复用
+ *
+ *    Composite(canvas_w, canvas_h, layers_table)
+ *      → 每帧新建 ARGB8888 surface,返回该 userdata(GC 自动释放)
+ *
+ *    CompositeTo(target_surface, canvas_w, canvas_h, layers_table)
+ *      → 写入调用方持有的 ARGB8888 surface,消除每帧 SDL_CreateRGBSurfaceWithFormat
+ *        ~230KB 分配/释放(密集场景手机端 heap 锁竞争 + 分页抖动主因)
+ *      → target 必须 ARGB8888 且 w>=canvas_w,h>=canvas_h;返回 bool
+ *
  *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
  *
- *  ★ R10：与 JS jinyi.min.js depthVs shader 等价实现
- *    1) 每像素维护 8 槽插入排序数组（dep 从大到小，远→近）
+ *  算法（与 JS jinyi.min.js depthVs shader 等价）:
+ *    1) 每像素维护实际 layer 数插入排序数组（dep 升序，远→近）
  *    2) 逐层 over alpha 链式混合（compare_color 等价）
  *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
  *    4) transparent=1 时清空累积色（layer mask 路径）
  *
  *  effective_d = pixel_depth(G/B 通道) - frame.z + z_bias
- *  Returns: SDL_Surface* (composited ARGB8888)
  * ═══════════════════════════════════════════ */
-static int JY_Composite(lua_State* L)
-{
-    /* arg 1: self (jy ud — used as anchor / surface 工厂宿主) */
-    JY_UserData* ud = JY_Check(L, 1);
-    (void)ud; /* self 仅作为 method 调度入口，不再持有 zbuf */
-    int canvas_w = (int)luaL_checkinteger(L, 2);
-    int canvas_h = (int)luaL_checkinteger(L, 3);
-    luaL_checktype(L, 4, LUA_TTABLE);
 
-    int layer_argc = (int)lua_rawlen(L, 4);
-    if (layer_argc <= 0 || canvas_w <= 0 || canvas_h <= 0)
+/* ─── 阶段 1 辅助：构建 layer 工作集（解码 buffer + 几何裁剪）
+ *      返回:实际有效 layer 数(>=0);-1 表示 SDL_calloc 失败,调用方需 luaL_error */
+static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canvas_h,
+                            JY_CompLayer** out_layers)
+{
+    *out_layers = NULL;
+    int layer_argc = (int)lua_rawlen(L, layers_idx);
+    if (layer_argc <= 0)
         return 0;
 
-    /* ─── 阶段 1：构建 layer 工作集（解码 buffer + 几何裁剪） ─── */
     JY_CompLayer* layers = (JY_CompLayer*)SDL_calloc(layer_argc, sizeof(JY_CompLayer));
     if (!layers)
-        return luaL_error(L, "JY_Composite: failed to alloc layer set");
+        return -1;
 
-    int layer_n = 0; /* 实际有效 layer 数 */
-
+    int layer_n = 0;
     for (int i = 1; i <= layer_argc; i++)
     {
-        lua_rawgeti(L, 4, i);
+        lua_rawgeti(L, layers_idx, i);
         if (!lua_istable(L, -1))
         {
             lua_pop(L, 1);
@@ -1016,40 +1022,42 @@ static int JY_Composite(lua_State* L)
         }
     }
 
-    /* ─── 阶段 2：合成结果 surface + 内核外层 pixel × 内层 layer ─── */
-    SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!result)
+    *out_layers = layers;
+    return layer_n;
+}
+
+/* ─── 阶段 2 辅助：内核（外层 pixel × 内层 layer，写入 dst 左上 canvas 区域）
+ *      要求:dst 已锁定且为 ARGB8888;返回 0 表示工作数组分配失败 */
+static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, int layer_n,
+                                 int canvas_w, int canvas_h)
+{
+    if (layer_n <= 0)
+        return 1; /* 没有 layer,内核什么也不做(target 已被调用方清零) */
+
+    int* active_layers = (int*)SDL_malloc((size_t)layer_n * sizeof(int));
+    if (!active_layers)
+        return 0;
+
+    Uint32* dst_pixels = (Uint32*)dst->pixels;
+    Uint32 dst_stride = (Uint32)(dst->pitch / 4);
+
+    Sint32* dep_arr = (Sint32*)SDL_malloc((size_t)layer_n * sizeof(Sint32));
+    Uint32* col_arr = (Uint32*)SDL_malloc((size_t)layer_n * sizeof(Uint32));
+    Uint8*  alf_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
+    Uint8*  trs_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
+    if (!dep_arr || !col_arr || !alf_arr || !trs_arr)
     {
-        for (int i = 0; i < layer_n; i++)
-            if (layers[i].owned)
-                JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
-        SDL_free(layers);
-        return luaL_error(L, "JY_Composite: failed to create result surface");
-    }
-    SDL_FillRect(result, NULL, 0);
-
-    if (SDL_MUSTLOCK(result))
-        SDL_LockSurface(result);
-
-    Uint32* dst_pixels = (Uint32*)result->pixels;
-    Uint32 dst_stride = (Uint32)(result->pitch / 4);
-    int* active_layers = NULL;
-    if (layer_n > 0)
-        active_layers = (int*)SDL_malloc((size_t)layer_n * sizeof(int));
-    if (layer_n > 0 && !active_layers)
-    {
-        if (SDL_MUSTLOCK(result))
-            SDL_UnlockSurface(result);
-        SDL_FreeSurface(result);
-        for (int i = 0; i < layer_n; i++)
-            if (layers[i].owned)
-                JY_FreeR8Triple((void*)layers[i].idx, (void*)layers[i].alpha, (void*)layers[i].depth);
-        SDL_free(layers);
-        return luaL_error(L, "JY_Composite: failed to alloc active layer list");
+        if (dep_arr) SDL_free(dep_arr);
+        if (col_arr) SDL_free(col_arr);
+        if (alf_arr) SDL_free(alf_arr);
+        if (trs_arr) SDL_free(trs_arr);
+        SDL_free(active_layers);
+        return 0;
     }
 
-    /* 8 槽栈数组（per-pixel 局部，按 dep 从大到小排序）*/
+    /* per-pixel 动态槽数组，CPU 路径直接保留全部 layer。
+     * 官方 WebGL shader 受 sampler 数限制以 8 层分批 + depthtex 合并；
+     * 这里不受该限制，展开后更接近完整的跨层深度排序，避免复杂锦衣把 horse mask 挤掉。 */
     for (int py = 0; py < canvas_h; py++)
     {
         Uint32* dst_row = dst_pixels + (size_t)py * dst_stride;
@@ -1063,10 +1071,6 @@ static int JY_Composite(lua_State* L)
 
         for (int px = 0; px < canvas_w; px++)
         {
-            Sint32 dep_arr[8];
-            Uint32 col_arr[8];
-            Uint8  alf_arr[8];
-            Uint8  trs_arr[8];
             int    n_slot = 0;
 
             for (int ai = 0; ai < active_n; ai++)
@@ -1080,10 +1084,10 @@ static int JY_Composite(lua_State* L)
                 size_t loff = (size_t)ly * L_p->lw + lx;
 
                 Uint8 sa = L_p->alpha ? L_p->alpha[loff] : 255;
-                if (sa == 0 && !L_p->transparent)
+                if (sa == 0)
                     continue;
 
-                Uint16 d = L_p->depth ? L_p->depth[loff] : 0;
+                Uint16 d = (sa < 77) ? 0 : (L_p->depth ? L_p->depth[loff] : 0);
                 Sint32 dep = (Sint32)d + L_p->z_total;
 
                 /* 调色板查表（带 indexOffset，对齐 JS shader）*/
@@ -1094,45 +1098,22 @@ static int JY_Composite(lua_State* L)
                 /* sortSample：与 JS shader 完全等价
                  *   dep_arr 维持升序：[0]=最小dep(最远)，[n-1]=最大dep(最近)
                  *   后续 compare_color 从 i=0(远) over 到 i=n-1(近)，物理意义：远的在底、近的在顶
-                 *   8 槽满时丢弃最小 dep(最远，对最终颜色贡献最小)，与 JS sortSample 行为一致 */
+                 *   同深度时后来的 layer 插到前面，使先来的 layer 保持在视觉上层（对齐 JS dep<=depArr+0.1） */
                 int slot = 0;
-                while (slot < n_slot && dep >= dep_arr[slot]) slot++;
-                /* 现在 dep_arr[0..slot-1] <= dep < dep_arr[slot..n_slot-1] */
-
-                if (n_slot < 8)
+                while (slot < n_slot && dep > dep_arr[slot]) slot++;
+                /* 现在 dep_arr[0..slot-1] < dep <= dep_arr[slot..n_slot-1] */
+                for (int i = n_slot; i > slot; i--)
                 {
-                    /* 槽未满：[slot..n_slot-1] 后移到 [slot+1..n_slot]，新元素插入 dep_arr[slot] */
-                    for (int i = n_slot; i > slot; i--)
-                    {
-                        dep_arr[i] = dep_arr[i-1];
-                        col_arr[i] = col_arr[i-1];
-                        alf_arr[i] = alf_arr[i-1];
-                        trs_arr[i] = trs_arr[i-1];
-                    }
-                    dep_arr[slot] = dep;
-                    col_arr[slot] = col;
-                    alf_arr[slot] = sa;
-                    trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
-                    n_slot++;
+                    dep_arr[i] = dep_arr[i-1];
+                    col_arr[i] = col_arr[i-1];
+                    alf_arr[i] = alf_arr[i-1];
+                    trs_arr[i] = trs_arr[i-1];
                 }
-                else
-                {
-                    /* 8 槽满：要么新元素 dep 最小自己丢弃，要么挤掉 dep_arr[0]（最远） */
-                    if (slot == 0) continue; /* 新元素是最远的，丢弃 */
-                    /* [1..slot-1] 前移到 [0..slot-2]，新元素插入 dep_arr[slot-1] */
-                    for (int i = 0; i < slot - 1; i++)
-                    {
-                        dep_arr[i] = dep_arr[i+1];
-                        col_arr[i] = col_arr[i+1];
-                        alf_arr[i] = alf_arr[i+1];
-                        trs_arr[i] = trs_arr[i+1];
-                    }
-                    dep_arr[slot - 1] = dep;
-                    col_arr[slot - 1] = col;
-                    alf_arr[slot - 1] = sa;
-                    trs_arr[slot - 1] = (Uint8)(L_p->transparent ? 1 : 0);
-                    /* n_slot 仍为 8 */
-                }
+                dep_arr[slot] = dep;
+                col_arr[slot] = col;
+                alf_arr[slot] = sa;
+                trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
+                n_slot++;
             }
 
             if (n_slot == 0)
@@ -1187,13 +1168,18 @@ static int JY_Composite(lua_State* L)
         }
     }
 
-    if (SDL_MUSTLOCK(result))
-        SDL_UnlockSurface(result);
-
-    SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
+    SDL_free(dep_arr);
+    SDL_free(col_arr);
+    SDL_free(alf_arr);
+    SDL_free(trs_arr);
     SDL_free(active_layers);
+    return 1;
+}
 
-    /* ─── 阶段 3：释放 owned buffer + layers 数组 ─── */
+/* ─── 阶段 3 辅助：释放 owned buffer + cache 回填 + layers 数组 */
+static void JY_ReleaseLayerSet(JY_CompLayer* layers, int layer_n)
+{
+    if (!layers) return;
     for (int i = 0; i < layer_n; i++)
     {
         if (layers[i].owned)
@@ -1211,12 +1197,131 @@ static int JY_Composite(lua_State* L)
         }
     }
     SDL_free(layers);
+}
+
+/* ─── Lua API: Composite — 每帧新建 surface 路径(向后兼容) ─── */
+static int JY_Composite(lua_State* L)
+{
+    /* arg 1: self (jy ud — used as anchor / surface 工厂宿主) */
+    JY_UserData* ud = JY_Check(L, 1);
+    (void)ud;
+    int canvas_w = (int)luaL_checkinteger(L, 2);
+    int canvas_h = (int)luaL_checkinteger(L, 3);
+    luaL_checktype(L, 4, LUA_TTABLE);
+
+    if (canvas_w <= 0 || canvas_h <= 0)
+        return 0;
+
+    JY_CompLayer* layers = NULL;
+    int layer_n = JY_BuildLayerSet(L, 4, canvas_w, canvas_h, &layers);
+    if (layer_n < 0)
+        return luaL_error(L, "JY_Composite: failed to alloc layer set");
+    if (layer_n == 0)
+    {
+        JY_ReleaseLayerSet(layers, 0);
+        return 0;
+    }
+
+    /* SDL_CreateRGBSurfaceWithFormat 已通过 SDL_memset 清零像素(SDL_surface.c:164),
+     * 旧版 SDL_FillRect(result,NULL,0) 是 100% 冗余 — Plan C 收益点,直接删除 */
+    SDL_Surface* result = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!result)
+    {
+        JY_ReleaseLayerSet(layers, layer_n);
+        return luaL_error(L, "JY_Composite: failed to create result surface");
+    }
+
+    if (SDL_MUSTLOCK(result))
+        SDL_LockSurface(result);
+
+    int ok = JY_RunCompositeKernel(result, layers, layer_n, canvas_w, canvas_h);
+
+    if (SDL_MUSTLOCK(result))
+        SDL_UnlockSurface(result);
+
+    if (!ok)
+    {
+        SDL_FreeSurface(result);
+        JY_ReleaseLayerSet(layers, layer_n);
+        return luaL_error(L, "JY_Composite: failed to alloc active layer list");
+    }
+
+    SDL_SetSurfaceBlendMode(result, SDL_BLENDMODE_BLEND);
+    JY_ReleaseLayerSet(layers, layer_n);
 
     /* Push result as SDL_Surface userdata */
     SDL_Surface** sfud = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
     *sfud = result;
     luaL_setmetatable(L, "SDL_Surface");
 
+    return 1;
+}
+
+/* ─── Lua API: CompositeTo — surface 复用路径(降发热的核心新增) ───
+ *   Lua 侧每个 wrapper 缓存一张 ARGB8888 surface,每帧调用 CompositeTo 写入,
+ *   消除 ~230KB 的 SDL_CreateRGBSurfaceWithFormat 分配/释放循环。
+ *
+ *   target.w/h 可大于 canvas,内核只写左上 canvas_w×canvas_h 子区域,
+ *   清屏也只清这个子区域（保留 target 其余像素，便于 Lua 侧自管纹理上传时机）。
+ *
+ *   失败语义:格式/尺寸不符时 luaL_error(便于调用方修业务逻辑,不静默吞掉) */
+static int JY_CompositeTo(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    (void)ud;
+    SDL_Surface* dst = *(SDL_Surface**)luaL_checkudata(L, 2, "SDL_Surface");
+    int canvas_w = (int)luaL_checkinteger(L, 3);
+    int canvas_h = (int)luaL_checkinteger(L, 4);
+    luaL_checktype(L, 5, LUA_TTABLE);
+
+    if (canvas_w <= 0 || canvas_h <= 0)
+    {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    if (!dst || !dst->format || dst->format->format != SDL_PIXELFORMAT_ARGB8888)
+        return luaL_error(L, "JY_CompositeTo: target surface must be ARGB8888");
+    if (dst->w < canvas_w || dst->h < canvas_h)
+        return luaL_error(L, "JY_CompositeTo: target surface (%dx%d) smaller than canvas (%dx%d)",
+                          dst->w, dst->h, canvas_w, canvas_h);
+
+    JY_CompLayer* layers = NULL;
+    int layer_n = JY_BuildLayerSet(L, 5, canvas_w, canvas_h, &layers);
+    if (layer_n < 0)
+        return luaL_error(L, "JY_CompositeTo: failed to alloc layer set");
+
+    if (SDL_MUSTLOCK(dst))
+        SDL_LockSurface(dst);
+
+    /* 清掉 canvas 区域(target 可能比 canvas 大,只清需要写入的部分);
+     * 比 SDL_FillRect 更直接,无 rect 边缘逻辑 */
+    if (dst->w == canvas_w)
+    {
+        /* 行连续:单次大 memset 最快,绕过 per-row 调用开销 */
+        SDL_memset(dst->pixels, 0, (size_t)canvas_h * (size_t)dst->pitch);
+    }
+    else
+    {
+        Uint8* row0 = (Uint8*)dst->pixels;
+        size_t row_bytes = (size_t)canvas_w * 4u;
+        for (int y = 0; y < canvas_h; y++)
+            SDL_memset(row0 + (size_t)y * (size_t)dst->pitch, 0, row_bytes);
+    }
+
+    int ok = JY_RunCompositeKernel(dst, layers, layer_n, canvas_w, canvas_h);
+
+    if (SDL_MUSTLOCK(dst))
+        SDL_UnlockSurface(dst);
+
+    JY_ReleaseLayerSet(layers, layer_n);
+
+    if (!ok)
+        return luaL_error(L, "JY_CompositeTo: failed to alloc active layer list");
+
+    /* target 的 BlendMode 由 Lua 侧自管(创建 surface 时一次性设好,不每帧重设) */
+    lua_pushboolean(L, 1);
     return 1;
 }
 
@@ -1257,7 +1362,7 @@ static void JY_Reset(JY_UserData* ud)
         SDL_free(ud->depth_frames);
         ud->depth_frames = NULL;
     }
-    /* ★ R10: zbuf_cached 字段已删除（改为 per-pixel 栈分配 8 槽排序） */
+    /* ★ R10/R12: zbuf_cached 字段已删除（改为 per-pixel 全 layer 深度排序） */
 }
 
 static int JY_GC(lua_State* L)
@@ -1719,8 +1824,186 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     return 2;
 }
 
+static int JY_PushCJsonDecoded(lua_State* L, const char* data, size_t len)
+{
+    int top = lua_gettop(L);
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "cjson");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    lua_getfield(L, -1, "decode");
+    if (!lua_isfunction(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    lua_pushlstring(L, data, len);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    lua_copy(L, top + 2, top + 1);
+    lua_settop(L, top + 1);
+    return 1;
+}
+
+static int JY_GetNumberField(lua_State* L, int table_idx, const char* key, lua_Number* out)
+{
+    int ok = 0;
+    table_idx = lua_absindex(L, table_idx);
+    lua_getfield(L, table_idx, key);
+    if (lua_isnumber(L, -1))
+    {
+        *out = lua_tonumber(L, -1);
+        ok = 1;
+    }
+    lua_pop(L, 1);
+    return ok;
+}
+
+static lua_Number JY_GetNumberFieldOr(lua_State* L, int table_idx, const char* key, lua_Number fallback)
+{
+    lua_Number value = fallback;
+    table_idx = lua_absindex(L, table_idx);
+    lua_getfield(L, table_idx, key);
+    if (lua_isnumber(L, -1))
+        value = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return value;
+}
+
+static void JY_SetInfoInteger(lua_State* L, int idx, const char* key, lua_Integer value)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushinteger(L, value);
+    lua_setfield(L, idx, key);
+}
+
+static void JY_SetInfoNumber(lua_State* L, int idx, const char* key, lua_Number value)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushnumber(L, value);
+    lua_setfield(L, idx, key);
+}
+
+static int JY_PushAtlasFramesFromJson(lua_State* L, const char* json, size_t json_len)
+{
+    int top = lua_gettop(L);
+    int decoded_idx, mc_idx, animate_idx, frames_idx, res_idx, result_idx;
+    lua_Unsigned frame_count, i;
+    lua_Number frame_rate;
+    int max_w = 0;
+    int max_h = 0;
+
+    if (!JY_PushCJsonDecoded(L, json, json_len) || !lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+    decoded_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, decoded_idx, "mc");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+    mc_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, mc_idx, "animate");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+    animate_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, animate_idx, "frames");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+    frames_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, decoded_idx, "res");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+    res_idx = lua_absindex(L, -1);
+
+    frame_count = lua_rawlen(L, frames_idx);
+    if (!JY_GetNumberField(L, decoded_idx, "frameRate", &frame_rate)
+        && !JY_GetNumberField(L, animate_idx, "frameRate", &frame_rate))
+    {
+        frame_rate = 8.0;
+    }
+
+    lua_createtable(L, (int)frame_count, 8);
+    result_idx = lua_absindex(L, -1);
+    JY_SetInfoInteger(L, result_idx, "group", 1);
+    JY_SetInfoInteger(L, result_idx, "frame", (lua_Integer)frame_count);
+    JY_SetInfoNumber(L, result_idx, "frameRate", frame_rate);
+    JY_SetInfoInteger(L, result_idx, "x", 0);
+    JY_SetInfoInteger(L, result_idx, "y", 0);
+
+    for (i = 1; i <= frame_count; i++)
+    {
+        lua_geti(L, frames_idx, (lua_Integer)i);
+        if (lua_istable(L, -1))
+        {
+            int f_idx = lua_absindex(L, -1);
+            lua_getfield(L, f_idx, "res");
+            lua_gettable(L, res_idx);
+            if (lua_istable(L, -1))
+            {
+                int res_info_idx = lua_absindex(L, -1);
+                lua_Number sx = JY_GetNumberFieldOr(L, res_info_idx, "x", 0.0);
+                lua_Number sy = JY_GetNumberFieldOr(L, res_info_idx, "y", 0.0);
+                lua_Number sw = JY_GetNumberFieldOr(L, res_info_idx, "w", 0.0);
+                lua_Number sh = JY_GetNumberFieldOr(L, res_info_idx, "h", 0.0);
+                lua_Number fx = JY_GetNumberFieldOr(L, f_idx, "x", 0.0);
+                lua_Number fy = JY_GetNumberFieldOr(L, f_idx, "y", 0.0);
+                lua_Number z = JY_GetNumberFieldOr(L, f_idx, "z", 0.0);
+
+                lua_createtable(L, 0, 7);
+                JY_SetInfoNumber(L, -1, "sx", sx);
+                JY_SetInfoNumber(L, -1, "sy", sy);
+                JY_SetInfoNumber(L, -1, "sw", sw);
+                JY_SetInfoNumber(L, -1, "sh", sh);
+                JY_SetInfoNumber(L, -1, "key_x", -fx);
+                JY_SetInfoNumber(L, -1, "key_y", -fy);
+                JY_SetInfoNumber(L, -1, "z", z);
+                lua_seti(L, result_idx, (lua_Integer)i);
+
+                if ((int)sw > max_w) max_w = (int)sw;
+                if ((int)sh > max_h) max_h = (int)sh;
+            }
+            lua_pop(L, 1); /* res_info */
+        }
+        lua_pop(L, 1); /* frame entry */
+    }
+
+    JY_SetInfoInteger(L, result_idx, "width", max_w);
+    JY_SetInfoInteger(L, result_idx, "height", max_h);
+
+    lua_copy(L, result_idx, top + 1);
+    lua_settop(L, top + 1);
+    return 1;
+}
+
 /* ═══════════════════════════════════════════
- *  Constructor: xy_jy(idx_png, alpha_png, pal_data, frames_table)
+ *  Constructor: xy_jy(idx_png, alpha_png, pal_data, frames_table/json_string)
  *           OR: xy_jy(spr_data [, pal_data])  — auto-detect FTEN
  *
  *  Returns: userdata, info_table
@@ -1748,16 +2031,29 @@ static int JY_NEW(lua_State* L)
     if (lua_type(L, 2) == LUA_TSTRING)
         alpha_data = lua_tolstring(L, 2, &alpha_len);
 
-    /* Arg 3: palette data (1024 bytes BGRA) */
+    /* Arg 3: palette data (1024 bytes BGRA or 768 bytes BGR) */
     size_t pal_len = 0;
     const char* pal_data = NULL;
     if (lua_type(L, 3) == LUA_TSTRING)
         pal_data = lua_tolstring(L, 3, &pal_len);
-    if (pal_data && pal_len < 1024)
-        return luaL_error(L, "JY: palette must be 1024 bytes, got %d", (int)pal_len);
+    if (pal_data && pal_len < 768)
+        return luaL_error(L, "JY: palette must be 1024 BGRA or 768 BGR bytes, got %d", (int)pal_len);
 
-    /* Arg 4: frames table */
-    luaL_checktype(L, 4, LUA_TTABLE);
+    /* Arg 4: frames table or atlas JSON string */
+    int frames_arg_idx = 4;
+    if (lua_type(L, 4) == LUA_TSTRING)
+    {
+        size_t frames_json_len = 0;
+        const char* frames_json = lua_tolstring(L, 4, &frames_json_len);
+        if (!JY_PushAtlasFramesFromJson(L, frames_json, frames_json_len))
+            return luaL_error(L, "JY: failed to parse atlas JSON frames");
+        frames_arg_idx = lua_absindex(L, -1);
+    }
+    else
+    {
+        luaL_checktype(L, 4, LUA_TTABLE);
+        frames_arg_idx = lua_absindex(L, 4);
+    }
 
     /* Arg 5: optional depth PNG */
     size_t depth_len = 0;
@@ -1839,27 +2135,27 @@ static int JY_NEW(lua_State* L)
     }
 
     /* ─── Parse global info from frames table (arg 4) ─── */
-    lua_getfield(L, 4, "group");
+    lua_getfield(L, frames_arg_idx, "group");
     ud->group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    lua_getfield(L, 4, "frame");
+    lua_getfield(L, frames_arg_idx, "frame");
     ud->frame_per_group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    lua_getfield(L, 4, "width");
+    lua_getfield(L, frames_arg_idx, "width");
     ud->width = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    lua_getfield(L, 4, "height");
+    lua_getfield(L, frames_arg_idx, "height");
     ud->height = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    lua_getfield(L, 4, "x");
+    lua_getfield(L, frames_arg_idx, "x");
     ud->global_x = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    lua_getfield(L, 4, "y");
+    lua_getfield(L, frames_arg_idx, "y");
     ud->global_y = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
@@ -1924,7 +2220,7 @@ static int JY_NEW(lua_State* L)
 
     /* ─── Load palette (BGRA → ARGB8888) ─── */
     ud->pal_count = 256;
-    if (pal_data)
+    if (pal_data && pal_len >= 1024)
     {
         const Uint8* pb = (const Uint8*)pal_data;
         for (Uint32 i = 0; i < 256; i++)
@@ -1934,6 +2230,17 @@ static int JY_NEW(lua_State* L)
             Uint8 r = pb[i * 4 + 2];
             Uint8 a = pb[i * 4 + 3];
             ud->pal[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+        }
+    }
+    else if (pal_data && pal_len >= 768)
+    {
+        const Uint8* pb = (const Uint8*)pal_data;
+        for (Uint32 i = 0; i < 256; i++)
+        {
+            Uint8 b = pb[i * 3 + 0];
+            Uint8 g = pb[i * 3 + 1];
+            Uint8 r = pb[i * 3 + 2];
+            ud->pal[i] = (255u << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
         }
     }
     else
@@ -1955,7 +2262,7 @@ static int JY_NEW(lua_State* L)
 
     for (Uint32 i = 0; i < n; i++)
     {
-        lua_geti(L, 4, (lua_Integer)(i + 1));
+        lua_geti(L, frames_arg_idx, (lua_Integer)(i + 1));
         if (lua_istable(L, -1))
         {
             JY_FrameInfo* f = &ud->frames[i];

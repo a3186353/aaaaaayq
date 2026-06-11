@@ -857,17 +857,70 @@ static int asset_lua_compose_xiangrui_palette(lua_State* L)
     return 1;
 }
 
+static int asset_lua_build_atlas_jy(lua_State* L)
+{
+    size_t idx_len = 0;
+    size_t json_len = 0;
+    size_t pal_len = 0;
+    size_t gray_len = 0;
+    const char* idx_data = luaL_checklstring(L, 1, &idx_len);
+    const char* json_data = luaL_checklstring(L, 2, &json_len);
+    const char* pal_data = NULL;
+    const char* gray_data = NULL;
+
+    if (lua_type(L, 3) == LUA_TSTRING)
+        pal_data = lua_tolstring(L, 3, &pal_len);
+    if (lua_type(L, 4) == LUA_TSTRING)
+        gray_data = lua_tolstring(L, 4, &gray_len);
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "mygxy.jy");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        lua_pushnil(L);
+        lua_insert(L, -2);
+        return 2;
+    }
+    if (!lua_isfunction(L, -1))
+    {
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        lua_pushstring(L, "mygxy.jy is not callable");
+        return 2;
+    }
+
+    lua_pushlstring(L, idx_data, idx_len);
+    if (gray_data && gray_len > 0)
+        lua_pushlstring(L, gray_data, gray_len);
+    else
+        lua_pushnil(L);
+    if (pal_data && pal_len > 0)
+        lua_pushlstring(L, pal_data, pal_len);
+    else
+        lua_pushnil(L);
+    lua_pushlstring(L, json_data, json_len);
+
+    if (lua_pcall(L, 4, 2, 0) != LUA_OK)
+    {
+        lua_pushnil(L);
+        lua_insert(L, -2);
+        return 2;
+    }
+    return 2;
+}
+
 static const luaL_Reg ASSET_FUNCS[] = {
     {"read_palette", asset_lua_read_palette},
     {"compose_palette", asset_lua_compose_palette},
     {"compose_xiangrui_palette", asset_lua_compose_xiangrui_palette},
     {"parse_atlas_frames", asset_lua_parse_atlas_frames},
+    {"build_atlas_jy", asset_lua_build_atlas_jy},
     {NULL, NULL},
 };
 
 MYGXY_API int luaopen_mygxy_asset(lua_State* L)
 {
-    lua_createtable(L, 0, 4);
+    lua_createtable(L, 0, 5);
     luaL_setfuncs(L, ASSET_FUNCS, 0);
     return 1;
 }
