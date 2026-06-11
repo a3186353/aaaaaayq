@@ -2036,6 +2036,8 @@ static int JY_NEW(lua_State* L)
     const char* pal_data = NULL;
     if (lua_type(L, 3) == LUA_TSTRING)
         pal_data = lua_tolstring(L, 3, &pal_len);
+    if (pal_data && pal_len == 0)
+        pal_data = NULL;
     if (pal_data && pal_len < 768)
         return luaL_error(L, "JY: palette must be 1024 BGRA or 768 BGR bytes, got %d", (int)pal_len);
 
