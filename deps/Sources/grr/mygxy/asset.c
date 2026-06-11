@@ -520,6 +520,178 @@ static void asset_emit_palette(lua_State* L, AssetColor colors[256], const Asset
     lua_pushlstring(L, (const char*)out, sizeof(out));
 }
 
+static int asset_push_cjson_decoded(lua_State* L, const char* data, size_t len)
+{
+    int top = lua_gettop(L);
+
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "cjson");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    lua_getfield(L, -1, "decode");
+    if (!lua_isfunction(L, -1))
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    lua_pushlstring(L, data, len);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        lua_settop(L, top);
+        return 0;
+    }
+
+    /* Replace the cjson module table with the decoded result. */
+    lua_copy(L, top + 2, top + 1);
+    lua_settop(L, top + 1);
+    return 1;
+}
+
+static void asset_set_integer_field(lua_State* L, int idx, const char* key, lua_Integer value)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushinteger(L, value);
+    lua_setfield(L, idx, key);
+}
+
+static void asset_set_number_field(lua_State* L, int idx, const char* key, lua_Number value)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushnumber(L, value);
+    lua_setfield(L, idx, key);
+}
+
+static double asset_get_number_field_or(lua_State* L, int table_idx, const char* key, double fallback)
+{
+    double value = fallback;
+    table_idx = lua_absindex(L, table_idx);
+    lua_getfield(L, table_idx, key);
+    if (lua_isnumber(L, -1))
+        value = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return value;
+}
+
+static int asset_lua_parse_atlas_frames(lua_State* L)
+{
+    int top = lua_gettop(L);
+    size_t json_len = 0;
+    const char* json = luaL_checklstring(L, 1, &json_len);
+    int decoded_idx, mc_idx, animate_idx, frames_idx, res_idx, result_idx;
+    lua_Unsigned frame_count, i;
+    double frame_rate;
+    int max_w = 0;
+    int max_h = 0;
+
+    if (!asset_push_cjson_decoded(L, json, json_len) || !lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+    decoded_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, decoded_idx, "mc");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+    mc_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, mc_idx, "animate");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+    animate_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, animate_idx, "frames");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+    frames_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, decoded_idx, "res");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+    res_idx = lua_absindex(L, -1);
+
+    frame_count = lua_rawlen(L, frames_idx);
+    if (!asset_get_number_field(L, decoded_idx, "frameRate", &frame_rate)
+        && !asset_get_number_field(L, animate_idx, "frameRate", &frame_rate))
+    {
+        frame_rate = 8.0;
+    }
+
+    lua_createtable(L, (int)frame_count, 7);
+    result_idx = lua_absindex(L, -1);
+    asset_set_integer_field(L, result_idx, "group", 1);
+    asset_set_integer_field(L, result_idx, "frame", (lua_Integer)frame_count);
+    asset_set_number_field(L, result_idx, "frameRate", (lua_Number)frame_rate);
+    asset_set_integer_field(L, result_idx, "x", 0);
+    asset_set_integer_field(L, result_idx, "y", 0);
+
+    for (i = 1; i <= frame_count; i++)
+    {
+        lua_geti(L, frames_idx, (lua_Integer)i);
+        if (lua_istable(L, -1))
+        {
+            int f_idx = lua_absindex(L, -1);
+            lua_getfield(L, f_idx, "res");
+            lua_gettable(L, res_idx);
+            if (lua_istable(L, -1))
+            {
+                int res_info_idx = lua_absindex(L, -1);
+                double sx = asset_get_number_field_or(L, res_info_idx, "x", 0.0);
+                double sy = asset_get_number_field_or(L, res_info_idx, "y", 0.0);
+                double sw = asset_get_number_field_or(L, res_info_idx, "w", 0.0);
+                double sh = asset_get_number_field_or(L, res_info_idx, "h", 0.0);
+                double fx = asset_get_number_field_or(L, f_idx, "x", 0.0);
+                double fy = asset_get_number_field_or(L, f_idx, "y", 0.0);
+                double z = asset_get_number_field_or(L, f_idx, "z", 0.0);
+
+                lua_createtable(L, 0, 7);
+                asset_set_number_field(L, -1, "sx", (lua_Number)sx);
+                asset_set_number_field(L, -1, "sy", (lua_Number)sy);
+                asset_set_number_field(L, -1, "sw", (lua_Number)sw);
+                asset_set_number_field(L, -1, "sh", (lua_Number)sh);
+                asset_set_number_field(L, -1, "key_x", (lua_Number)(-fx));
+                asset_set_number_field(L, -1, "key_y", (lua_Number)(-fy));
+                asset_set_number_field(L, -1, "z", (lua_Number)z);
+                lua_seti(L, result_idx, (lua_Integer)i);
+
+                if ((int)sw > max_w) max_w = (int)sw;
+                if ((int)sh > max_h) max_h = (int)sh;
+            }
+            lua_pop(L, 1); /* res_info */
+        }
+        lua_pop(L, 1); /* frame entry */
+    }
+
+    asset_set_integer_field(L, result_idx, "width", max_w);
+    asset_set_integer_field(L, result_idx, "height", max_h);
+
+    lua_copy(L, result_idx, top + 1);
+    lua_settop(L, top + 1);
+    return 1;
+}
+
 static int asset_lua_read_palette(lua_State* L)
 {
     size_t len = 0;
@@ -689,12 +861,13 @@ static const luaL_Reg ASSET_FUNCS[] = {
     {"read_palette", asset_lua_read_palette},
     {"compose_palette", asset_lua_compose_palette},
     {"compose_xiangrui_palette", asset_lua_compose_xiangrui_palette},
+    {"parse_atlas_frames", asset_lua_parse_atlas_frames},
     {NULL, NULL},
 };
 
 MYGXY_API int luaopen_mygxy_asset(lua_State* L)
 {
-    lua_createtable(L, 0, 3);
+    lua_createtable(L, 0, 4);
     luaL_setfuncs(L, ASSET_FUNCS, 0);
     return 1;
 }
