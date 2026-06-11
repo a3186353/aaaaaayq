@@ -77,23 +77,26 @@ static int SDLCALL WPK_physfs_close(SDL_RWops *context) {
 static SDL_RWops* WPK_SDL_RWFromFile(const char* path, const char* mode) {
     if (PHYSFS_isInit() && !SDL_strchr(path, ':') && path[0] != '/') {
         PHYSFS_File *handle = NULL;
-        if (SDL_strchr(mode, 'w')) handle = PHYSFS_openWrite(path);
-        else if (SDL_strchr(mode, 'a')) handle = PHYSFS_openAppend(path);
-        else handle = PHYSFS_openRead(path);
-        if (handle) {
-            SDL_RWops *rwops = SDL_AllocRW();
-            if (rwops) {
-                rwops->size = WPK_physfs_size; rwops->seek = WPK_physfs_seek;
-                rwops->read = WPK_physfs_read; rwops->write = WPK_physfs_write;
-                rwops->close = WPK_physfs_close; rwops->type = SDL_RWOPS_UNKNOWN;
-                rwops->hidden.unknown.data1 = handle;
-                return rwops;
+        int wants_write = SDL_strchr(mode, 'w') || SDL_strchr(mode, 'a');
+        if (!wants_write || PHYSFS_getWriteDir()) {
+            if (SDL_strchr(mode, 'w')) handle = PHYSFS_openWrite(path);
+            else if (SDL_strchr(mode, 'a')) handle = PHYSFS_openAppend(path);
+            else handle = PHYSFS_openRead(path);
+            if (handle) {
+                SDL_RWops *rwops = SDL_AllocRW();
+                if (rwops) {
+                    rwops->size = WPK_physfs_size; rwops->seek = WPK_physfs_seek;
+                    rwops->read = WPK_physfs_read; rwops->write = WPK_physfs_write;
+                    rwops->close = WPK_physfs_close; rwops->type = SDL_RWOPS_UNKNOWN;
+                    rwops->hidden.unknown.data1 = handle;
+                    return rwops;
+                }
+                PHYSFS_close(handle);
             }
-            PHYSFS_close(handle);
-        }
-        else
-        {
-            WPK_LogOpenFailure("physfs", path, PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+            else
+            {
+                WPK_LogOpenFailure("physfs", path, PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+            }
         }
     }
     SDL_RWops *rwops = (SDL_RWFromFile)(path, mode);
@@ -105,6 +108,51 @@ static SDL_RWops* WPK_SDL_RWFromFile(const char* path, const char* mode) {
 }
 #define SDL_RWFromFile WPK_SDL_RWFromFile
 #endif
+
+static int WPK_EnsureParentDirForWrite(const char* path)
+{
+    if (!path || !path[0])
+        return 0;
+
+    char dir[512];
+    SDL_strlcpy(dir, path, sizeof(dir));
+    char* lastSlash = SDL_strrchr(dir, '/');
+    char* lastBackslash = SDL_strrchr(dir, '\\');
+    char* last = lastSlash;
+    if (!last || (lastBackslash && lastBackslash > last))
+        last = lastBackslash;
+    if (!last)
+        return 1;
+    *last = 0;
+    if (!dir[0])
+        return 1;
+
+    for (char* p = dir + 1; *p; ++p)
+    {
+        if (*p != '/' && *p != '\\')
+            continue;
+        if (p == dir + 2 && dir[1] == ':')
+            continue;
+        char saved = *p;
+        *p = 0;
+#if defined(_WIN32)
+        if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+            return 0;
+#else
+        if (mkdir(dir, 0777) != 0 && errno != EEXIST)
+            return 0;
+#endif
+        *p = saved;
+    }
+#if defined(_WIN32)
+    if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return 0;
+#else
+    if (mkdir(dir, 0777) != 0 && errno != EEXIST)
+        return 0;
+#endif
+    return 1;
+}
 
 #if defined(__ANDROID__)
 static int WPK_EnsureParentDir(const char* path)
@@ -589,6 +637,7 @@ static int WPK_WriteFileAll(const char* path, const void* data, size_t size)
 {
     if (!path || !data || size == 0)
         return 0;
+    WPK_EnsureParentDirForWrite(path);
     SDL_RWops* fp = SDL_RWFromFile(path, "wb");
     if (!fp)
         return 0;
