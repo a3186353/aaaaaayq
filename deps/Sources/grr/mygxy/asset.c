@@ -6,6 +6,7 @@
  */
 #include "lua_proxy.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,24 @@ typedef struct AssetSegment
     int flag;
     double property[16]; /* 1..15 */
 } AssetSegment;
+
+typedef enum AssetColorKind
+{
+    ASSET_COLOR_EMPTY = 0,
+    ASSET_COLOR_TABLE,
+    ASSET_COLOR_PIPE,
+    ASSET_COLOR_PLAIN,
+    ASSET_COLOR_PACKED
+} AssetColorKind;
+
+typedef struct AssetColorChoice
+{
+    int values[64];
+    int count;
+    AssetColorKind kind;
+} AssetColorChoice;
+
+static double asset_get_number_field_or(lua_State* L, int table_idx, const char* key, double fallback);
 
 static double asset_clamp(double value, double min_value, double max_value)
 {
@@ -424,6 +443,15 @@ static int asset_get_number_field(lua_State* L, int table_idx, const char* key, 
     return ok;
 }
 
+static int asset_get_number_field_any(lua_State* L, int table_idx, const char* key1, const char* key2, double* out)
+{
+    if (asset_get_number_field(L, table_idx, key1, out))
+        return 1;
+    if (key2 && asset_get_number_field(L, table_idx, key2, out))
+        return 1;
+    return 0;
+}
+
 static int asset_read_segment_at(lua_State* L, int table_idx, AssetSegment* out)
 {
     double minX = 0.0;
@@ -435,9 +463,9 @@ static int asset_read_segment_at(lua_State* L, int table_idx, AssetSegment* out)
         return 0;
     table_idx = lua_absindex(L, table_idx);
 
-    if (!asset_get_number_field(L, table_idx, "minX", &minX))
+    if (!asset_get_number_field_any(L, table_idx, "minX", "min", &minX))
         minX = 0.0;
-    if (!asset_get_number_field(L, table_idx, "maxX", &maxX))
+    if (!asset_get_number_field_any(L, table_idx, "maxX", "max", &maxX))
         maxX = 0.0;
     if (!asset_get_number_field(L, table_idx, "flag", &flag))
         return 0;
@@ -495,6 +523,589 @@ static int asset_read_segments(lua_State* L, int idx, AssetSegment** out_segment
 
     *out_segments = segments;
     *out_count = count;
+    return 1;
+}
+
+static int asset_segment_compare_minX(const void* a, const void* b)
+{
+    const AssetSegment* sa = (const AssetSegment*)a;
+    const AssetSegment* sb = (const AssetSegment*)b;
+    return (sa->minX > sb->minX) - (sa->minX < sb->minX);
+}
+
+static AssetSegment* asset_clone_segments(const AssetSegment* src, int count)
+{
+    AssetSegment* out;
+    if (!src || count <= 0)
+        return NULL;
+    out = (AssetSegment*)malloc((size_t)count * sizeof(AssetSegment));
+    if (!out)
+        return NULL;
+    memcpy(out, src, (size_t)count * sizeof(AssetSegment));
+    return out;
+}
+
+static int asset_read_palette_variant_segments(
+    lua_State* L, int palettes_idx, int variant_one_based, int sort_by_minX,
+    AssetSegment** out_segments, int* out_count)
+{
+    int ok;
+    *out_segments = NULL;
+    *out_count = 0;
+    if (!lua_istable(L, palettes_idx) || variant_one_based < 1)
+        return 0;
+
+    palettes_idx = lua_absindex(L, palettes_idx);
+    lua_geti(L, palettes_idx, (lua_Integer)variant_one_based);
+    if (!lua_istable(L, -1))
+    {
+        lua_pop(L, 1);
+        return 0;
+    }
+
+    ok = asset_read_segments(L, -1, out_segments, out_count);
+    lua_pop(L, 1);
+    if (!ok)
+        return 0;
+    if (sort_by_minX && *out_segments && *out_count > 1)
+        qsort(*out_segments, (size_t)*out_count, sizeof(AssetSegment), asset_segment_compare_minX);
+    return 1;
+}
+
+static int asset_has_pipe(const char* s, size_t len)
+{
+    size_t i;
+    for (i = 0; i < len; i++)
+    {
+        if (s[i] == '|')
+            return 1;
+    }
+    return 0;
+}
+
+static int asset_starts_hex(const char* s, size_t len)
+{
+    return len >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
+}
+
+static int asset_hex_digit_value(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static long long asset_parse_integer_text(const char* s, size_t len, int* ok)
+{
+    char* buf;
+    char* cur;
+    char* end = NULL;
+    long long value = 0;
+    *ok = 0;
+    if (!s || len == 0)
+        return 0;
+    buf = (char*)malloc(len + 1);
+    if (!buf)
+        return 0;
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+    cur = buf;
+    while (*cur && isspace((unsigned char)*cur))
+        cur++;
+    if (asset_starts_hex(cur, strlen(cur)))
+    {
+        const char* p = cur + 2;
+        int has_digit = 0;
+        while (*p)
+        {
+            int digit = asset_hex_digit_value((unsigned char)*p);
+            if (digit < 0)
+                break;
+            value = value * 16 + digit;
+            has_digit = 1;
+            p++;
+        }
+        if (has_digit)
+            *ok = 1;
+        free(buf);
+        return value;
+    }
+    else
+    {
+        value = (long long)floor(strtod(cur, &end));
+        if (end && end != cur)
+            *ok = 1;
+    }
+    free(buf);
+    return value;
+}
+
+static void asset_color_choice_add(AssetColorChoice* choice, double value)
+{
+    if (choice->count >= (int)(sizeof(choice->values) / sizeof(choice->values[0])))
+        return;
+    choice->values[choice->count++] = (int)floor(value);
+}
+
+static void asset_parse_pipe_values(const char* s, size_t len, AssetColorChoice* out)
+{
+    size_t start = 0;
+    size_t i;
+    char* buf = (char*)malloc(len + 1);
+    if (!buf)
+        return;
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+    for (i = 0; i <= len; i++)
+    {
+        if (buf[i] == '|' || buf[i] == '\0')
+        {
+            char saved = buf[i];
+            char* end = NULL;
+            double value;
+            buf[i] = '\0';
+            value = strtod(buf + start, &end);
+            asset_color_choice_add(out, end && end != buf + start ? value : 0.0);
+            buf[i] = saved;
+            start = i + 1;
+        }
+    }
+    free(buf);
+}
+
+static void asset_parse_color_choice(lua_State* L, int idx, AssetColorChoice* out)
+{
+    int type;
+    memset(out, 0, sizeof(*out));
+    out->kind = ASSET_COLOR_EMPTY;
+    idx = lua_absindex(L, idx);
+    type = lua_type(L, idx);
+
+    if (type == LUA_TTABLE)
+    {
+        lua_Unsigned len = lua_rawlen(L, idx);
+        lua_Unsigned i;
+        out->kind = ASSET_COLOR_TABLE;
+        for (i = 1; i <= len; i++)
+        {
+            lua_geti(L, idx, (lua_Integer)i);
+            asset_color_choice_add(out, lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 0.0);
+            lua_pop(L, 1);
+        }
+        return;
+    }
+
+    if (type == LUA_TNIL || type == LUA_TNONE)
+        return;
+
+    if (type == LUA_TSTRING)
+    {
+        size_t len = 0;
+        const char* s = lua_tolstring(L, idx, &len);
+        int ok = 0;
+        long long n;
+        if (!s || len == 0)
+            return;
+        if (asset_has_pipe(s, len))
+        {
+            out->kind = ASSET_COLOR_PIPE;
+            asset_parse_pipe_values(s, len, out);
+            return;
+        }
+        if (!asset_starts_hex(s, len) && len <= 3)
+        {
+            n = asset_parse_integer_text(s, len, &ok);
+            out->kind = ASSET_COLOR_PLAIN;
+            asset_color_choice_add(out, ok ? (double)n : 0.0);
+            return;
+        }
+        n = asset_parse_integer_text(s, len, &ok);
+        if (!ok || n <= 0)
+        {
+            out->kind = ASSET_COLOR_PACKED;
+            return;
+        }
+        out->kind = ASSET_COLOR_PACKED;
+        asset_color_choice_add(out, (double)((n >> 24) & 0xFF));
+        asset_color_choice_add(out, (double)((n >> 16) & 0xFF));
+        asset_color_choice_add(out, (double)((n >> 8) & 0xFF));
+        asset_color_choice_add(out, (double)(n & 0xFF));
+        return;
+    }
+
+    if (type == LUA_TNUMBER)
+    {
+        double raw = lua_tonumber(L, idx);
+        long long n;
+        if (raw >= 0.0 && raw <= 999.0)
+        {
+            out->kind = ASSET_COLOR_PLAIN;
+            asset_color_choice_add(out, raw);
+            return;
+        }
+        n = (long long)floor(raw);
+        out->kind = ASSET_COLOR_PACKED;
+        if (n <= 0)
+            return;
+        asset_color_choice_add(out, (double)((n >> 24) & 0xFF));
+        asset_color_choice_add(out, (double)((n >> 16) & 0xFF));
+        asset_color_choice_add(out, (double)((n >> 8) & 0xFF));
+        asset_color_choice_add(out, (double)(n & 0xFF));
+    }
+}
+
+static int asset_color_is_default(const AssetColorChoice* choice)
+{
+    int i;
+    if (!choice || choice->kind == ASSET_COLOR_EMPTY)
+        return 1;
+    if (choice->kind == ASSET_COLOR_PIPE || choice->kind == ASSET_COLOR_TABLE || choice->kind == ASSET_COLOR_PLAIN)
+    {
+        for (i = 0; i < choice->count; i++)
+        {
+            if (choice->values[i] != 0)
+                return 0;
+        }
+        return 1;
+    }
+    for (i = 0; i < choice->count; i++)
+    {
+        if (choice->values[i] > 1)
+            return 0;
+    }
+    return 1;
+}
+
+static int asset_hs_has_changed(lua_State* L, int hs_idx)
+{
+    lua_Unsigned len;
+    lua_Unsigned i;
+    if (!lua_istable(L, hs_idx))
+        return 0;
+    hs_idx = lua_absindex(L, hs_idx);
+    len = lua_rawlen(L, hs_idx);
+    for (i = 1; i <= len; i++)
+    {
+        double h = 0.0;
+        double s = 1.0;
+        lua_geti(L, hs_idx, (lua_Integer)i);
+        if (lua_istable(L, -1))
+        {
+            h = asset_get_number_field_or(L, -1, "h", 0.0);
+            s = asset_get_number_field_or(L, -1, "s", 1.0);
+        }
+        lua_pop(L, 1);
+        if (h != 0.0 || s != 1.0)
+            return 1;
+    }
+    return 0;
+}
+
+static void asset_apply_hs_to_segments(lua_State* L, AssetSegment* segments, int count, int hs_idx)
+{
+    int i;
+    if (!segments || count <= 0 || !lua_istable(L, hs_idx))
+        return;
+    hs_idx = lua_absindex(L, hs_idx);
+    for (i = 0; i < count; i++)
+    {
+        double h = 0.0;
+        double s = 1.0;
+        lua_geti(L, hs_idx, (lua_Integer)i + 1);
+        if (lua_istable(L, -1))
+        {
+            double minX = 0.0;
+            double maxX = 0.0;
+            if (asset_get_number_field_any(L, -1, "min", "minX", &minX))
+                segments[i].minX = (int)minX;
+            if (asset_get_number_field_any(L, -1, "max", "maxX", &maxX))
+                segments[i].maxX = (int)maxX;
+            h = asset_get_number_field_or(L, -1, "h", 0.0);
+            s = asset_get_number_field_or(L, -1, "s", 1.0);
+            if (h != 0.0 || s != 1.0)
+            {
+                segments[i].flag |= 8 | 16;
+                segments[i].property[14] = asset_clamp(h, 0.0, 1000.0);
+                segments[i].property[15] = asset_clamp(500.0 + (s - 1.0) * 125.0, 0.0, 1000.0);
+            }
+        }
+        lua_pop(L, 1);
+    }
+}
+
+static int asset_get_pp_range(lua_State* L, int pp_idx, int i, int* out_min, int* out_max)
+{
+    double minX = 0.0;
+    double maxX = 0.0;
+    int has_max = 0;
+    if (!lua_istable(L, pp_idx) || !out_min || !out_max)
+        return 0;
+    pp_idx = lua_absindex(L, pp_idx);
+
+    lua_geti(L, pp_idx, i);
+    if (!lua_istable(L, -1))
+    {
+        lua_pop(L, 1);
+        return 0;
+    }
+    minX = asset_get_number_field_or(L, -1, "a", 0.0);
+    has_max = asset_get_number_field(L, -1, "b", &maxX);
+    lua_pop(L, 1);
+
+    if (!has_max || maxX <= minX)
+    {
+        lua_geti(L, pp_idx, i + 1);
+        if (lua_istable(L, -1))
+            maxX = asset_get_number_field_or(L, -1, "a", 256.0);
+        else
+            maxX = 256.0;
+        lua_pop(L, 1);
+    }
+
+    minX = asset_clamp(floor(minX), 0.0, 255.0);
+    maxX = asset_clamp(floor(maxX), minX + 1.0, 256.0);
+    *out_min = (int)minX;
+    *out_max = (int)maxX;
+    return 1;
+}
+
+static int asset_build_pp_range_default(lua_State* L, int pp_idx, AssetSegment** out_segments, int* out_count)
+{
+    lua_Unsigned len;
+    lua_Unsigned i;
+    AssetSegment* out;
+    int count = 0;
+    *out_segments = NULL;
+    *out_count = 0;
+    if (!lua_istable(L, pp_idx))
+        return 0;
+    pp_idx = lua_absindex(L, pp_idx);
+    len = lua_rawlen(L, pp_idx);
+    if (len == 0)
+        return 0;
+    out = (AssetSegment*)calloc((size_t)len, sizeof(AssetSegment));
+    if (!out)
+        return 0;
+    for (i = 1; i <= len; i++)
+    {
+        int minX = 0;
+        int maxX = 0;
+        if (asset_get_pp_range(L, pp_idx, (int)i, &minX, &maxX))
+        {
+            out[count].minX = minX;
+            out[count].maxX = maxX;
+            out[count].flag = 0;
+            count++;
+        }
+    }
+    if (count == 0)
+    {
+        free(out);
+        return 0;
+    }
+    *out_segments = out;
+    *out_count = count;
+    return 1;
+}
+
+static int asset_build_pp_scheme(lua_State* L, const AssetColorChoice* choice,
+    const AssetSegment* base_segments, int base_count, int pp_idx, int use_pp_range,
+    AssetSegment** out_segments, int* out_count)
+{
+    int count;
+    int i;
+    int hit = 0;
+    AssetSegment* out;
+    int out_n = 0;
+    if (!lua_istable(L, pp_idx))
+        return 0;
+    pp_idx = lua_absindex(L, pp_idx);
+    count = use_pp_range ? (int)lua_rawlen(L, pp_idx) : base_count;
+    if (count <= 0)
+        return 0;
+    out = (AssetSegment*)calloc((size_t)count, sizeof(AssetSegment));
+    if (!out)
+        return 0;
+
+    for (i = 0; i < count; i++)
+    {
+        AssetSegment seg;
+        int idx;
+        int valid = 1;
+        memset(&seg, 0, sizeof(seg));
+        if (use_pp_range)
+        {
+            int minX = 0;
+            int maxX = 0;
+            if (!asset_get_pp_range(L, pp_idx, i + 1, &minX, &maxX))
+                valid = 0;
+            seg.minX = minX;
+            seg.maxX = maxX;
+        }
+        else if (i < base_count)
+        {
+            seg = base_segments[i];
+        }
+        else
+        {
+            valid = 0;
+        }
+        if (!valid)
+            continue;
+
+        idx = (choice->kind == ASSET_COLOR_PLAIN)
+            ? (choice->count > 0 ? choice->values[0] : 0)
+            : (i < choice->count ? choice->values[i] : 0);
+
+        lua_geti(L, pp_idx, i + 1);
+        if (lua_istable(L, -1))
+        {
+            lua_geti(L, -1, idx);
+            if (lua_istable(L, -1))
+            {
+                double iFlag = 0.0;
+                lua_getfield(L, -1, "iFlag");
+                if (!lua_isnil(L, -1))
+                {
+                    int n;
+                    iFlag = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 0.0;
+                    seg.flag = (int)iFlag;
+                    for (n = 1; n <= 15; n++)
+                    {
+                        lua_geti(L, -2, n);
+                        seg.property[n] = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 0.0;
+                        lua_pop(L, 1);
+                    }
+                    hit = 1;
+                }
+                lua_pop(L, 1); /* iFlag */
+            }
+            lua_pop(L, 1); /* scheme */
+        }
+        lua_pop(L, 1); /* pp[i] */
+        out[out_n++] = seg;
+    }
+
+    if (!hit || out_n == 0)
+    {
+        free(out);
+        return 0;
+    }
+    *out_segments = out;
+    *out_count = out_n;
+    return 1;
+}
+
+static int asset_build_json_scheme(lua_State* L, int palettes_idx, const AssetColorChoice* choice,
+    AssetSegment** out_segments, int* out_count)
+{
+    *out_segments = NULL;
+    *out_count = 0;
+    if (!lua_istable(L, palettes_idx))
+        return 0;
+    palettes_idx = lua_absindex(L, palettes_idx);
+
+    if (choice->kind == ASSET_COLOR_PLAIN)
+    {
+        int idx = choice->count > 0 ? choice->values[0] : 0;
+        return asset_read_palette_variant_segments(L, palettes_idx, idx + 1, 1, out_segments, out_count)
+            && *out_count > 0;
+    }
+
+    if (choice->kind == ASSET_COLOR_PIPE || choice->kind == ASSET_COLOR_TABLE)
+    {
+        lua_Unsigned base_len;
+        lua_Unsigned i;
+        int hit = 0;
+        int count = 0;
+        AssetSegment* out;
+
+        lua_geti(L, palettes_idx, 1);
+        if (!lua_istable(L, -1))
+        {
+            lua_pop(L, 1);
+            return 0;
+        }
+        base_len = lua_rawlen(L, -1);
+        lua_pop(L, 1);
+        if (base_len == 0)
+            return 0;
+        out = (AssetSegment*)malloc((size_t)base_len * sizeof(AssetSegment));
+        if (!out)
+            return 0;
+
+        for (i = 1; i <= base_len; i++)
+        {
+            int idx = (i <= (lua_Unsigned)choice->count) ? choice->values[i - 1] : 0;
+            if (idx != 0)
+            {
+                lua_geti(L, palettes_idx, idx + 1);
+                if (lua_istable(L, -1))
+                    hit = 1;
+                else
+                {
+                    lua_pop(L, 1);
+                    lua_geti(L, palettes_idx, 1);
+                }
+            }
+            else
+            {
+                lua_geti(L, palettes_idx, 1);
+            }
+
+            if (lua_istable(L, -1))
+            {
+                lua_geti(L, -1, (lua_Integer)i);
+                if (lua_istable(L, -1) && asset_read_segment_at(L, -1, &out[count]))
+                    count++;
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+
+        if (!hit || count == 0)
+        {
+            free(out);
+            return 0;
+        }
+        qsort(out, (size_t)count, sizeof(AssetSegment), asset_segment_compare_minX);
+        *out_segments = out;
+        *out_count = count;
+        return 1;
+    }
+    return 0;
+}
+
+static int asset_build_color_hs_segments(const AssetColorChoice* choice,
+    const AssetSegment* base_segments, int base_count,
+    AssetSegment** out_segments, int* out_count)
+{
+    int i;
+    int base_value;
+    AssetSegment* out = asset_clone_segments(base_segments, base_count);
+    if (!out)
+        return 0;
+    base_value = (choice->kind == ASSET_COLOR_PIPE || choice->kind == ASSET_COLOR_TABLE || choice->kind == ASSET_COLOR_PLAIN) ? 0 : 1;
+    for (i = 0; i < base_count; i++)
+    {
+        int v = i < choice->count ? choice->values[i] : 0;
+        if (v > base_value)
+        {
+            int delta = v - base_value;
+            int h = (delta * 111) % 1000;
+            int s_steps = delta / 2;
+            if (s_steps > 4) s_steps = 4;
+            out[i].flag |= 8 | 16;
+            out[i].property[14] = (double)h;
+            out[i].property[15] = asset_clamp(500.0 + ((1.0 + s_steps) - 1.0) * 125.0, 0.0, 1000.0);
+        }
+    }
+    *out_segments = out;
+    *out_count = base_count;
     return 1;
 }
 
@@ -707,6 +1318,126 @@ static int asset_lua_read_palette(lua_State* L)
     return 1;
 }
 
+static int asset_push_palette_pixels_any(lua_State* L, const unsigned char* data, size_t len)
+{
+    size_t pixels_len = 0;
+    const unsigned char* pixels = asset_palette_pixels_any(data, len, &pixels_len);
+    if (!pixels)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, (const char*)pixels, pixels_len);
+    return 1;
+}
+
+static int asset_lua_compose_normal_palette(lua_State* L)
+{
+    int top = lua_gettop(L);
+    size_t bmp_len = 0;
+    size_t json_len = 0;
+    const unsigned char* bmp = (const unsigned char*)luaL_checklstring(L, 1, &bmp_len);
+    const char* json = luaL_optlstring(L, 2, NULL, &json_len);
+    int hs_idx = lua_absindex(L, 4);
+    int pp_idx = lua_absindex(L, 5);
+    int use_pp_range = lua_toboolean(L, 6);
+    int decoded_idx;
+    int palettes_idx;
+    int base_count = 0;
+    int selected_count = 0;
+    int has_hs_change;
+    int has_selected = 0;
+    AssetColor colors[256];
+    AssetColorChoice choice;
+    AssetSegment* base_segments = NULL;
+    AssetSegment* selected_segments = NULL;
+
+    if (!asset_decode_colors(bmp, bmp_len, colors))
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    if (!json || json_len == 0 || !asset_push_cjson_decoded(L, json, json_len) || !lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return asset_push_palette_pixels_any(L, bmp, bmp_len);
+    }
+    decoded_idx = lua_absindex(L, -1);
+
+    lua_getfield(L, decoded_idx, "palettes");
+    if (!lua_istable(L, -1))
+    {
+        lua_settop(L, top);
+        return asset_push_palette_pixels_any(L, bmp, bmp_len);
+    }
+    palettes_idx = lua_absindex(L, -1);
+
+    if (!asset_read_palette_variant_segments(L, palettes_idx, 1, 0, &base_segments, &base_count) || base_count <= 0)
+    {
+        free(base_segments);
+        lua_settop(L, top);
+        return asset_push_palette_pixels_any(L, bmp, bmp_len);
+    }
+
+    asset_parse_color_choice(L, 3, &choice);
+    has_hs_change = asset_hs_has_changed(L, hs_idx);
+
+    if (has_hs_change)
+    {
+        if (use_pp_range && asset_build_pp_range_default(L, pp_idx, &selected_segments, &selected_count))
+        {
+            asset_apply_hs_to_segments(L, selected_segments, selected_count, hs_idx);
+            has_selected = 1;
+        }
+        else
+        {
+            selected_segments = asset_clone_segments(base_segments, base_count);
+            selected_count = base_count;
+            if (selected_segments)
+            {
+                asset_apply_hs_to_segments(L, selected_segments, selected_count, hs_idx);
+                has_selected = 1;
+            }
+        }
+    }
+    else if (!asset_color_is_default(&choice))
+    {
+        if (asset_build_pp_scheme(L, &choice, base_segments, base_count, pp_idx, use_pp_range,
+                &selected_segments, &selected_count))
+        {
+            has_selected = 1;
+        }
+        else if (asset_build_json_scheme(L, palettes_idx, &choice, &selected_segments, &selected_count))
+        {
+            has_selected = 1;
+        }
+        else if (asset_build_color_hs_segments(&choice, base_segments, base_count,
+                &selected_segments, &selected_count))
+        {
+            has_selected = 1;
+        }
+    }
+    else
+    {
+        selected_segments = asset_clone_segments(base_segments, base_count);
+        selected_count = base_count;
+        has_selected = selected_segments != NULL;
+    }
+
+    free(base_segments);
+    if (!has_selected || !selected_segments)
+    {
+        lua_settop(L, top);
+        return asset_push_palette_pixels_any(L, bmp, bmp_len);
+    }
+
+    lua_settop(L, top);
+    asset_emit_palette(L, colors, selected_segments, selected_count);
+    free(selected_segments);
+    return 1;
+}
+
 static int asset_lua_compose_palette(lua_State* L)
 {
     size_t len = 0;
@@ -913,6 +1644,7 @@ static const luaL_Reg ASSET_FUNCS[] = {
     {"read_palette", asset_lua_read_palette},
     {"compose_palette", asset_lua_compose_palette},
     {"compose_xiangrui_palette", asset_lua_compose_xiangrui_palette},
+    {"compose_normal_palette", asset_lua_compose_normal_palette},
     {"parse_atlas_frames", asset_lua_parse_atlas_frames},
     {"build_atlas_jy", asset_lua_build_atlas_jy},
     {NULL, NULL},
@@ -920,7 +1652,7 @@ static const luaL_Reg ASSET_FUNCS[] = {
 
 MYGXY_API int luaopen_mygxy_asset(lua_State* L)
 {
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 6);
     luaL_setfuncs(L, ASSET_FUNCS, 0);
     return 1;
 }
