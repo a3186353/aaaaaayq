@@ -41,6 +41,11 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
+    - name: Setup MSVC developer environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
     - name: Restore Junctions (Dependencies + Sources)
       shell: pwsh
       run: |
@@ -84,7 +89,8 @@ jobs:
         curl -sL "https://github.com/openssl/openssl/releases/download/openssl-%OPENSSL_VER%/openssl-%OPENSSL_VER%.tar.gz" -o openssl.tar.gz
         tar xzf openssl.tar.gz
         cd openssl-%OPENSSL_VER%
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" amd64
+        where cl
+        where nmake
         perl Configure VC-WIN64A no-shared no-tests no-apps no-docs ^
           no-ssl3 no-comp no-engine no-deprecated ^
           --prefix=%cd%\..\openssl-win-x64 ^
