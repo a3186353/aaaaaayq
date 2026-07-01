@@ -32,6 +32,9 @@
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\asset.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\..\Sources\grr\mygxy\resource.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\..\..\Sources\grr\mygxy\hash.c">
       <Filter>源文件</Filter>
     </ClCompile>

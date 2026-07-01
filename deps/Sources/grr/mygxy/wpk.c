@@ -19,6 +19,8 @@
 #endif
 
 #define WPK_SEP_STR "/"
+#define WPK_DECODED_CACHE_MAX_ENTRIES 64u
+#define WPK_DECODED_CACHE_MAX_BYTES ((size_t)32u * 1024u * 1024u)
 
 typedef struct WPK_DebugStats
 {
@@ -31,6 +33,11 @@ typedef struct WPK_DebugStats
     Uint64 getdata_hashxor_hits;
     Uint64 getdata_xor5a_hits;
     Uint64 getdata_failures;
+    Uint64 decoded_lru_hits;
+    Uint64 decoded_lru_misses;
+    Uint64 decoded_lru_inserts;
+    Uint64 decoded_lru_evictions;
+    Uint64 decoded_lru_skips;
 } WPK_DebugStats;
 
 static WPK_DebugStats g_wpk_stats = {0};
@@ -329,6 +336,21 @@ typedef struct
     Uint8 RoundKey[176];
 } WPK_Aes128Ctx;
 
+typedef struct WPK_DecodedCacheEntry
+{
+    Uint32 index;
+    Uint32 wpkid;
+    Uint32 offset;
+    Uint32 packed_size;
+    Uint32 hash;
+    char md5[33];
+    Uint8* data;
+    size_t size;
+    Uint64 tick;
+    struct WPK_DecodedCacheEntry* prev;
+    struct WPK_DecodedCacheEntry* next;
+} WPK_DecodedCacheEntry;
+
 #if defined(_WIN32)
 typedef NTSTATUS(WINAPI* WPK_BCryptOpenAlgorithmProvider_Fn)(void** phAlgorithm, const wchar_t* pszAlgId, const wchar_t* pszImplementation, unsigned long dwFlags);
 typedef NTSTATUS(WINAPI* WPK_BCryptSetProperty_Fn)(void* hObject, const wchar_t* pszProperty, unsigned char* pbInput, unsigned long cbInput, unsigned long dwFlags);
@@ -614,6 +636,11 @@ typedef struct
 
     SDL_RWops** wpk_files;
     Uint32 wpk_files_count;
+    WPK_DecodedCacheEntry* decoded_cache_head;
+    WPK_DecodedCacheEntry* decoded_cache_tail;
+    Uint32 decoded_cache_count;
+    size_t decoded_cache_bytes;
+    Uint64 decoded_cache_tick;
 
     ZSTD_DCtx* zstd_dctx;
     ZSTD_DDict* zstd_ddict;
@@ -1801,6 +1828,193 @@ static int WPK_PushEmptyBytesAndSize(lua_State* L)
     return 2;
 }
 
+static int WPK_DecodedCacheKeyMatches(const WPK_DecodedCacheEntry* e, Uint32 index, const WPK_FileInfo* fi)
+{
+    if (!e || !fi)
+        return 0;
+    return e->index == index
+        && e->wpkid == fi->wpkid
+        && e->offset == fi->offset
+        && e->packed_size == fi->size
+        && e->hash == fi->hash
+        && SDL_memcmp(e->md5, fi->md5, 32) == 0;
+}
+
+static void WPK_DecodedCacheDetach(WPK_UserData* ud, WPK_DecodedCacheEntry* e)
+{
+    if (!ud || !e)
+        return;
+    if (e->prev)
+        e->prev->next = e->next;
+    else
+        ud->decoded_cache_head = e->next;
+    if (e->next)
+        e->next->prev = e->prev;
+    else
+        ud->decoded_cache_tail = e->prev;
+    e->prev = NULL;
+    e->next = NULL;
+}
+
+static void WPK_DecodedCacheAttachHead(WPK_UserData* ud, WPK_DecodedCacheEntry* e)
+{
+    if (!ud || !e)
+        return;
+    e->prev = NULL;
+    e->next = ud->decoded_cache_head;
+    if (ud->decoded_cache_head)
+        ud->decoded_cache_head->prev = e;
+    else
+        ud->decoded_cache_tail = e;
+    ud->decoded_cache_head = e;
+}
+
+static void WPK_DecodedCacheTouch(WPK_UserData* ud, WPK_DecodedCacheEntry* e)
+{
+    if (!ud || !e)
+        return;
+    e->tick = ++ud->decoded_cache_tick;
+    if (ud->decoded_cache_head == e)
+        return;
+    WPK_DecodedCacheDetach(ud, e);
+    WPK_DecodedCacheAttachHead(ud, e);
+}
+
+static void WPK_DecodedCacheFreeEntry(WPK_UserData* ud, WPK_DecodedCacheEntry* e)
+{
+    if (!ud || !e)
+        return;
+    WPK_DecodedCacheDetach(ud, e);
+    if (ud->decoded_cache_bytes >= e->size)
+        ud->decoded_cache_bytes -= e->size;
+    else
+        ud->decoded_cache_bytes = 0;
+    if (ud->decoded_cache_count > 0)
+        ud->decoded_cache_count--;
+    if (e->data)
+        SDL_free(e->data);
+    SDL_free(e);
+}
+
+static WPK_DecodedCacheEntry* WPK_DecodedCacheFind(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi)
+{
+    if (!ud || !fi)
+        return NULL;
+    WPK_DecodedCacheEntry* e = ud->decoded_cache_head;
+    while (e)
+    {
+        if (WPK_DecodedCacheKeyMatches(e, index, fi))
+            return e;
+        e = e->next;
+    }
+    return NULL;
+}
+
+static void WPK_DecodedCachePrune(WPK_UserData* ud)
+{
+    if (!ud)
+        return;
+    while (ud->decoded_cache_tail
+        && (ud->decoded_cache_count > WPK_DECODED_CACHE_MAX_ENTRIES
+            || ud->decoded_cache_bytes > WPK_DECODED_CACHE_MAX_BYTES))
+    {
+        WPK_DecodedCacheFreeEntry(ud, ud->decoded_cache_tail);
+        g_wpk_stats.decoded_lru_evictions++;
+    }
+}
+
+static void WPK_DecodedCacheClear(WPK_UserData* ud)
+{
+    if (!ud)
+        return;
+    while (ud->decoded_cache_head)
+        WPK_DecodedCacheFreeEntry(ud, ud->decoded_cache_head);
+    ud->decoded_cache_tail = NULL;
+    ud->decoded_cache_count = 0;
+    ud->decoded_cache_bytes = 0;
+}
+
+static int WPK_DecodedCachePush(lua_State* L, WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi)
+{
+    WPK_DecodedCacheEntry* e = WPK_DecodedCacheFind(ud, index, fi);
+    if (!e)
+    {
+        g_wpk_stats.decoded_lru_misses++;
+        return 0;
+    }
+
+    WPK_DecodedCacheTouch(ud, e);
+    g_wpk_stats.decoded_lru_hits++;
+    WPK_PushBytesAndSize(L, e->data ? e->data : "", e->size);
+    return 1;
+}
+
+static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi, const void* data, size_t size)
+{
+    if (!ud || !fi || (!data && size > 0))
+    {
+        g_wpk_stats.decoded_lru_skips++;
+        return;
+    }
+    if (size > WPK_DECODED_CACHE_MAX_BYTES)
+    {
+        g_wpk_stats.decoded_lru_skips++;
+        return;
+    }
+
+    WPK_DecodedCacheEntry* old = WPK_DecodedCacheFind(ud, index, fi);
+    if (old)
+        WPK_DecodedCacheFreeEntry(ud, old);
+
+    Uint8* copy = (Uint8*)SDL_malloc(size ? size : 1);
+    if (!copy)
+    {
+        g_wpk_stats.decoded_lru_skips++;
+        return;
+    }
+    if (size)
+        SDL_memcpy(copy, data, size);
+    else
+        copy[0] = 0;
+
+    WPK_DecodedCacheEntry* e = (WPK_DecodedCacheEntry*)SDL_malloc(sizeof(WPK_DecodedCacheEntry));
+    if (!e)
+    {
+        SDL_free(copy);
+        g_wpk_stats.decoded_lru_skips++;
+        return;
+    }
+    SDL_memset(e, 0, sizeof(WPK_DecodedCacheEntry));
+    e->index = index;
+    e->wpkid = fi->wpkid;
+    e->offset = fi->offset;
+    e->packed_size = fi->size;
+    e->hash = fi->hash;
+    SDL_memcpy(e->md5, fi->md5, 32);
+    e->md5[32] = 0;
+    e->data = copy;
+    e->size = size;
+    e->tick = ++ud->decoded_cache_tick;
+
+    WPK_DecodedCacheAttachHead(ud, e);
+    ud->decoded_cache_count++;
+    ud->decoded_cache_bytes += size;
+    g_wpk_stats.decoded_lru_inserts++;
+    WPK_DecodedCachePrune(ud);
+}
+
+static void WPK_DecodedCacheStoreResult(lua_State* L, WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi)
+{
+    if (lua_gettop(L) < 2 || !lua_isstring(L, -2))
+    {
+        g_wpk_stats.decoded_lru_skips++;
+        return;
+    }
+    size_t size = 0;
+    const char* data = lua_tolstring(L, -2, &size);
+    WPK_DecodedCacheStoreBuffer(ud, index, fi, data, size);
+}
+
 static int WPK_TryPushZstdDecompress(lua_State* L, WPK_UserData* ud, const Uint8* src, size_t srcSize)
 {
     if (!WPK_IsZstdFrameMagic(src, srcSize))
@@ -2175,6 +2389,9 @@ static int WPK_GetData(lua_State* L)
     {
         const WPK_FileInfo* fi = &ud->list[i];
 
+        if (WPK_DecodedCachePush(L, ud, i, fi))
+            return 2;
+
         Uint32 wpkid = fi->wpkid;
         Uint8* raw = NULL;
         size_t inSize = 0;
@@ -2214,7 +2431,9 @@ static int WPK_GetData(lua_State* L)
             {
                 SDL_RWclose(fp);
                 g_wpk_stats.getdata_raw_hits++;
-                return WPK_PushEmptyBytesAndSize(L);
+                WPK_PushEmptyBytesAndSize(L);
+                WPK_DecodedCacheStoreResult(L, ud, i, fi);
+                return 2;
             }
 
             raw = (Uint8*)SDL_malloc(inSize);
@@ -2239,7 +2458,9 @@ static int WPK_GetData(lua_State* L)
             if (fi->size == 0)
             {
                 g_wpk_stats.getdata_raw_hits++;
-                return WPK_PushEmptyBytesAndSize(L);
+                WPK_PushEmptyBytesAndSize(L);
+                WPK_DecodedCacheStoreResult(L, ud, i, fi);
+                return 2;
             }
 
             SDL_RWops* fp = WPK_OpenWpkFile(ud, wpkid);
@@ -2313,6 +2534,7 @@ static int WPK_GetData(lua_State* L)
         if (WPK_TryPushAcXcDecoded(L, ud, raw, inSize))
         {
             g_wpk_stats.getdata_acxc_hits++;
+            WPK_DecodedCacheStoreResult(L, ud, i, fi);
             SDL_free(raw);
             return 2;
         }
@@ -2320,6 +2542,7 @@ static int WPK_GetData(lua_State* L)
         if (WPK_TryPushNeoxDecompress(L, ud, raw, inSize))
         {
             g_wpk_stats.getdata_neox_hits++;
+            WPK_DecodedCacheStoreResult(L, ud, i, fi);
             SDL_free(raw);
             return 2;
         }
@@ -2341,6 +2564,7 @@ static int WPK_GetData(lua_State* L)
                 if (WPK_TryPushAcXcDecoded(L, ud, dec, inSize))
                 {
                     g_wpk_stats.getdata_hashxor_hits++;
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2349,6 +2573,7 @@ static int WPK_GetData(lua_State* L)
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
                 {
                     g_wpk_stats.getdata_hashxor_hits++;
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2358,6 +2583,7 @@ static int WPK_GetData(lua_State* L)
                 {
                     g_wpk_stats.getdata_hashxor_hits++;
                     WPK_PushBytesAndSize(L, dec, inSize);
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2377,6 +2603,7 @@ static int WPK_GetData(lua_State* L)
                 if (WPK_TryPushAcXcDecoded(L, ud, dec, inSize))
                 {
                     g_wpk_stats.getdata_xor5a_hits++;
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2385,6 +2612,7 @@ static int WPK_GetData(lua_State* L)
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
                 {
                     g_wpk_stats.getdata_xor5a_hits++;
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2394,6 +2622,7 @@ static int WPK_GetData(lua_State* L)
                 {
                     g_wpk_stats.getdata_xor5a_hits++;
                     WPK_PushBytesAndSize(L, dec, inSize);
+                    WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
                     return 2;
@@ -2405,6 +2634,7 @@ static int WPK_GetData(lua_State* L)
 
         g_wpk_stats.getdata_raw_hits++;
         WPK_PushBytesAndSize(L, raw, inSize);
+        WPK_DecodedCacheStoreResult(L, ud, i, fi);
         SDL_free(raw);
         return 2;
     }
@@ -2590,6 +2820,7 @@ static int WPK_Upsert(lua_State* L)
     if (swpkid >= 0)
         WPK_EnsureWpkFiles(ud, (Uint32)swpkid);
 
+    WPK_DecodedCacheClear(ud);
     WPK_InvalidateListCache(L, ud);
 
     lua_pushinteger(L, (lua_Integer)(idx + 1));
@@ -2612,6 +2843,7 @@ static int WPK_SetHash(lua_State* L)
         return 0;
 
     ud->list[idx].hash = hash;
+    WPK_DecodedCacheClear(ud);
     lua_pushinteger(L, (lua_Integer)(idx + 1));
     return 1;
 }
@@ -2755,7 +2987,11 @@ static int WPK_SaveIdx(lua_State* L)
 
 static int WPK_GetStats(lua_State* L)
 {
-    lua_createtable(L, 0, 9);
+    WPK_UserData* ud = NULL;
+    if (lua_gettop(L) >= 1)
+        ud = (WPK_UserData*)luaL_testudata(L, 1, WPK_NAME);
+
+    lua_createtable(L, 0, 16);
     lua_pushinteger(L, (lua_Integer)g_wpk_stats.idx_mode_file);
     lua_setfield(L, -2, "idx_mode_file");
     lua_pushinteger(L, (lua_Integer)g_wpk_stats.idx_mode_buffer);
@@ -2774,12 +3010,30 @@ static int WPK_GetStats(lua_State* L)
     lua_setfield(L, -2, "getdata_xor5a_hits");
     lua_pushinteger(L, (lua_Integer)g_wpk_stats.getdata_failures);
     lua_setfield(L, -2, "getdata_failures");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.decoded_lru_hits);
+    lua_setfield(L, -2, "decoded_lru_hits");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.decoded_lru_misses);
+    lua_setfield(L, -2, "decoded_lru_misses");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.decoded_lru_inserts);
+    lua_setfield(L, -2, "decoded_lru_inserts");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.decoded_lru_evictions);
+    lua_setfield(L, -2, "decoded_lru_evictions");
+    lua_pushinteger(L, (lua_Integer)g_wpk_stats.decoded_lru_skips);
+    lua_setfield(L, -2, "decoded_lru_skips");
+    if (ud)
+    {
+        lua_pushinteger(L, (lua_Integer)ud->decoded_cache_count);
+        lua_setfield(L, -2, "decoded_lru_count");
+        lua_pushinteger(L, (lua_Integer)ud->decoded_cache_bytes);
+        lua_setfield(L, -2, "decoded_lru_bytes");
+    }
     return 1;
 }
 
 static int WPK_GC(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    WPK_DecodedCacheClear(ud);
     if (ud->list_ref > 0)
     {
         luaL_unref(L, LUA_REGISTRYINDEX, ud->list_ref);

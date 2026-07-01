@@ -287,6 +287,7 @@ set(MYGXY_SRC_DIR "${SOURCES_DIR}/grr/mygxy")
 set(MYGXY_SOURCES
     "${MYGXY_SRC_DIR}/fsb.c"
     "${MYGXY_SRC_DIR}/asset.c"
+    "${MYGXY_SRC_DIR}/resource.c"
     "${MYGXY_SRC_DIR}/hash.c"
     "${MYGXY_SRC_DIR}/lua_proxy.c"
     "${MYGXY_SRC_DIR}/sdl_proxy.c"
