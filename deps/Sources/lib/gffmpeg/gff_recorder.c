@@ -52,6 +52,33 @@ static int encode_and_write(GFF_Recorder *r, AVFrame *frame)
     return 0;
 }
 
+static enum AVSampleFormat choose_encoder_sample_fmt(const AVCodec *encoder)
+{
+    enum AVSampleFormat enc_fmt = AV_SAMPLE_FMT_S16;
+    const enum AVSampleFormat *sample_fmts = NULL;
+
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    if (avcodec_get_supported_config(NULL, encoder, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+        0, (const void **)&sample_fmts, NULL) < 0) {
+        sample_fmts = NULL;
+    }
+#else
+    if (encoder)
+        sample_fmts = encoder->sample_fmts;
+#endif
+
+    if (sample_fmts) {
+        enc_fmt = sample_fmts[0];
+        for (int i = 0; sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
+            if (sample_fmts[i] == AV_SAMPLE_FMT_S16) {
+                enc_fmt = AV_SAMPLE_FMT_S16;
+                break;
+            }
+        }
+    }
+    return enc_fmt;
+}
+
 /*
  * 录制线程：从缓冲区取数据 → 可选重采样 → 编码 → 写文件
  * 关键：mutex 只保护 pcm_buf 拷贝操作，编码在锁外进行
@@ -172,17 +199,7 @@ int gff_recorder_open(lua_State *L)
     r->enc_ctx->time_base   = (AVRational){1, sample_rate};
 
     /* 选择编码器支持的采样格式 */
-    enum AVSampleFormat enc_fmt = AV_SAMPLE_FMT_S16;
-    if (encoder->sample_fmts) {
-        enc_fmt = encoder->sample_fmts[0];
-        /* 优先选择 S16（如果编码器支持），避免不必要的重采样 */
-        for (int i = 0; encoder->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
-            if (encoder->sample_fmts[i] == AV_SAMPLE_FMT_S16) {
-                enc_fmt = AV_SAMPLE_FMT_S16;
-                break;
-            }
-        }
-    }
+    enum AVSampleFormat enc_fmt = choose_encoder_sample_fmt(encoder);
     r->enc_ctx->sample_fmt = enc_fmt;
 
     AVChannelLayout mono_layout = AV_CHANNEL_LAYOUT_MONO;
