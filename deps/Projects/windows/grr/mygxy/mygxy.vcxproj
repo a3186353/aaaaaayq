@@ -125,6 +125,8 @@
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_image\external\libwebp-1.3.2;$(SolutionDir)..\..\Dependencies\SDL_image\external\libwebp-1.3.2\src;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\physfs\src;$(SolutionDir)..\..\external\vgmstream\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -144,6 +146,8 @@
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\Dependencies\lua;$(SolutionDir)..\..\Dependencies\SDL\include;$(SolutionDir)..\..\Dependencies\SDL_image;$(SolutionDir)..\..\Dependencies\SDL_image\external\libwebp-1.3.2;$(SolutionDir)..\..\Dependencies\SDL_image\external\libwebp-1.3.2\src;$(SolutionDir)..\..\Sources\grr\mygxy;$(SolutionDir)..\..\Dependencies\zstd;$(SolutionDir)..\..\Dependencies\zstd\common;$(SolutionDir)..\..\Dependencies\lz4;$(SolutionDir)..\..\Dependencies\zlib;$(SolutionDir)..\..\Dependencies\physfs\src;$(SolutionDir)..\..\external\vgmstream\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
