@@ -21,6 +21,7 @@
 #define WPK_SEP_STR "/"
 #define WPK_DECODED_CACHE_MAX_ENTRIES 64u
 #define WPK_DECODED_CACHE_MAX_BYTES ((size_t)32u * 1024u * 1024u)
+#define WPK_WRITE_MAX_PACK_BYTES ((Sint64)1024 * 1024 * 1024)
 
 typedef struct WPK_DebugStats
 {
@@ -351,6 +352,16 @@ typedef struct WPK_DecodedCacheEntry
     struct WPK_DecodedCacheEntry* next;
 } WPK_DecodedCacheEntry;
 
+typedef struct WPK_WriteTask
+{
+    char md5[33];
+    Uint8* data;
+    size_t size;
+    Uint32 hash;
+    int has_hash;
+    struct WPK_WriteTask* next;
+} WPK_WriteTask;
+
 #if defined(_WIN32)
 typedef NTSTATUS(WINAPI* WPK_BCryptOpenAlgorithmProvider_Fn)(void** phAlgorithm, const wchar_t* pszAlgId, const wchar_t* pszImplementation, unsigned long dwFlags);
 typedef NTSTATUS(WINAPI* WPK_BCryptSetProperty_Fn)(void* hObject, const wchar_t* pszProperty, unsigned char* pbInput, unsigned long cbInput, unsigned long dwFlags);
@@ -641,6 +652,12 @@ typedef struct
     Uint32 decoded_cache_count;
     size_t decoded_cache_bytes;
     Uint64 decoded_cache_tick;
+    WPK_WriteTask* write_head;
+    WPK_WriteTask* write_tail;
+    Uint32 write_queue_count;
+    Uint64 write_queued_total;
+    Uint64 write_flushed_total;
+    Uint64 write_failed_total;
 
     ZSTD_DCtx* zstd_dctx;
     ZSTD_DDict* zstd_ddict;
@@ -671,6 +688,33 @@ static int WPK_WriteFileAll(const char* path, const void* data, size_t size)
     size_t wrote = SDL_RWwrite(fp, data, 1, size);
     SDL_RWclose(fp);
     return wrote == size;
+}
+
+static void WPK_FreeWriteTask(WPK_WriteTask* task)
+{
+    if (!task)
+        return;
+    if (task->data)
+        SDL_free(task->data);
+    SDL_free(task);
+}
+
+static void WPK_ClearWriteQueue(WPK_UserData* ud)
+{
+    WPK_WriteTask* task;
+    WPK_WriteTask* next;
+    if (!ud)
+        return;
+    task = ud->write_head;
+    while (task)
+    {
+        next = task->next;
+        WPK_FreeWriteTask(task);
+        task = next;
+    }
+    ud->write_head = NULL;
+    ud->write_tail = NULL;
+    ud->write_queue_count = 0;
 }
 
 static void WPK_InvalidateListCache(lua_State* L, WPK_UserData* ud)
@@ -1040,6 +1084,88 @@ static SDL_RWops* WPK_ReopenWpkFile(WPK_UserData* ud, Uint32 wpkid)
         ud->wpk_files[wpkid] = NULL;
     }
     return WPK_OpenWpkFile(ud, wpkid);
+}
+
+static void WPK_CloseCachedWpkFile(WPK_UserData* ud, Uint32 wpkid)
+{
+    if (!ud || wpkid >= ud->wpk_files_count || !ud->wpk_files[wpkid])
+        return;
+    SDL_RWclose(ud->wpk_files[wpkid]);
+    ud->wpk_files[wpkid] = NULL;
+}
+
+static void WPK_BuildDataPackPath(WPK_UserData* ud, Uint32 wpkid, char out[512])
+{
+    char lower_base_name[128];
+    SDL_strlcpy(lower_base_name, ud && ud->base_name[0] ? ud->base_name : "cache", sizeof(lower_base_name));
+    for (size_t i = 0; lower_base_name[i]; i++)
+        lower_base_name[i] = (char)SDL_tolower((unsigned char)lower_base_name[i]);
+    SDL_snprintf(out, 512, "%s" WPK_SEP_STR "%s%u.wpk",
+        ud && ud->base_dir[0] ? ud->base_dir : ".",
+        lower_base_name,
+        (unsigned)wpkid);
+}
+
+static Sint64 WPK_GetDataPackSize(WPK_UserData* ud, Uint32 wpkid)
+{
+    char path[512];
+    WPK_BuildDataPackPath(ud, wpkid, path);
+    SDL_RWops* fp = SDL_RWFromFile(path, "rb");
+    if (!fp)
+        return 0;
+    Sint64 size = SDL_RWsize(fp);
+    SDL_RWclose(fp);
+    return size > 0 ? size : 0;
+}
+
+static int WPK_AppendDataPack(WPK_UserData* ud, Uint32 wpkid, const void* data, size_t size, Uint32* outOffset)
+{
+    char path[512];
+    if (!ud || !data || size == 0 || size > (size_t)0xFFFFFFFFu)
+        return 0;
+    if (!WPK_EnsureWpkFiles(ud, wpkid))
+        return 0;
+
+    WPK_BuildDataPackPath(ud, wpkid, path);
+    WPK_EnsureParentDirForWrite(path);
+    WPK_CloseCachedWpkFile(ud, wpkid);
+
+    Sint64 offset = WPK_GetDataPackSize(ud, wpkid);
+    if (offset < 0 || offset > (Sint64)0xFFFFFFFFu)
+        return 0;
+
+    SDL_RWops* fp = SDL_RWFromFile(path, "ab");
+    if (!fp)
+        return 0;
+    size_t wrote = SDL_RWwrite(fp, data, 1, size);
+    SDL_RWclose(fp);
+    if (wrote != size)
+        return 0;
+    if (outOffset)
+        *outOffset = (Uint32)offset;
+    return 1;
+}
+
+static Uint32 WPK_SelectWritePack(WPK_UserData* ud, size_t size)
+{
+    Uint32 start = 0;
+    if (!ud || size > (size_t)WPK_WRITE_MAX_PACK_BYTES)
+        return 255u;
+
+    for (Uint32 i = 0; i < ud->number; i++)
+    {
+        Sint32 swpkid = WPK_WpkIdAsS32(ud->list[i].wpkid);
+        if (swpkid >= 0 && (Uint32)swpkid > start && (Uint32)swpkid < 255u)
+            start = (Uint32)swpkid;
+    }
+
+    for (Uint32 wpkid = start; wpkid < 255u; wpkid++)
+    {
+        Sint64 packSize = WPK_GetDataPackSize(ud, wpkid);
+        if (packSize >= 0 && packSize + (Sint64)size <= WPK_WRITE_MAX_PACK_BYTES)
+            return wpkid;
+    }
+    return 255u;
 }
 
 static void WPK_XorRepeat4(Uint8* dst, const Uint8* src, size_t n, const Uint8 key[4])
@@ -1898,9 +2024,10 @@ static void WPK_DecodedCacheFreeEntry(WPK_UserData* ud, WPK_DecodedCacheEntry* e
 
 static WPK_DecodedCacheEntry* WPK_DecodedCacheFind(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi)
 {
+    WPK_DecodedCacheEntry* e;
     if (!ud || !fi)
         return NULL;
-    WPK_DecodedCacheEntry* e = ud->decoded_cache_head;
+    e = ud->decoded_cache_head;
     while (e)
     {
         if (WPK_DecodedCacheKeyMatches(e, index, fi))
@@ -1951,6 +2078,9 @@ static int WPK_DecodedCachePush(lua_State* L, WPK_UserData* ud, Uint32 index, co
 
 static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi, const void* data, size_t size)
 {
+    WPK_DecodedCacheEntry* old;
+    Uint8* copy;
+    WPK_DecodedCacheEntry* e;
     if (!ud || !fi || (!data && size > 0))
     {
         g_wpk_stats.decoded_lru_skips++;
@@ -1962,11 +2092,11 @@ static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WP
         return;
     }
 
-    WPK_DecodedCacheEntry* old = WPK_DecodedCacheFind(ud, index, fi);
+    old = WPK_DecodedCacheFind(ud, index, fi);
     if (old)
         WPK_DecodedCacheFreeEntry(ud, old);
 
-    Uint8* copy = (Uint8*)SDL_malloc(size ? size : 1);
+    copy = (Uint8*)SDL_malloc(size ? size : 1);
     if (!copy)
     {
         g_wpk_stats.decoded_lru_skips++;
@@ -1977,7 +2107,7 @@ static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WP
     else
         copy[0] = 0;
 
-    WPK_DecodedCacheEntry* e = (WPK_DecodedCacheEntry*)SDL_malloc(sizeof(WPK_DecodedCacheEntry));
+    e = (WPK_DecodedCacheEntry*)SDL_malloc(sizeof(WPK_DecodedCacheEntry));
     if (!e)
     {
         SDL_free(copy);
@@ -2005,13 +2135,14 @@ static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WP
 
 static void WPK_DecodedCacheStoreResult(lua_State* L, WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi)
 {
+    size_t size = 0;
+    const char* data;
     if (lua_gettop(L) < 2 || !lua_isstring(L, -2))
     {
         g_wpk_stats.decoded_lru_skips++;
         return;
     }
-    size_t size = 0;
-    const char* data = lua_tolstring(L, -2, &size);
+    data = lua_tolstring(L, -2, &size);
     WPK_DecodedCacheStoreBuffer(ud, index, fi, data, size);
 }
 
@@ -2388,13 +2519,12 @@ static int WPK_GetData(lua_State* L)
     if (i < ud->number)
     {
         const WPK_FileInfo* fi = &ud->list[i];
-
-        if (WPK_DecodedCachePush(L, ud, i, fi))
-            return 2;
-
         Uint32 wpkid = fi->wpkid;
         Uint8* raw = NULL;
         size_t inSize = 0;
+
+        if (WPK_DecodedCachePush(L, ud, i, fi))
+            return 2;
 
         if (WPK_WpkIdAsS32(wpkid) < 0)
         {
@@ -2848,6 +2978,155 @@ static int WPK_SetHash(lua_State* L)
     return 1;
 }
 
+static int WPK_QueueWrite(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    const char* md5 = luaL_checkstring(L, 2);
+    size_t size = 0;
+    const char* data = luaL_checklstring(L, 3, &size);
+    Uint32 hash = 0;
+    int hasHash = 0;
+    char md5Lower[33];
+    WPK_WriteTask* old;
+    WPK_WriteTask* task;
+
+    if (!WPK_NormalizeMd5Hex32(md5Lower, md5) || !data || size == 0
+        || size > (size_t)0xFFFFFFFFu || size > (size_t)WPK_WRITE_MAX_PACK_BYTES)
+    {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    if (!lua_isnoneornil(L, 4))
+    {
+        hash = (Uint32)luaL_checkinteger(L, 4);
+        hasHash = 1;
+    }
+
+    old = ud->write_head;
+    while (old)
+    {
+        if (SDL_memcmp(old->md5, md5Lower, 33) == 0)
+        {
+            Uint8* copy = (Uint8*)SDL_malloc(size);
+            if (!copy)
+                return luaL_error(L, "wpk: out of memory");
+            SDL_memcpy(copy, data, size);
+            if (old->data)
+                SDL_free(old->data);
+            old->data = copy;
+            old->size = size;
+            old->hash = hash;
+            old->has_hash = hasHash;
+            lua_pushboolean(L, 1);
+            lua_pushinteger(L, (lua_Integer)ud->write_queue_count);
+            return 2;
+        }
+        old = old->next;
+    }
+
+    task = (WPK_WriteTask*)SDL_calloc(1, sizeof(WPK_WriteTask));
+    if (!task)
+        return luaL_error(L, "wpk: out of memory");
+    task->data = (Uint8*)SDL_malloc(size);
+    if (!task->data)
+    {
+        SDL_free(task);
+        return luaL_error(L, "wpk: out of memory");
+    }
+    SDL_memcpy(task->md5, md5Lower, 33);
+    SDL_memcpy(task->data, data, size);
+    task->size = size;
+    task->hash = hash;
+    task->has_hash = hasHash;
+
+    if (ud->write_tail)
+        ud->write_tail->next = task;
+    else
+        ud->write_head = task;
+    ud->write_tail = task;
+    ud->write_queue_count++;
+    ud->write_queued_total++;
+
+    lua_pushboolean(L, 1);
+    lua_pushinteger(L, (lua_Integer)ud->write_queue_count);
+    return 2;
+}
+
+static int WPK_FlushWriteQueue(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    int limit = (int)luaL_optinteger(L, 2, 1);
+    int force = lua_toboolean(L, 3);
+    int processed = 0;
+    int failed = 0;
+    if (force || limit <= 0)
+        limit = 0x7fffffff;
+
+    while (ud->write_head && processed < limit)
+    {
+        WPK_WriteTask* task = ud->write_head;
+        Uint32 wpkid;
+        Uint32 offset = 0;
+        int ok = 0;
+
+        ud->write_head = task->next;
+        if (!ud->write_head)
+            ud->write_tail = NULL;
+        if (ud->write_queue_count > 0)
+            ud->write_queue_count--;
+
+        wpkid = WPK_SelectWritePack(ud, task->size);
+        if (wpkid < 255u && WPK_AppendDataPack(ud, wpkid, task->data, task->size, &offset))
+        {
+            int top = lua_gettop(L);
+            lua_pushcfunction(L, WPK_Upsert);
+            lua_pushvalue(L, 1);
+            lua_pushstring(L, task->md5);
+            lua_pushinteger(L, (lua_Integer)wpkid);
+            lua_pushinteger(L, (lua_Integer)offset);
+            lua_pushinteger(L, (lua_Integer)task->size);
+            if (task->has_hash)
+                lua_pushinteger(L, (lua_Integer)task->hash);
+            else
+                lua_pushnil(L);
+            if (lua_pcall(L, 6, 2, 0) == LUA_OK)
+            {
+                ok = lua_toboolean(L, -2) || lua_toboolean(L, -1);
+                lua_settop(L, top);
+            }
+            else
+            {
+                fprintf(stderr, "[wpk] QueueWrite Upsert failed: %s\n", lua_tostring(L, -1));
+                lua_settop(L, top);
+            }
+        }
+
+        if (ok)
+        {
+            ud->write_flushed_total++;
+            WPK_FreeWriteTask(task);
+        }
+        else
+        {
+            failed++;
+            ud->write_failed_total++;
+            WPK_FreeWriteTask(task);
+        }
+        processed++;
+    }
+
+    lua_createtable(L, 0, 4);
+    lua_pushinteger(L, (lua_Integer)processed);
+    lua_setfield(L, -2, "processed");
+    lua_pushinteger(L, (lua_Integer)failed);
+    lua_setfield(L, -2, "failed");
+    lua_pushinteger(L, (lua_Integer)ud->write_queue_count);
+    lua_setfield(L, -2, "queued");
+    lua_pushboolean(L, ud->write_queue_count > 0);
+    lua_setfield(L, -2, "busy");
+    return 1;
+}
+
 static int WPK_SaveIdx(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -3026,6 +3305,14 @@ static int WPK_GetStats(lua_State* L)
         lua_setfield(L, -2, "decoded_lru_count");
         lua_pushinteger(L, (lua_Integer)ud->decoded_cache_bytes);
         lua_setfield(L, -2, "decoded_lru_bytes");
+        lua_pushinteger(L, (lua_Integer)ud->write_queue_count);
+        lua_setfield(L, -2, "write_queue");
+        lua_pushinteger(L, (lua_Integer)ud->write_queued_total);
+        lua_setfield(L, -2, "write_queued_total");
+        lua_pushinteger(L, (lua_Integer)ud->write_flushed_total);
+        lua_setfield(L, -2, "write_flushed_total");
+        lua_pushinteger(L, (lua_Integer)ud->write_failed_total);
+        lua_setfield(L, -2, "write_failed_total");
     }
     return 1;
 }
@@ -3033,6 +3320,7 @@ static int WPK_GetStats(lua_State* L)
 static int WPK_GC(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    WPK_ClearWriteQueue(ud);
     WPK_DecodedCacheClear(ud);
     if (ud->list_ref > 0)
     {
@@ -3528,6 +3816,8 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"GetInfoByHash", WPK_GetInfoByHash},
         {"Upsert", WPK_Upsert},
         {"SetHash", WPK_SetHash},
+        {"QueueWrite", WPK_QueueWrite},
+        {"FlushWriteQueue", WPK_FlushWriteQueue},
         {"SaveIdx", WPK_SaveIdx},
         {"SetZstdDict", WPK_SetZstdDict},
         {"GetStats", WPK_GetStats},
