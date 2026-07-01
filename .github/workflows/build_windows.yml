@@ -195,12 +195,34 @@ jobs:
         # 所有 vcxproj 已统一为 v143 (VS 2022)
         # 此处仍保留全局覆盖作为防御性措施，防止意外引入其他工具集版本
         # PostBuildEvent 禁用: 仅用于本地开发的 copy 操作，CI 上目标不存在
+        $log = "msbuild-${{ matrix.platform }}-${{ matrix.configuration }}.log"
         msbuild ${{ env.SOLUTION_FILE }} `
           /p:Configuration=${{ matrix.configuration }} `
           /p:Platform=${{ matrix.platform }} `
           /p:PlatformToolset=v143 `
           /p:PostBuildEventUseInBuild=false `
-          /m /v:minimal
+          /m /v:minimal `
+          /flp:"LogFile=$log;Verbosity=normal;Encoding=UTF-8"
+
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+          Write-Host ""
+          Write-Host "MSBuild failed with exit code $exitCode"
+          if (Test-Path $log) {
+            $pattern = '(:\s*(fatal error|error)\s+[A-Z]+\d+|MSB\d+:|LNK\d+:)'
+            $errors = Select-String -Path $log -Pattern $pattern -CaseSensitive:$false | Select-Object -First 25
+            if ($errors.Count -eq 0) {
+              $errors = Get-Content $log -Tail 80
+            } else {
+              $errors = $errors | ForEach-Object { $_.Line }
+            }
+            foreach ($line in $errors) {
+              $msg = $line -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A'
+              Write-Host "::error::$msg"
+            }
+          }
+          exit $exitCode
+        }
 
     - name: Validate build output
       shell: pwsh
