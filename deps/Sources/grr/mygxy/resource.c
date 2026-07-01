@@ -322,6 +322,8 @@ static void resource_cancel_download(lua_State* L, ResourceToken* token)
     resource_unref_download(L, token);
 }
 
+static void resource_finish_failed(lua_State* L, ResourceToken* token, const char* message);
+
 static void resource_dispatch_callbacks(lua_State* L, ResourceToken* token,
     int success, const char* data, size_t data_len, const char* err)
 {
