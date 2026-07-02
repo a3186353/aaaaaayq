@@ -647,6 +647,8 @@ typedef struct
 
     SDL_RWops** wpk_files;
     Uint32 wpk_files_count;
+    SDL_RWops** write_files;
+    Uint32 write_files_count;
     WPK_DecodedCacheEntry* decoded_cache_head;
     WPK_DecodedCacheEntry* decoded_cache_tail;
     Uint32 decoded_cache_count;
@@ -671,6 +673,7 @@ typedef struct
 
     char idx_path[256];
     char base_dir[256];
+    char write_base_dir[256];
     char base_name[128];
 
     Uint32 skpw_unknown;
@@ -748,6 +751,50 @@ static int WPK_EnsureWpkFiles(WPK_UserData* ud, Uint32 wpkid)
     ud->wpk_files = p;
     ud->wpk_files_count = newCount;
     return 1;
+}
+
+static int WPK_EnsureWriteFiles(WPK_UserData* ud, Uint32 wpkid)
+{
+    if (!ud)
+        return 0;
+    if (wpkid < ud->write_files_count)
+        return 1;
+
+    Uint32 newCount = wpkid + 1;
+    if (newCount == 0)
+        return 0;
+
+    SDL_RWops** p = (SDL_RWops**)SDL_realloc(ud->write_files, sizeof(SDL_RWops*) * newCount);
+    if (!p)
+        return 0;
+
+    for (Uint32 i = ud->write_files_count; i < newCount; i++)
+        p[i] = NULL;
+    ud->write_files = p;
+    ud->write_files_count = newCount;
+    return 1;
+}
+
+static void WPK_CloseCachedWriteFile(WPK_UserData* ud, Uint32 wpkid)
+{
+    if (!ud || wpkid >= ud->write_files_count || !ud->write_files[wpkid])
+        return;
+    SDL_RWclose(ud->write_files[wpkid]);
+    ud->write_files[wpkid] = NULL;
+}
+
+static void WPK_CloseCachedWriteFiles(WPK_UserData* ud)
+{
+    if (!ud || !ud->write_files)
+        return;
+    for (Uint32 i = 0; i < ud->write_files_count; i++)
+    {
+        if (ud->write_files[i])
+        {
+            SDL_RWclose(ud->write_files[i]);
+            ud->write_files[i] = NULL;
+        }
+    }
 }
 
 static int WPK_HexNibble(int c)
@@ -1024,6 +1071,7 @@ static SDL_RWops* WPK_OpenWpkFile(WPK_UserData* ud, Uint32 wpkid)
 {
     if (wpkid >= ud->wpk_files_count)
         return NULL;
+    WPK_CloseCachedWriteFile(ud, wpkid);
     if (ud->wpk_files[wpkid])
         return ud->wpk_files[wpkid];
 
@@ -1097,50 +1145,77 @@ static void WPK_CloseCachedWpkFile(WPK_UserData* ud, Uint32 wpkid)
 static void WPK_BuildDataPackPath(WPK_UserData* ud, Uint32 wpkid, char out[512])
 {
     char lower_base_name[128];
+    const char* base_dir = ".";
     SDL_strlcpy(lower_base_name, ud && ud->base_name[0] ? ud->base_name : "cache", sizeof(lower_base_name));
     for (size_t i = 0; lower_base_name[i]; i++)
         lower_base_name[i] = (char)SDL_tolower((unsigned char)lower_base_name[i]);
+    if (ud && ud->write_base_dir[0])
+        base_dir = ud->write_base_dir;
+    else if (ud && ud->base_dir[0])
+        base_dir = ud->base_dir;
     SDL_snprintf(out, 512, "%s" WPK_SEP_STR "%s%u.wpk",
-        ud && ud->base_dir[0] ? ud->base_dir : ".",
+        base_dir,
         lower_base_name,
         (unsigned)wpkid);
 }
 
+static SDL_RWops* WPK_OpenWriteFile(WPK_UserData* ud, Uint32 wpkid);
+
 static Sint64 WPK_GetDataPackSize(WPK_UserData* ud, Uint32 wpkid)
 {
-    char path[512];
-    WPK_BuildDataPackPath(ud, wpkid, path);
-    SDL_RWops* fp = SDL_RWFromFile(path, "rb");
+    if (ud && wpkid < ud->write_files_count && ud->write_files[wpkid])
+    {
+        Sint64 pos = SDL_RWseek(ud->write_files[wpkid], 0, RW_SEEK_END);
+        return pos > 0 ? pos : 0;
+    }
+
+    SDL_RWops* fp = WPK_OpenWriteFile(ud, wpkid);
     if (!fp)
         return 0;
-    Sint64 size = SDL_RWsize(fp);
-    SDL_RWclose(fp);
+    Sint64 size = SDL_RWseek(fp, 0, RW_SEEK_END);
     return size > 0 ? size : 0;
 }
 
-static int WPK_AppendDataPack(WPK_UserData* ud, Uint32 wpkid, const void* data, size_t size, Uint32* outOffset)
+static SDL_RWops* WPK_OpenWriteFile(WPK_UserData* ud, Uint32 wpkid)
 {
     char path[512];
-    if (!ud || !data || size == 0 || size > (size_t)0xFFFFFFFFu)
-        return 0;
-    if (!WPK_EnsureWpkFiles(ud, wpkid))
-        return 0;
+    if (!ud || !WPK_EnsureWriteFiles(ud, wpkid))
+        return NULL;
+    if (ud->write_files[wpkid])
+        return ud->write_files[wpkid];
 
     WPK_BuildDataPackPath(ud, wpkid, path);
     WPK_EnsureParentDirForWrite(path);
     WPK_CloseCachedWpkFile(ud, wpkid);
 
-    Sint64 offset = WPK_GetDataPackSize(ud, wpkid);
+    SDL_RWops* fp = SDL_RWFromFile(path, "ab");
+    if (!fp)
+        return NULL;
+    ud->write_files[wpkid] = fp;
+    return fp;
+}
+
+static int WPK_AppendDataPack(WPK_UserData* ud, Uint32 wpkid, const void* data, size_t size, Uint32* outOffset)
+{
+    if (!ud || !data || size == 0 || size > (size_t)0xFFFFFFFFu)
+        return 0;
+    if (!WPK_EnsureWpkFiles(ud, wpkid))
+        return 0;
+
+    SDL_RWops* fp = WPK_OpenWriteFile(ud, wpkid);
+    if (!fp)
+        return 0;
+
+    Sint64 offset = SDL_RWseek(fp, 0, RW_SEEK_END);
     if (offset < 0 || offset > (Sint64)0xFFFFFFFFu)
         return 0;
 
-    SDL_RWops* fp = SDL_RWFromFile(path, "ab");
-    if (!fp)
-        return 0;
     size_t wrote = SDL_RWwrite(fp, data, 1, size);
-    SDL_RWclose(fp);
     if (wrote != size)
+    {
+        WPK_CloseCachedWriteFile(ud, wpkid);
         return 0;
+    }
     if (outOffset)
         *outOffset = (Uint32)offset;
     return 1;
@@ -3052,6 +3127,35 @@ static int WPK_QueueWrite(lua_State* L)
     return 2;
 }
 
+static int WPK_SetWriteBaseDir(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    const char* path = luaL_optstring(L, 2, NULL);
+    char normalized[256];
+    normalized[0] = 0;
+    if (!path || !path[0])
+    {
+        normalized[0] = 0;
+    }
+    else
+    {
+        SDL_strlcpy(normalized, path, sizeof(normalized));
+        size_t n = SDL_strlen(normalized);
+        while (n > 0 && (normalized[n - 1] == '/' || normalized[n - 1] == '\\'))
+        {
+            normalized[n - 1] = 0;
+            n--;
+        }
+    }
+    if (SDL_strcmp(ud->write_base_dir, normalized) != 0)
+    {
+        WPK_CloseCachedWriteFiles(ud);
+        SDL_strlcpy(ud->write_base_dir, normalized, sizeof(ud->write_base_dir));
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static int WPK_FlushWriteQueue(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -3139,6 +3243,8 @@ static int WPK_SaveIdx(lua_State* L)
         encrypt = lua_toboolean(L, 3) ? 1 : 0;
     else
         encrypt = ud->idx_is_skpe ? 1 : 1;
+
+    WPK_CloseCachedWriteFiles(ud);
 
     if (!ud->idx_is_skpw)
         return 0;
@@ -3313,6 +3419,19 @@ static int WPK_GetStats(lua_State* L)
         lua_setfield(L, -2, "write_flushed_total");
         lua_pushinteger(L, (lua_Integer)ud->write_failed_total);
         lua_setfield(L, -2, "write_failed_total");
+        lua_pushstring(L, ud->write_base_dir);
+        lua_setfield(L, -2, "write_base_dir");
+        Uint32 write_open_files = 0;
+        if (ud->write_files)
+        {
+            for (Uint32 i = 0; i < ud->write_files_count; i++)
+            {
+                if (ud->write_files[i])
+                    write_open_files++;
+            }
+        }
+        lua_pushinteger(L, (lua_Integer)write_open_files);
+        lua_setfield(L, -2, "write_open_files");
     }
     return 1;
 }
@@ -3354,6 +3473,13 @@ static int WPK_GC(lua_State* L)
         SDL_free(ud->wpk_files);
         ud->wpk_files = NULL;
         ud->wpk_files_count = 0;
+    }
+    if (ud->write_files)
+    {
+        WPK_CloseCachedWriteFiles(ud);
+        SDL_free(ud->write_files);
+        ud->write_files = NULL;
+        ud->write_files_count = 0;
     }
     if (ud->list)
     {
@@ -3817,6 +3943,7 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"Upsert", WPK_Upsert},
         {"SetHash", WPK_SetHash},
         {"QueueWrite", WPK_QueueWrite},
+        {"SetWriteBaseDir", WPK_SetWriteBaseDir},
         {"FlushWriteQueue", WPK_FlushWriteQueue},
         {"SaveIdx", WPK_SaveIdx},
         {"SetZstdDict", WPK_SetZstdDict},

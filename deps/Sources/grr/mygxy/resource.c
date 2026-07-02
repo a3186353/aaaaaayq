@@ -37,6 +37,7 @@
 #define RESOURCE_DEFAULT_MAX_ACTIVE 6
 #define RESOURCE_DEFAULT_LOW_ACTIVE 2
 #define RESOURCE_DEFAULT_TIMEOUT 10
+#define RESOURCE_DEFAULT_CALLBACK_BUDGET 4
 
 typedef enum ResourcePriority
 {
@@ -76,6 +77,11 @@ typedef struct ResourceToken
     char* resource_type;
     char* scene;
     char* degrade;
+    int result_ready;
+    int result_success;
+    char* result_data;
+    size_t result_data_len;
+    char* result_error;
     struct ResourceCallback* callbacks;
     struct ResourceToken* next;
 } ResourceToken;
@@ -108,6 +114,8 @@ typedef struct ResourceState
     unsigned int ready;
     unsigned int failed;
     unsigned int degraded;
+    unsigned int callback_budget;
+    unsigned int callback_dispatched;
     ResourceToken* tokens;
     ResourceEvent* events_head;
     ResourceEvent* events_tail;
@@ -191,6 +199,19 @@ static void resource_unref_callbacks(lua_State* L, ResourceToken* token)
     token->callbacks = NULL;
 }
 
+static void resource_clear_result(ResourceToken* token)
+{
+    if (!token)
+        return;
+    free(token->result_data);
+    free(token->result_error);
+    token->result_data = NULL;
+    token->result_data_len = 0;
+    token->result_error = NULL;
+    token->result_ready = 0;
+    token->result_success = 0;
+}
+
 static void resource_free_urls(char** urls, unsigned int count)
 {
     unsigned int i;
@@ -207,6 +228,7 @@ static void resource_free_token(lua_State* L, ResourceToken* token)
         return;
     resource_unref_download(L, token);
     resource_unref_callbacks(L, token);
+    resource_clear_result(token);
     resource_free_urls(token->urls, token->url_count);
     free(token->save_path);
     free(token->dedupe_key);
@@ -258,6 +280,23 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     else if (status == RESOURCE_STATUS_FAILED) g_resource.failed++;
     else if (status == RESOURCE_STATUS_DEGRADED) g_resource.degraded++;
     resource_push_event(token->id, status, token->resource_id, message);
+}
+
+static void resource_promote_priority(ResourceToken* token, ResourcePriority priority)
+{
+    ResourcePriority old_priority;
+    if (!token || priority <= token->priority)
+        return;
+    old_priority = token->priority;
+    token->priority = priority;
+    if (token->status == RESOURCE_STATUS_QUEUED
+        && old_priority == RESOURCE_PRIORITY_PREHEAT
+        && priority != RESOURCE_PRIORITY_PREHEAT)
+    {
+        if (g_resource.queued_low > 0)
+            g_resource.queued_low--;
+        g_resource.queued_high++;
+    }
 }
 
 static unsigned int resource_max_active(void)
@@ -371,6 +410,65 @@ static void resource_dispatch_callbacks(lua_State* L, ResourceToken* token,
     resource_unref_callbacks(L, token);
 }
 
+static int resource_store_success(ResourceToken* token, const char* data, size_t data_len)
+{
+    if (!token)
+        return 0;
+    resource_clear_result(token);
+    token->result_success = 1;
+    token->result_ready = 1;
+    if (data && data_len > 0)
+    {
+        token->result_data = (char*)malloc(data_len);
+        if (!token->result_data)
+        {
+            token->result_ready = 0;
+            token->result_success = 0;
+            return 0;
+        }
+        memcpy(token->result_data, data, data_len);
+        token->result_data_len = data_len;
+    }
+    return 1;
+}
+
+static int resource_store_failure(ResourceToken* token, const char* message)
+{
+    if (!token)
+        return 0;
+    resource_clear_result(token);
+    token->result_success = 0;
+    token->result_error = resource_strdup(message ? message : "download failed");
+    token->result_ready = 1;
+    return token->result_error != NULL;
+}
+
+static unsigned int resource_callback_budget(void)
+{
+    return g_resource.callback_budget ? g_resource.callback_budget : RESOURCE_DEFAULT_CALLBACK_BUDGET;
+}
+
+static unsigned int resource_dispatch_pending_callbacks(lua_State* L)
+{
+    ResourceToken* p = g_resource.tokens;
+    unsigned int dispatched = 0;
+    unsigned int budget = resource_callback_budget();
+    while (p && dispatched < budget)
+    {
+        ResourceToken* next = p->next;
+        if (!p->callbacks_done && p->result_ready && resource_is_terminal(p->status))
+        {
+            resource_dispatch_callbacks(L, p, p->result_success,
+                p->result_data, p->result_data_len, p->result_error);
+            resource_clear_result(p);
+            dispatched++;
+        }
+        p = next;
+    }
+    g_resource.callback_dispatched += dispatched;
+    return dispatched;
+}
+
 static int resource_start_download(lua_State* L, ResourceToken* token)
 {
     const char* url;
@@ -463,8 +561,14 @@ static void resource_finish_success(lua_State* L, ResourceToken* token)
         }
     }
     resource_unref_download(L, token);
+    if (!resource_store_success(token, data, len))
+    {
+        if (data_idx)
+            lua_pop(L, 1);
+        resource_finish_failed(L, token, "out of memory");
+        return;
+    }
     resource_set_status(token, RESOURCE_STATUS_READY, "ready");
-    resource_dispatch_callbacks(L, token, 1, data, len, NULL);
     if (data_idx)
         lua_pop(L, 1);
 }
@@ -474,8 +578,8 @@ static void resource_finish_failed(lua_State* L, ResourceToken* token, const cha
     if (!token)
         return;
     resource_unref_download(L, token);
+    resource_store_failure(token, message ? message : "download failed");
     resource_set_status(token, RESOURCE_STATUS_FAILED, message ? message : "download failed");
-    resource_dispatch_callbacks(L, token, 0, NULL, 0, message ? message : "download failed");
 }
 
 static void resource_check_active_download(lua_State* L, ResourceToken* token)
@@ -499,6 +603,7 @@ static void resource_check_active_download(lua_State* L, ResourceToken* token)
     }
     else if (status < 0)
     {
+        char error_buf[64];
         resource_unref_download(L, token);
         if (token->current_url < token->url_count)
         {
@@ -507,7 +612,11 @@ static void resource_check_active_download(lua_State* L, ResourceToken* token)
         }
         else
         {
-            resource_finish_failed(L, token, "all urls failed");
+            if (status <= -100 && status >= -599)
+                snprintf(error_buf, sizeof(error_buf), "http %d", (int)(-status));
+            else
+                snprintf(error_buf, sizeof(error_buf), "download error %d", (int)status);
+            resource_finish_failed(L, token, error_buf);
         }
     }
 }
@@ -578,16 +687,7 @@ static void resource_update_downloads(lua_State* L)
         low_active++;
     }
 
-    p = g_resource.tokens;
-    while (p)
-    {
-        if (!p->callbacks_done && resource_is_terminal(p->status))
-        {
-            const char* message = resource_status_name(p->status);
-            resource_dispatch_callbacks(L, p, 0, NULL, 0, message);
-        }
-        p = p->next;
-    }
+    resource_dispatch_pending_callbacks(L);
 }
 
 static ResourceToken* resource_find_token(unsigned int id)
@@ -848,8 +948,7 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     existing = resource_find_by_dedupe_key(dedupe_key);
     if (existing)
     {
-        if (parsed_priority > existing->priority)
-            existing->priority = parsed_priority;
+        resource_promote_priority(existing, parsed_priority);
         if (callback_ref != LUA_NOREF && !resource_add_callback_ref(existing, callback_ref))
         {
             luaL_unref(L, LUA_REGISTRYINDEX, callback_ref);
@@ -931,6 +1030,7 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     if (token->status == RESOURCE_STATUS_DEGRADED)
     {
         g_resource.degraded++;
+        resource_store_failure(token, "cold download disabled");
         resource_push_event(token->id, RESOURCE_STATUS_DEGRADED, token->resource_id, "cold download disabled");
     }
     else if (token->priority == RESOURCE_PRIORITY_PREHEAT)
@@ -1136,6 +1236,9 @@ static int resource_lua_cancel(lua_State* L)
     {
         token->cancelled = 1;
         g_resource.cancelled++;
+        if (token->download_ref != LUA_NOREF)
+            resource_cancel_download(L, token);
+        resource_store_failure(token, "cancelled");
         resource_set_status(token, RESOURCE_STATUS_CANCELLED, "cancelled");
     }
     lua_pushboolean(L, 1);
@@ -1154,6 +1257,7 @@ static int resource_lua_cancel_all(lua_State* L)
             g_resource.cancelled++;
             if (token->download_ref != LUA_NOREF)
                 resource_cancel_download(L, token);
+            resource_store_failure(token, "cancelled");
             resource_set_status(token, RESOURCE_STATUS_CANCELLED, "cancelled");
             count++;
         }
@@ -1163,12 +1267,11 @@ static int resource_lua_cancel_all(lua_State* L)
     return 1;
 }
 
-static int resource_lua_stats(lua_State* L)
+static int resource_push_stats(lua_State* L)
 {
     unsigned int active = 0;
     unsigned int low_active = 0;
     ResourceToken* token = g_resource.tokens;
-    resource_update_downloads(L);
     while (token)
     {
         if (!token->cancelled && token->download_ref != LUA_NOREF)
@@ -1207,7 +1310,21 @@ static int resource_lua_stats(lua_State* L)
     lua_setfield(L, -2, "max_active");
     lua_pushinteger(L, (lua_Integer)resource_low_active_max());
     lua_setfield(L, -2, "low_active_max");
+    lua_pushinteger(L, (lua_Integer)resource_callback_budget());
+    lua_setfield(L, -2, "callback_budget");
+    lua_pushinteger(L, (lua_Integer)g_resource.callback_dispatched);
+    lua_setfield(L, -2, "callback_dispatched");
     return 1;
+}
+
+static int resource_lua_stats(lua_State* L)
+{
+    return resource_push_stats(L);
+}
+
+static int resource_lua_peek_stats(lua_State* L)
+{
+    return resource_push_stats(L);
 }
 
 static int resource_lua_update(lua_State* L)
@@ -1225,16 +1342,22 @@ static int resource_lua_config(lua_State* L)
             resource_table_int(L, 1, "\xe6\x9c\x80\xe5\xa4\xa7\xe5\xb9\xb6\xe5\x8f\x91", (int)resource_max_active()));
         int low_active = resource_table_int(L, 1, "low_active_max",
             resource_table_int(L, 1, "\xe4\xbd\x8e\xe4\xbc\x98\xe5\x85\x88\xe7\xba\xa7\xe6\x9c\x80\xe5\xa4\xa7\xe6\xb4\xbb\xe8\xb7\x83", (int)resource_low_active_max()));
+        int callback_budget = resource_table_int(L, 1, "callback_budget",
+            resource_table_int(L, 1, "\xe5\x9b\x9e\xe8\xb0\x83\xe9\xa2\x84\xe7\xae\x97", (int)resource_callback_budget()));
         if (max_active > 0)
             g_resource.max_active = (unsigned int)max_active;
         if (low_active >= 0)
             g_resource.low_active_max = (unsigned int)low_active;
+        if (callback_budget > 0)
+            g_resource.callback_budget = (unsigned int)callback_budget;
     }
-    lua_createtable(L, 0, 2);
+    lua_createtable(L, 0, 3);
     lua_pushinteger(L, (lua_Integer)resource_max_active());
     lua_setfield(L, -2, "max_active");
     lua_pushinteger(L, (lua_Integer)resource_low_active_max());
     lua_setfield(L, -2, "low_active_max");
+    lua_pushinteger(L, (lua_Integer)resource_callback_budget());
+    lua_setfield(L, -2, "callback_budget");
     return 1;
 }
 
@@ -1273,6 +1396,7 @@ static const luaL_Reg RESOURCE_FUNCS[] = {
     {"cancel_all", resource_lua_cancel_all},
     {"config", resource_lua_config},
     {"stats", resource_lua_stats},
+    {"peek_stats", resource_lua_peek_stats},
     {"__gc", resource_lua_gc},
     {NULL, NULL},
 };
