@@ -1954,6 +1954,101 @@ static int TCP_RequestFrame(lua_State* L)
     return 2;
 }
 
+int TCP_NativePollAsync(TCP_UserData* ud, Uint32 limit)
+{
+    return TCP_AsyncPollDecoded(ud, limit);
+}
+
+int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id)
+{
+    if (!ud || id >= ud->number)
+        return 0;
+    TCP_AsyncPollDecoded(ud, 4);
+    return TCP_CacheLookup(ud, id) != NULL;
+}
+
+int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
+{
+    Uint32 pal_count;
+    Uint32 pal_version;
+    Uint32* pal_snapshot;
+    TCP_AsyncJob* job;
+
+    if (status) *status = "error";
+    if (!ud || id >= ud->number)
+    {
+        if (status) *status = "frame index out of range";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+
+    TCP_AsyncPollDecoded(ud, 4);
+    if (TCP_CacheLookup(ud, id))
+    {
+        if (status) *status = "ready";
+        return MYGXY_ASYNC_FRAME_READY;
+    }
+
+    if (!TCP_AsyncEnsure(ud))
+    {
+        if (status) *status = "async init failed";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+
+    pal_count = ud->pal_count ? ud->pal_count : 256;
+    if (!ud->pal_dyn && pal_count > 256)
+        pal_count = 256;
+    pal_version = ud->pal_version;
+    pal_snapshot = (Uint32*)SDL_malloc(sizeof(Uint32) * pal_count);
+    if (!pal_snapshot)
+    {
+        if (status) *status = "out of memory";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+    SDL_memcpy(pal_snapshot, ud->pal_dyn ? ud->pal_dyn : ud->pal, sizeof(Uint32) * pal_count);
+
+    SDL_LockMutex(ud->async_mutex);
+    if (TCP_AsyncQueueHasFrame(ud, id, pal_version))
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        if (status) *status = "pending";
+        return MYGXY_ASYNC_FRAME_PENDING;
+    }
+    if (ud->async_queued >= TCP_ASYNC_QUEUE_CAP)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        if (status) *status = "queue full";
+        return MYGXY_ASYNC_FRAME_QUEUE_FULL;
+    }
+
+    job = (TCP_AsyncJob*)SDL_calloc(1, sizeof(TCP_AsyncJob));
+    if (!job)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        if (status) *status = "out of memory";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+    job->pal_snapshot = pal_snapshot;
+    job->frame_id = id;
+    job->generation = ud->async_generation;
+    job->pal_version = pal_version;
+    job->pal_count = pal_count;
+    if (ud->async_queue_tail)
+        ud->async_queue_tail->next = job;
+    else
+        ud->async_queue_head = job;
+    ud->async_queue_tail = job;
+    ud->async_queued++;
+    ud->async_submitted++;
+    SDL_CondSignal(ud->async_cond);
+    SDL_UnlockMutex(ud->async_mutex);
+
+    if (status) *status = "queued";
+    return MYGXY_ASYNC_FRAME_QUEUED;
+}
+
 static int TCP_PollAsync(lua_State* L)
 {
     TCP_UserData* ud = TCP_Check(L, 1);

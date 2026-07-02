@@ -1102,6 +1102,80 @@ static int JY_RequestFrame(lua_State* L)
     return 2;
 }
 
+int JY_NativePollAsync(JY_UserData* ud, Uint32 limit)
+{
+    return JY_AsyncPollDecoded(ud, limit);
+}
+
+int JY_NativeIsFrameDecoded(JY_UserData* ud, Uint32 id)
+{
+    if (!ud || id >= ud->frame_count)
+        return 0;
+    JY_AsyncPollDecoded(ud, 4);
+    return JY_CacheLookup(ud, id) != NULL;
+}
+
+int JY_NativeRequestFrame(JY_UserData* ud, Uint32 id, const char** status)
+{
+    JY_AsyncJob* job;
+
+    if (status) *status = "error";
+    if (!ud || id >= ud->frame_count)
+    {
+        if (status) *status = "frame index out of range";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+
+    JY_AsyncPollDecoded(ud, 4);
+    if (JY_CacheLookup(ud, id))
+    {
+        if (status) *status = "ready";
+        return MYGXY_ASYNC_FRAME_READY;
+    }
+
+    if (!JY_AsyncEnsure(ud))
+    {
+        if (status) *status = "async init failed";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+
+    SDL_LockMutex(ud->async_mutex);
+    if (JY_AsyncQueueHasFrame(ud, id))
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        if (status) *status = "pending";
+        return MYGXY_ASYNC_FRAME_PENDING;
+    }
+    if (ud->async_queued >= 128)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        if (status) *status = "queue full";
+        return MYGXY_ASYNC_FRAME_QUEUE_FULL;
+    }
+
+    job = (JY_AsyncJob*)SDL_calloc(1, sizeof(JY_AsyncJob));
+    if (!job)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        if (status) *status = "out of memory";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+    job->frame_id = id;
+    job->generation = ud->async_generation;
+    if (ud->async_queue_tail)
+        ud->async_queue_tail->next = job;
+    else
+        ud->async_queue_head = job;
+    ud->async_queue_tail = job;
+    ud->async_queued++;
+    ud->async_submitted++;
+    SDL_CondSignal(ud->async_cond);
+    SDL_UnlockMutex(ud->async_mutex);
+
+    if (status) *status = "queued";
+    return MYGXY_ASYNC_FRAME_QUEUED;
+}
+
 static int JY_PollAsync(lua_State* L)
 {
     JY_UserData* ud = JY_Check(L, 1);

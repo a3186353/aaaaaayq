@@ -7,6 +7,8 @@
  * ghv.download binding; Lua no longer maintains the hot download queue.
  */
 #include "lua_proxy.h"
+#include "tcp.h"
+#include "jy.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +40,15 @@
 #define RESOURCE_DEFAULT_LOW_ACTIVE 2
 #define RESOURCE_DEFAULT_TIMEOUT 10
 #define RESOURCE_DEFAULT_CALLBACK_BUDGET 4
+#define RESOURCE_PREHEAT_AGING_TICKS 40
+#define RESOURCE_DEFAULT_NATIVE_RETRIES 600
+
+typedef enum ResourceNativeKind
+{
+    RESOURCE_NATIVE_NONE = 0,
+    RESOURCE_NATIVE_TCP = 1,
+    RESOURCE_NATIVE_JY = 2
+} ResourceNativeKind;
 
 typedef enum ResourcePriority
 {
@@ -76,7 +87,21 @@ typedef struct ResourceToken
     char* resource_id;
     char* resource_type;
     char* scene;
+    char* scope;
+    char* domain;
     char* degrade;
+    lua_Integer generation;
+    int has_generation;
+    Uint32 frame;
+    int has_frame;
+    unsigned int created_tick;
+    unsigned int retry_tick;
+    unsigned int submit_attempts;
+    unsigned int queue_full_count;
+    unsigned int max_tries;
+    ResourceNativeKind native_kind;
+    void* native_ud;
+    int native_ref;
     int result_ready;
     int result_success;
     char* result_data;
@@ -118,6 +143,12 @@ typedef struct ResourceState
     unsigned int callback_dispatched;
     unsigned int render_submitted;
     unsigned int render_cancelled;
+    unsigned int native_ready;
+    unsigned int native_failed;
+    unsigned int native_queue_full;
+    unsigned int native_retried;
+    unsigned int poll_tick;
+    unsigned int native_cursor_id;
     ResourceToken* tokens;
     ResourceEvent* events_head;
     ResourceEvent* events_tail;
@@ -238,7 +269,11 @@ static void resource_free_token(lua_State* L, ResourceToken* token)
     free(token->resource_id);
     free(token->resource_type);
     free(token->scene);
+    free(token->scope);
+    free(token->domain);
     free(token->degrade);
+    if (token->native_ref != LUA_NOREF)
+        luaL_unref(L, LUA_REGISTRYINDEX, token->native_ref);
     free(token);
 }
 
@@ -299,6 +334,17 @@ static void resource_promote_priority(ResourceToken* token, ResourcePriority pri
             g_resource.queued_low--;
         g_resource.queued_high++;
     }
+}
+
+static ResourcePriority resource_effective_priority(const ResourceToken* token)
+{
+    if (!token)
+        return RESOURCE_PRIORITY_NORMAL;
+    if (token->priority == RESOURCE_PRIORITY_PREHEAT
+        && g_resource.poll_tick > token->created_tick
+        && g_resource.poll_tick - token->created_tick >= RESOURCE_PREHEAT_AGING_TICKS)
+        return RESOURCE_PRIORITY_NORMAL;
+    return token->priority;
 }
 
 static unsigned int resource_max_active(void)
@@ -633,16 +679,168 @@ static ResourceToken* resource_pick_queued(ResourcePriority want_preheat)
             && p->download_ref == LUA_NOREF && p->allow_cold_download
             && p->urls && p->url_count > 0)
         {
-            if ((want_preheat == RESOURCE_PRIORITY_PREHEAT) == (p->priority == RESOURCE_PRIORITY_PREHEAT))
+            ResourcePriority eff = resource_effective_priority(p);
+            if ((want_preheat == RESOURCE_PRIORITY_PREHEAT) == (eff == RESOURCE_PRIORITY_PREHEAT))
             {
-                if (!best || p->priority > best->priority
-                    || (p->priority == best->priority && p->id < best->id))
+                ResourcePriority best_eff = resource_effective_priority(best);
+                if (!best || eff > best_eff
+                    || (eff == best_eff && p->id < best->id))
                     best = p;
             }
         }
         p = p->next;
     }
     return best;
+}
+
+static int resource_native_is_frame_ready(ResourceToken* token)
+{
+    if (!token || !token->native_ud || !token->has_frame)
+        return 0;
+    if (token->native_kind == RESOURCE_NATIVE_TCP)
+        return TCP_NativeIsFrameDecoded((TCP_UserData*)token->native_ud, token->frame);
+    if (token->native_kind == RESOURCE_NATIVE_JY)
+        return JY_NativeIsFrameDecoded((JY_UserData*)token->native_ud, token->frame);
+    return 0;
+}
+
+static int resource_native_request_frame(ResourceToken* token, const char** out_status)
+{
+    if (!token || !token->native_ud || !token->has_frame)
+    {
+        if (out_status) *out_status = "native handle missing";
+        return MYGXY_ASYNC_FRAME_ERROR;
+    }
+    if (token->native_kind == RESOURCE_NATIVE_TCP)
+        return TCP_NativeRequestFrame((TCP_UserData*)token->native_ud, token->frame, out_status);
+    if (token->native_kind == RESOURCE_NATIVE_JY)
+        return JY_NativeRequestFrame((JY_UserData*)token->native_ud, token->frame, out_status);
+    if (out_status) *out_status = "unsupported native type";
+    return MYGXY_ASYNC_FRAME_ERROR;
+}
+
+static int resource_native_poll_frame(ResourceToken* token, Uint32 limit)
+{
+    if (!token || !token->native_ud)
+        return 0;
+    if (token->native_kind == RESOURCE_NATIVE_TCP)
+        return TCP_NativePollAsync((TCP_UserData*)token->native_ud, limit);
+    if (token->native_kind == RESOURCE_NATIVE_JY)
+        return JY_NativePollAsync((JY_UserData*)token->native_ud, limit);
+    return 0;
+}
+
+static void resource_finish_native_ready(ResourceToken* token)
+{
+    if (!token || resource_is_terminal(token->status))
+        return;
+    if (!resource_store_success(token, NULL, 0))
+    {
+        resource_store_failure(token, "out of memory");
+        resource_set_status(token, RESOURCE_STATUS_FAILED, "out of memory");
+        g_resource.native_failed++;
+        return;
+    }
+    resource_set_status(token, RESOURCE_STATUS_READY, "ready");
+    g_resource.native_ready++;
+}
+
+static void resource_finish_native_failed(ResourceToken* token, const char* message)
+{
+    if (!token || resource_is_terminal(token->status))
+        return;
+    resource_store_failure(token, message ? message : "native decode failed");
+    resource_set_status(token, RESOURCE_STATUS_FAILED, message ? message : "native decode failed");
+    g_resource.native_failed++;
+}
+
+static int resource_try_native_frame(ResourceToken* token)
+{
+    const char* status = NULL;
+    int ret;
+    if (!token || token->status != RESOURCE_STATUS_QUEUED || token->cancelled)
+        return 0;
+    if (token->native_kind == RESOURCE_NATIVE_NONE)
+        return 0;
+
+    resource_native_poll_frame(token, 2);
+    if (resource_native_is_frame_ready(token))
+    {
+        resource_finish_native_ready(token);
+        return 1;
+    }
+
+    if (token->retry_tick && g_resource.poll_tick < token->retry_tick)
+        return 0;
+
+    token->submit_attempts++;
+    ret = resource_native_request_frame(token, &status);
+    if (ret == MYGXY_ASYNC_FRAME_READY)
+    {
+        resource_finish_native_ready(token);
+        return 1;
+    }
+    if (ret == MYGXY_ASYNC_FRAME_QUEUED || ret == MYGXY_ASYNC_FRAME_PENDING)
+    {
+        if (token->submit_attempts >= token->max_tries)
+        {
+            resource_finish_native_failed(token, "native frame timeout");
+            return 1;
+        }
+        token->retry_tick = g_resource.poll_tick + 1;
+        return 0;
+    }
+    if (ret == MYGXY_ASYNC_FRAME_QUEUE_FULL)
+    {
+        token->queue_full_count++;
+        g_resource.native_queue_full++;
+        token->retry_tick = g_resource.poll_tick + 2 + (token->queue_full_count > 8 ? 8 : token->queue_full_count);
+        if (token->submit_attempts < token->max_tries)
+            return 0;
+        resource_finish_native_failed(token, status ? status : "queue full");
+        return 1;
+    }
+
+    resource_finish_native_failed(token, status ? status : "native request failed");
+    return 1;
+}
+
+static unsigned int resource_update_native_frames(unsigned int max_ops)
+{
+    unsigned int ops = 0;
+    if (max_ops == 0)
+        max_ops = 8;
+    while (ops < max_ops)
+    {
+        ResourceToken* p = g_resource.tokens;
+        ResourceToken* best = NULL;
+        ResourceToken* wrap = NULL;
+        while (p)
+        {
+            if (p->native_kind != RESOURCE_NATIVE_NONE && p->status == RESOURCE_STATUS_QUEUED)
+            {
+                if (p->id > g_resource.native_cursor_id)
+                {
+                    if (!best || p->id < best->id)
+                        best = p;
+                }
+                else if (!wrap || p->id < wrap->id)
+                {
+                    wrap = p;
+                }
+            }
+            p = p->next;
+        }
+        if (!best)
+            best = wrap;
+        if (!best)
+            break;
+        g_resource.native_cursor_id = best->id;
+        resource_try_native_frame(best);
+        ops++;
+    }
+    g_resource.native_retried += ops;
+    return ops;
 }
 
 static void resource_update_downloads(lua_State* L)
@@ -690,6 +888,13 @@ static void resource_update_downloads(lua_State* L)
     }
 
     resource_dispatch_pending_callbacks(L);
+}
+
+static void resource_update_all(lua_State* L, unsigned int native_ops)
+{
+    g_resource.poll_tick++;
+    resource_update_native_frames(native_ops);
+    resource_update_downloads(L);
 }
 
 static ResourceToken* resource_find_token(unsigned int id)
@@ -747,6 +952,53 @@ static int resource_table_int(lua_State* L, int idx, const char* key, int fallba
         value = (int)lua_tointeger(L, -1);
     lua_pop(L, 1);
     return value;
+}
+
+static void* resource_test_userdata(lua_State* L, int idx, const char* tname)
+{
+    void* p = lua_touserdata(L, idx);
+    int eq;
+    if (!p)
+        return NULL;
+    if (!lua_getmetatable(L, idx))
+        return NULL;
+    luaL_getmetatable(L, tname);
+    eq = lua_rawequal(L, -1, -2);
+    lua_pop(L, 2);
+    return eq ? p : NULL;
+}
+
+static int resource_read_native_ref(lua_State* L, int idx, ResourceNativeKind* out_kind, void** out_ud)
+{
+    void* ud = NULL;
+    ResourceNativeKind kind = RESOURCE_NATIVE_NONE;
+
+    lua_getfield(L, idx, "native_ud");
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        lua_getfield(L, idx, "ud");
+    }
+    if (lua_isuserdata(L, -1))
+    {
+        ud = resource_test_userdata(L, -1, TCP_MT_XYQ);
+        if (!ud)
+            ud = resource_test_userdata(L, -1, TCP_MT_XY2);
+        if (ud)
+            kind = RESOURCE_NATIVE_TCP;
+        else
+        {
+            ud = resource_test_userdata(L, -1, JY_MT);
+            if (ud)
+                kind = RESOURCE_NATIVE_JY;
+        }
+    }
+
+    lua_pop(L, 1);
+
+    if (out_kind) *out_kind = kind;
+    if (out_ud) *out_ud = ud;
+    return LUA_NOREF;
 }
 
 static int resource_add_callback_ref(ResourceToken* token, int ref)
@@ -895,6 +1147,8 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     char* resource_id;
     char* resource_type;
     char* scene;
+    char* scope;
+    char* domain;
     char* priority;
     char* queue_priority;
     char* degrade;
@@ -928,6 +1182,9 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     if (!resource_type) resource_type = resource_table_strdup(L, req_idx, RESOURCE_KEY_TYPE);
     scene = resource_table_strdup(L, req_idx, "scene");
     if (!scene) scene = resource_table_strdup(L, req_idx, RESOURCE_KEY_SCENE);
+    scope = resource_table_strdup(L, req_idx, "scope");
+    if (!scope) scope = resource_table_strdup(L, req_idx, "\xe8\x8c\x83\xe5\x9b\xb4");
+    domain = resource_table_strdup(L, req_idx, "domain");
     priority = resource_table_strdup(L, req_idx, "priority");
     if (!priority) priority = resource_table_strdup(L, req_idx, RESOURCE_KEY_PRIORITY);
     queue_priority = resource_table_strdup(L, req_idx, "queue_priority");
@@ -957,6 +1214,8 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
             free(resource_id);
             free(resource_type);
             free(scene);
+            free(scope);
+            free(domain);
             free(priority);
             free(queue_priority);
             free(degrade);
@@ -969,6 +1228,8 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         free(resource_id);
         free(resource_type);
         free(scene);
+        free(scope);
+        free(domain);
         free(priority);
         free(queue_priority);
         free(degrade);
@@ -988,6 +1249,8 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         free(resource_id);
         free(resource_type);
         free(scene);
+        free(scope);
+        free(domain);
         free(priority);
         free(queue_priority);
         free(degrade);
@@ -997,6 +1260,7 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         return NULL;
     }
     token->id = ++g_resource.next_token_id;
+    token->created_tick = g_resource.poll_tick;
     token->priority = parsed_priority;
     token->allow_cold_download = resource_table_bool(L, req_idx, "allow_cold_download",
         resource_table_bool(L, req_idx, "allow_cold", 1));
@@ -1004,6 +1268,15 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         token->allow_cold_download);
     token->status = token->allow_cold_download ? RESOURCE_STATUS_QUEUED : RESOURCE_STATUS_DEGRADED;
     token->download_ref = LUA_NOREF;
+    token->native_ref = LUA_NOREF;
+    token->max_tries = (unsigned int)resource_table_int(L, req_idx, "max_tries",
+        resource_table_int(L, req_idx, "\xe6\x9c\x80\xe5\xa4\xa7\xe9\x87\x8d\xe8\xaf\x95", RESOURCE_DEFAULT_NATIVE_RETRIES));
+    if (token->max_tries == 0)
+        token->max_tries = RESOURCE_DEFAULT_NATIVE_RETRIES;
+    token->generation = (lua_Integer)resource_table_int(L, req_idx, "generation", 0);
+    token->has_generation = resource_table_int(L, req_idx, "generation", -2147483647) != -2147483647;
+    token->frame = (Uint32)resource_table_int(L, req_idx, "frame", 0);
+    token->has_frame = resource_table_int(L, req_idx, "frame", -2147483647) != -2147483647;
     token->timeout = timeout;
     token->urls = urls;
     token->url_count = url_count;
@@ -1013,7 +1286,10 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     token->resource_id = resource_id ? resource_id : resource_strdup("");
     token->resource_type = resource_type ? resource_type : resource_strdup("resource");
     token->scene = scene ? scene : resource_strdup("");
+    token->scope = scope ? scope : resource_strdup("");
+    token->domain = domain ? domain : resource_strdup("");
     token->degrade = degrade;
+    token->native_ref = resource_read_native_ref(L, req_idx, &token->native_kind, &token->native_ud);
     if (callback_ref != LUA_NOREF && !resource_add_callback_ref(token, callback_ref))
     {
         luaL_unref(L, LUA_REGISTRYINDEX, callback_ref);
@@ -1065,6 +1341,20 @@ static void resource_push_token_table(lua_State* L, const ResourceToken* token)
     lua_setfield(L, -2, RESOURCE_KEY_SCENE);
     lua_pushstring(L, token->scene ? token->scene : "");
     lua_setfield(L, -2, "scene");
+    lua_pushstring(L, token->scope ? token->scope : "");
+    lua_setfield(L, -2, "scope");
+    lua_pushstring(L, token->domain ? token->domain : "");
+    lua_setfield(L, -2, "domain");
+    if (token->has_frame)
+    {
+        lua_pushinteger(L, (lua_Integer)token->frame);
+        lua_setfield(L, -2, "frame");
+    }
+    if (token->has_generation)
+    {
+        lua_pushinteger(L, token->generation);
+        lua_setfield(L, -2, "generation");
+    }
     lua_pushstring(L, token->priority == RESOURCE_PRIORITY_PREHEAT ? "preheat" :
         (token->priority == RESOURCE_PRIORITY_CRITICAL ? "critical" :
             (token->priority == RESOURCE_PRIORITY_HIGH ? "high" : "normal")));
@@ -1087,6 +1377,12 @@ static void resource_push_token_table(lua_State* L, const ResourceToken* token)
     lua_setfield(L, -2, "status");
     lua_pushboolean(L, token->cancelled);
     lua_setfield(L, -2, "cancelled");
+    lua_pushboolean(L, token->native_kind != RESOURCE_NATIVE_NONE);
+    lua_setfield(L, -2, "native_decode");
+    lua_pushinteger(L, (lua_Integer)token->submit_attempts);
+    lua_setfield(L, -2, "attempts");
+    lua_pushinteger(L, (lua_Integer)token->queue_full_count);
+    lua_setfield(L, -2, "queue_full");
 }
 
 static int resource_lua_query(lua_State* L)
@@ -1148,17 +1444,28 @@ static int resource_lua_request(lua_State* L)
 
 static int resource_lua_submit(lua_State* L)
 {
-    (void)L;
+    ResourceToken* token;
+    int accepted;
+    luaL_checktype(L, 1, LUA_TTABLE);
     g_resource.render_submitted++;
-    lua_createtable(L, 0, 4);
-    lua_pushboolean(L, 1);
+    token = resource_create_token(L, 1);
+    if (!token)
+        return luaL_error(L, "resource: out of memory");
+
+    accepted = token->native_kind != RESOURCE_NATIVE_NONE && token->has_frame;
+    if (accepted)
+    {
+        resource_try_native_frame(token);
+    }
+    else if (!resource_is_terminal(token->status))
+    {
+        resource_store_failure(token, "native producer unavailable");
+        resource_set_status(token, RESOURCE_STATUS_DEGRADED, "native producer unavailable");
+    }
+
+    resource_push_token_table(L, token);
+    lua_pushboolean(L, accepted);
     lua_setfield(L, -2, "accepted");
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "native_decode");
-    lua_pushstring(L, "queued");
-    lua_setfield(L, -2, "status");
-    lua_pushinteger(L, (lua_Integer)g_resource.render_submitted);
-    lua_setfield(L, -2, "id");
     return 1;
 }
 
@@ -1190,9 +1497,19 @@ static int resource_lua_preload(lua_State* L)
 static int resource_lua_poll(lua_State* L)
 {
     lua_Integer i = 1;
-    ResourceEvent* ev = g_resource.events_head;
+    ResourceEvent* ev;
     ResourceEvent* next;
-    resource_update_downloads(L);
+    unsigned int max_ops = 8;
+    if (lua_isnumber(L, 3))
+        max_ops = (unsigned int)lua_tointeger(L, 3);
+    else if (lua_isnumber(L, 2))
+    {
+        lua_Number n = lua_tonumber(L, 2);
+        if (n >= 1)
+            max_ops = (unsigned int)n;
+    }
+    resource_update_all(L, max_ops);
+    ev = g_resource.events_head;
     lua_newtable(L);
     while (ev)
     {
@@ -1288,9 +1605,26 @@ static int resource_lua_cancel_all(lua_State* L)
 static int resource_lua_cancel_scope(lua_State* L)
 {
     const char* scope = luaL_optstring(L, 1, "");
-    (void)scope;
-    g_resource.render_cancelled++;
-    lua_pushinteger(L, 0);
+    ResourceToken* token = g_resource.tokens;
+    unsigned int count = 0;
+    while (token)
+    {
+        if (!resource_is_terminal(token->status) && !token->cancelled
+            && ((token->scope && strcmp(token->scope, scope) == 0)
+                || (token->scene && strcmp(token->scene, scope) == 0)))
+        {
+            token->cancelled = 1;
+            g_resource.cancelled++;
+            g_resource.render_cancelled++;
+            if (token->download_ref != LUA_NOREF)
+                resource_cancel_download(L, token);
+            resource_store_failure(token, "cancelled");
+            resource_set_status(token, RESOURCE_STATUS_CANCELLED, "cancelled");
+            count++;
+        }
+        token = token->next;
+    }
+    lua_pushinteger(L, (lua_Integer)count);
     return 1;
 }
 
@@ -1310,7 +1644,7 @@ static int resource_push_stats(lua_State* L)
         token = token->next;
     }
 
-    lua_createtable(L, 0, 12);
+    lua_createtable(L, 0, 24);
     lua_pushboolean(L, 1);
     lua_setfield(L, -2, "native");
     lua_pushinteger(L, (lua_Integer)g_resource.created);
@@ -1345,9 +1679,21 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "render_submitted");
     lua_pushinteger(L, (lua_Integer)g_resource.render_cancelled);
     lua_setfield(L, -2, "render_cancelled");
-    lua_pushboolean(L, 0);
+    lua_pushinteger(L, (lua_Integer)g_resource.native_ready);
+    lua_setfield(L, -2, "native_ready");
+    lua_pushinteger(L, (lua_Integer)g_resource.native_failed);
+    lua_setfield(L, -2, "native_failed");
+    lua_pushinteger(L, (lua_Integer)g_resource.native_queue_full);
+    lua_setfield(L, -2, "native_queue_full");
+    lua_pushinteger(L, (lua_Integer)g_resource.native_retried);
+    lua_setfield(L, -2, "native_retried");
+    lua_pushinteger(L, (lua_Integer)g_resource.poll_tick);
+    lua_setfield(L, -2, "poll_tick");
+    lua_pushinteger(L, (lua_Integer)g_resource.native_cursor_id);
+    lua_setfield(L, -2, "native_cursor");
+    lua_pushboolean(L, g_resource.render_submitted > 0);
     lua_setfield(L, -2, "render_native");
-    lua_pushboolean(L, 0);
+    lua_pushboolean(L, g_resource.native_ready > 0 || g_resource.native_retried > 0);
     lua_setfield(L, -2, "native_decode");
     return 1;
 }
@@ -1364,8 +1710,41 @@ static int resource_lua_peek_stats(lua_State* L)
 
 static int resource_lua_update(lua_State* L)
 {
-    resource_update_downloads(L);
+    unsigned int max_ops = 8;
+    if (lua_isnumber(L, 1))
+    {
+        lua_Number n = lua_tonumber(L, 1);
+        if (n >= 1)
+            max_ops = (unsigned int)n;
+    }
+    resource_update_all(L, max_ops);
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int resource_lua_get_ready(lua_State* L)
+{
+    ResourceToken* token = NULL;
+    if (lua_isnumber(L, 1))
+        token = resource_find_token((unsigned int)lua_tointeger(L, 1));
+    else if (lua_isstring(L, 1))
+        token = resource_find_by_resource_id(lua_tostring(L, 1));
+    else if (lua_istable(L, 1))
+        return resource_lua_query(L);
+
+    if (token && token->native_kind != RESOURCE_NATIVE_NONE && token->status == RESOURCE_STATUS_QUEUED)
+    {
+        resource_native_poll_frame(token, 2);
+        if (resource_native_is_frame_ready(token))
+            resource_finish_native_ready(token);
+    }
+
+    if (!token || token->status != RESOURCE_STATUS_READY)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+    resource_push_token_table(L, token);
     return 1;
 }
 
@@ -1425,6 +1804,7 @@ static const luaL_Reg RESOURCE_FUNCS[] = {
     {"query", resource_lua_query},
     {"request", resource_lua_request},
     {"submit", resource_lua_submit},
+    {"get_ready", resource_lua_get_ready},
     {"preload", resource_lua_preload},
     {"poll", resource_lua_poll},
     {"update", resource_lua_update},

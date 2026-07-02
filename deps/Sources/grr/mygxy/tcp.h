@@ -19,6 +19,15 @@
 #define TCP_FMT_PS  0x5053   /* 'PS' = SP格式 */
 #define TCP_FMT_PR  0x5052   /* 'PR' = RP格式 */
 #define TCP_FMT_PT  0x5054   /* 'PT' = TP格式 */
+
+#ifndef MYGXY_ASYNC_FRAME_STATUS
+#define MYGXY_ASYNC_FRAME_STATUS
+#define MYGXY_ASYNC_FRAME_QUEUED      0
+#define MYGXY_ASYNC_FRAME_READY       1
+#define MYGXY_ASYNC_FRAME_PENDING     2
+#define MYGXY_ASYNC_FRAME_QUEUE_FULL -2
+#define MYGXY_ASYNC_FRAME_ERROR      -1
+#endif
 //TCA TCP SP
 typedef struct
 {
@@ -154,3 +163,6 @@ typedef struct
 } TCP_UserData;
 
 int TCP_Create(lua_State* L, Uint8* data, size_t size);
+int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status);
+int TCP_NativePollAsync(TCP_UserData* ud, Uint32 limit);
+int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id);

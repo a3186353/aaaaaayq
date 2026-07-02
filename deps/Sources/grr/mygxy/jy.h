@@ -8,6 +8,15 @@
 
 #define JY_MT "xyq_jy"
 
+#ifndef MYGXY_ASYNC_FRAME_STATUS
+#define MYGXY_ASYNC_FRAME_STATUS
+#define MYGXY_ASYNC_FRAME_QUEUED      0
+#define MYGXY_ASYNC_FRAME_READY       1
+#define MYGXY_ASYNC_FRAME_PENDING     2
+#define MYGXY_ASYNC_FRAME_QUEUE_FULL -2
+#define MYGXY_ASYNC_FRAME_ERROR      -1
+#endif
+
 /* ─── LRU 缓存容量默认值 ───
  * ★ 从 128 调低到 32：
  *   - 单个 JY_UserData 的 key = pid|cdn_eid|act|dir，仅承载单动作单方向
@@ -132,3 +141,6 @@ typedef struct
 
 /* 公共入口 */
 int JY_Create(lua_State* L);
+int JY_NativeRequestFrame(JY_UserData* ud, Uint32 id, const char** status);
+int JY_NativePollAsync(JY_UserData* ud, Uint32 limit);
+int JY_NativeIsFrameDecoded(JY_UserData* ud, Uint32 id);
