@@ -75,6 +75,23 @@ typedef int (*PFN_SDL_CondWait)(SDL_cond * cond, SDL_mutex * mutex);
 extern PFN_SDL_CondWait proxy_SDL_CondWait;
 #define SDL_CondWait proxy_SDL_CondWait
 
+#undef SDL_CreateThread
+typedef SDL_Thread * (*PFN_SDL_CreateThread)(SDL_ThreadFunction fn, const char *name, void *data);
+extern PFN_SDL_CreateThread proxy_SDL_CreateThread;
+extern PFN_SDL_CreateThread proxy_SDL_CreateThread_REAL;
+SDL_Thread * proxy_SDL_CreateThread_bridge(SDL_ThreadFunction fn, const char *name, void *data);
+#define SDL_CreateThread proxy_SDL_CreateThread_bridge
+
+#undef SDL_WaitThread
+typedef void (*PFN_SDL_WaitThread)(SDL_Thread * thread, int *status);
+extern PFN_SDL_WaitThread proxy_SDL_WaitThread;
+#define SDL_WaitThread proxy_SDL_WaitThread
+
+#undef SDL_DetachThread
+typedef void (*PFN_SDL_DetachThread)(SDL_Thread * thread);
+extern PFN_SDL_DetachThread proxy_SDL_DetachThread;
+#define SDL_DetachThread proxy_SDL_DetachThread
+
 typedef SDL_RWops * (*PFN_SDL_RWFromFile)(const char *file, const char *mode);
 extern PFN_SDL_RWFromFile proxy_SDL_RWFromFile;
 #define SDL_RWFromFile proxy_SDL_RWFromFile

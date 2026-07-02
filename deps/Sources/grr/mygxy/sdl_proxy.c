@@ -21,6 +21,8 @@
     X(SDL_DestroyCond, PFN_SDL_DestroyCond) \
     X(SDL_CondSignal, PFN_SDL_CondSignal) \
     X(SDL_CondWait, PFN_SDL_CondWait) \
+    X(SDL_WaitThread, PFN_SDL_WaitThread) \
+    X(SDL_DetachThread, PFN_SDL_DetachThread) \
     X(SDL_RWFromFile, PFN_SDL_RWFromFile) \
     X(SDL_RWFromMem, PFN_SDL_RWFromMem) \
     X(SDL_RWseek, PFN_SDL_RWseek) \
@@ -44,6 +46,8 @@
 
 #define DECLARE_SDL_PROXY(name, type) type proxy_##name = NULL;
 SDL_PROXY_SYMBOLS(DECLARE_SDL_PROXY)
+PFN_SDL_CreateThread proxy_SDL_CreateThread = NULL;
+PFN_SDL_CreateThread proxy_SDL_CreateThread_REAL = NULL;
 
 
 #if defined(_MSC_VER)
@@ -81,6 +85,22 @@ void init_sdl_proxy(void) {
         if (!proxy_##name) LOGE("Failed to resolve SDL symbol: " #name "\n");
 
     SDL_PROXY_SYMBOLS(RESOLVE_SDL_PROXY)
+
+    proxy_SDL_CreateThread = (PFN_SDL_CreateThread)dlsym(handle, "SDL_CreateThread");
+    if (!proxy_SDL_CreateThread && gsdl_handle) proxy_SDL_CreateThread = (PFN_SDL_CreateThread)dlsym(gsdl_handle, "SDL_CreateThread");
+    if (!proxy_SDL_CreateThread && sdl_handle) proxy_SDL_CreateThread = (PFN_SDL_CreateThread)dlsym(sdl_handle, "SDL_CreateThread");
+    proxy_SDL_CreateThread_REAL = (PFN_SDL_CreateThread)dlsym(handle, "SDL_CreateThread_REAL");
+    if (!proxy_SDL_CreateThread_REAL && gsdl_handle) proxy_SDL_CreateThread_REAL = (PFN_SDL_CreateThread)dlsym(gsdl_handle, "SDL_CreateThread_REAL");
+    if (!proxy_SDL_CreateThread_REAL && sdl_handle) proxy_SDL_CreateThread_REAL = (PFN_SDL_CreateThread)dlsym(sdl_handle, "SDL_CreateThread_REAL");
+    if (!proxy_SDL_CreateThread && !proxy_SDL_CreateThread_REAL) LOGE("Failed to resolve SDL symbol: SDL_CreateThread/SDL_CreateThread_REAL\n");
+}
+
+SDL_Thread * proxy_SDL_CreateThread_bridge(SDL_ThreadFunction fn, const char *name, void *data) {
+    if (proxy_SDL_CreateThread)
+        return proxy_SDL_CreateThread(fn, name, data);
+    if (proxy_SDL_CreateThread_REAL)
+        return proxy_SDL_CreateThread_REAL(fn, name, data);
+    return NULL;
 }
 
 #endif // Android Proxy Guards

@@ -116,6 +116,8 @@ typedef struct ResourceState
     unsigned int degraded;
     unsigned int callback_budget;
     unsigned int callback_dispatched;
+    unsigned int render_submitted;
+    unsigned int render_cancelled;
     ResourceToken* tokens;
     ResourceEvent* events_head;
     ResourceEvent* events_tail;
@@ -1144,6 +1146,22 @@ static int resource_lua_request(lua_State* L)
     return 1;
 }
 
+static int resource_lua_submit(lua_State* L)
+{
+    (void)L;
+    g_resource.render_submitted++;
+    lua_createtable(L, 0, 4);
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "accepted");
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "native_decode");
+    lua_pushstring(L, "queued");
+    lua_setfield(L, -2, "status");
+    lua_pushinteger(L, (lua_Integer)g_resource.render_submitted);
+    lua_setfield(L, -2, "id");
+    return 1;
+}
+
 static int resource_lua_preload(lua_State* L)
 {
     lua_Integer out_index = 1;
@@ -1267,6 +1285,15 @@ static int resource_lua_cancel_all(lua_State* L)
     return 1;
 }
 
+static int resource_lua_cancel_scope(lua_State* L)
+{
+    const char* scope = luaL_optstring(L, 1, "");
+    (void)scope;
+    g_resource.render_cancelled++;
+    lua_pushinteger(L, 0);
+    return 1;
+}
+
 static int resource_push_stats(lua_State* L)
 {
     unsigned int active = 0;
@@ -1314,6 +1341,14 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "callback_budget");
     lua_pushinteger(L, (lua_Integer)g_resource.callback_dispatched);
     lua_setfield(L, -2, "callback_dispatched");
+    lua_pushinteger(L, (lua_Integer)g_resource.render_submitted);
+    lua_setfield(L, -2, "render_submitted");
+    lua_pushinteger(L, (lua_Integer)g_resource.render_cancelled);
+    lua_setfield(L, -2, "render_cancelled");
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "render_native");
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "native_decode");
     return 1;
 }
 
@@ -1389,10 +1424,12 @@ static int resource_lua_gc(lua_State* L)
 static const luaL_Reg RESOURCE_FUNCS[] = {
     {"query", resource_lua_query},
     {"request", resource_lua_request},
+    {"submit", resource_lua_submit},
     {"preload", resource_lua_preload},
     {"poll", resource_lua_poll},
     {"update", resource_lua_update},
     {"cancel", resource_lua_cancel},
+    {"cancel_scope", resource_lua_cancel_scope},
     {"cancel_all", resource_lua_cancel_all},
     {"config", resource_lua_config},
     {"stats", resource_lua_stats},

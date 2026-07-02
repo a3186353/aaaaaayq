@@ -45,10 +45,21 @@ static TCP_UserData* TCP_Check(lua_State* L, int idx)
 }
 
 static int TCP_GetFrame(lua_State* L);
+static int TCP_GetFrameReady(lua_State* L);
 static int TCP_SetPP(lua_State* L);
 static int TCP_GetPal(lua_State* L);
 static int TCP_SetPal(lua_State* L);
 static int TCP_SetPalette(lua_State* L);
+static int TCP_RequestFrame(lua_State* L);
+static int TCP_PollAsync(lua_State* L);
+static int TCP_IsFrameDecoded(lua_State* L);
+static int TCP_AsyncStats(lua_State* L);
+static int TCP_LUA_CacheClear(lua_State* L);
+static void TCP_AsyncCancelPending(TCP_UserData* ud, int bump_generation);
+static void TCP_AsyncShutdown(TCP_UserData* ud);
+static int TCP_AsyncPollDecoded(TCP_UserData* ud, Uint32 limit);
+static SDL_Surface* TCP_DecodeFrameSurface(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                           Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY);
 static int TCP_GC(lua_State* L);
 
 static const luaL_Reg TCP_FUNCS[] = {
@@ -56,11 +67,17 @@ static const luaL_Reg TCP_FUNCS[] = {
     {"__close", TCP_GC},
     {"GetFrame", TCP_GetFrame},
     {"get_frame", TCP_GetFrame},
+    {"GetFrameReady", TCP_GetFrameReady},
     {"SetPP", TCP_SetPP},
     {"GetPal", TCP_GetPal},
     {"get_palette", TCP_GetPal},
     {"SetPal", TCP_SetPal},
     {"set_palette", TCP_SetPalette},
+    {"RequestFrame", TCP_RequestFrame},
+    {"PollAsync", TCP_PollAsync},
+    {"IsFrameDecoded", TCP_IsFrameDecoded},
+    {"AsyncStats", TCP_AsyncStats},
+    {"CacheClear", TCP_LUA_CacheClear},
     {NULL, NULL},
 };
 
@@ -211,6 +228,8 @@ static int TCP_ClampRange(Uint32 start, Uint32 end, Uint32 limit, Uint32* outSta
 #define TCP_RLE_CMD_DELTA 128
 
 #define TCP_ALIGN4(x) (((x) + 3) & ~3U)
+#define TCP_CACHE_CAP_DEFAULT 32
+#define TCP_ASYNC_QUEUE_CAP 128
 
 static inline Uint16 TCP_ReadU16(const void* ptr) {
     Uint16 v; SDL_memcpy(&v, ptr, 2); return v;
@@ -227,6 +246,13 @@ static Uint32 TCP_Pal8(const TCP_UserData* ud, Uint8 idx)
     if (ud->pal_dyn && ud->pal_dyn != ud->pal && ud->pal_count && idx < ud->pal_count)
         return ud->pal_dyn[idx];
     return ud->pal[idx];
+}
+
+static Uint32 TCP_Pal8FromSnapshot(const TCP_UserData* ud, const Uint32* pal, Uint32 pal_count, Uint8 idx)
+{
+    if (pal && pal_count && idx < pal_count)
+        return pal[idx];
+    return TCP_Pal8(ud, idx);
 }
 
 static Uint32 BlendOver_ARGB8888(Uint32 below, Uint32 over)
@@ -558,6 +584,364 @@ static int TCP_PushFrame(lua_State* L, SDL_Surface* sf, Uint32 w, Uint32 h, Sint
     return 2;
 }
 
+static SDL_Surface* TCP_FinishDecodedSurface(SDL_Surface* sf, Uint32 w, Uint32 h, Sint32 x, Sint32 y,
+                                             Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
+{
+    if (outW) *outW = w;
+    if (outH) *outH = h;
+    if (outX) *outX = x;
+    if (outY) *outY = y;
+    return sf;
+}
+
+static void TCP_CacheEntryFree(TCP_CacheEntry* e)
+{
+    if (!e) return;
+    if (e->surface)
+    {
+        SDL_FreeSurface(e->surface);
+        e->surface = NULL;
+    }
+    e->w = e->h = 0;
+    e->x = e->y = 0;
+}
+
+static TCP_CacheEntry* TCP_CacheLookup(TCP_UserData* ud, Uint32 frame_id)
+{
+    if (!ud || !ud->cache)
+        return NULL;
+    for (Uint32 i = 0; i < ud->cache_cap; i++)
+    {
+        TCP_CacheEntry* e = &ud->cache[i];
+        if (e->surface && e->frame_id == frame_id && e->pal_version == ud->pal_version)
+        {
+            e->lru_tick = ++ud->cache_tick;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void TCP_CacheInsert(TCP_UserData* ud, Uint32 frame_id, Uint32 pal_version,
+                            SDL_Surface* sf, Uint32 w, Uint32 h, Sint32 x, Sint32 y)
+{
+    if (!sf)
+        return;
+    if (!ud || !ud->cache)
+    {
+        SDL_FreeSurface(sf);
+        return;
+    }
+
+    Uint32 victim = 0;
+    Uint32 min_tick = 0xFFFFFFFFu;
+    for (Uint32 i = 0; i < ud->cache_cap; i++)
+    {
+        if (!ud->cache[i].surface)
+        {
+            victim = i;
+            break;
+        }
+        if (ud->cache[i].lru_tick < min_tick)
+        {
+            min_tick = ud->cache[i].lru_tick;
+            victim = i;
+        }
+    }
+
+    TCP_CacheEntry* e = &ud->cache[victim];
+    TCP_CacheEntryFree(e);
+    e->surface = sf;
+    e->frame_id = frame_id;
+    e->pal_version = pal_version;
+    e->w = w;
+    e->h = h;
+    e->x = x;
+    e->y = y;
+    e->lru_tick = ++ud->cache_tick;
+}
+
+static void TCP_CacheClear(TCP_UserData* ud)
+{
+    if (!ud || !ud->cache)
+        return;
+    for (Uint32 i = 0; i < ud->cache_cap; i++)
+        TCP_CacheEntryFree(&ud->cache[i]);
+}
+
+static int TCP_PushCachedFrame(lua_State* L, TCP_CacheEntry* e, const TCP_FrameOpts* opts)
+{
+    if (!e || !e->surface)
+        return 0;
+    SDL_Surface* copy = SDL_DuplicateSurface(e->surface);
+    if (!copy)
+        return luaL_error(L, "%s", SDL_GetError());
+    return TCP_PushFrame(L, copy, e->w, e->h, e->x, e->y, opts);
+}
+
+static void TCP_AsyncJobFree(TCP_AsyncJob* job)
+{
+    if (!job) return;
+    if (job->surface)
+    {
+        SDL_FreeSurface(job->surface);
+        job->surface = NULL;
+    }
+    if (job->pal_snapshot)
+    {
+        SDL_free(job->pal_snapshot);
+        job->pal_snapshot = NULL;
+    }
+    SDL_free(job);
+}
+
+static void TCP_AsyncJobListFree(TCP_AsyncJob* job)
+{
+    while (job)
+    {
+        TCP_AsyncJob* next = job->next;
+        job->next = NULL;
+        TCP_AsyncJobFree(job);
+        job = next;
+    }
+}
+
+static int TCP_AsyncQueueHasFrame(TCP_UserData* ud, Uint32 frame_id, Uint32 pal_version)
+{
+    TCP_AsyncJob* p;
+    if (ud->async_active && ud->async_active_frame == frame_id
+        && ud->async_active_generation == ud->async_generation
+        && ud->async_active_pal_version == pal_version)
+        return 1;
+    for (p = ud->async_queue_head; p; p = p->next)
+    {
+        if (p->frame_id == frame_id && p->generation == ud->async_generation
+            && p->pal_version == pal_version)
+            return 1;
+    }
+    for (p = ud->async_done_head; p; p = p->next)
+    {
+        if (p->frame_id == frame_id && p->generation == ud->async_generation
+            && p->pal_version == pal_version)
+            return 1;
+    }
+    return 0;
+}
+
+static int TCP_AsyncWorker(void* ptr)
+{
+    TCP_UserData* ud = (TCP_UserData*)ptr;
+    for (;;)
+    {
+        TCP_AsyncJob* job = NULL;
+        SDL_LockMutex(ud->async_mutex);
+        while (!ud->async_stop && !ud->async_queue_head)
+            SDL_CondWait(ud->async_cond, ud->async_mutex);
+
+        if (ud->async_stop)
+        {
+            TCP_AsyncJob* discard = ud->async_queue_head;
+            ud->async_queue_head = ud->async_queue_tail = NULL;
+            ud->async_cancelled += ud->async_queued;
+            ud->async_queued = 0;
+            SDL_UnlockMutex(ud->async_mutex);
+            TCP_AsyncJobListFree(discard);
+            break;
+        }
+
+        job = ud->async_queue_head;
+        if (job)
+        {
+            ud->async_queue_head = job->next;
+            if (!ud->async_queue_head)
+                ud->async_queue_tail = NULL;
+            job->next = NULL;
+            ud->async_active = 1;
+            ud->async_active_frame = job->frame_id;
+            ud->async_active_generation = job->generation;
+            ud->async_active_pal_version = job->pal_version;
+            if (ud->async_queued > 0)
+                ud->async_queued--;
+        }
+        SDL_UnlockMutex(ud->async_mutex);
+
+        if (!job)
+            continue;
+
+        job->surface = TCP_DecodeFrameSurface(ud, job->frame_id,
+                                              job->pal_snapshot, job->pal_count,
+                                              &job->w, &job->h, &job->x, &job->y);
+        job->ok = job->surface != NULL;
+
+        SDL_LockMutex(ud->async_mutex);
+        ud->async_active = 0;
+        ud->async_active_frame = 0;
+        ud->async_active_generation = 0;
+        ud->async_active_pal_version = 0;
+        if (ud->async_stop || job->generation != ud->async_generation)
+        {
+            ud->async_cancelled++;
+            SDL_UnlockMutex(ud->async_mutex);
+            TCP_AsyncJobFree(job);
+            continue;
+        }
+
+        if (job->ok)
+            ud->async_decoded++;
+        else
+            ud->async_failed++;
+        if (ud->async_done_tail)
+            ud->async_done_tail->next = job;
+        else
+            ud->async_done_head = job;
+        ud->async_done_tail = job;
+        ud->async_ready++;
+        SDL_UnlockMutex(ud->async_mutex);
+    }
+    return 0;
+}
+
+static int TCP_AsyncEnsure(TCP_UserData* ud)
+{
+    if (!ud)
+        return 0;
+    if (!ud->async_mutex)
+    {
+        ud->async_mutex = SDL_CreateMutex();
+        if (!ud->async_mutex)
+            return 0;
+    }
+    if (!ud->async_cond)
+    {
+        ud->async_cond = SDL_CreateCond();
+        if (!ud->async_cond)
+        {
+            if (ud->async_mutex)
+            {
+                SDL_DestroyMutex(ud->async_mutex);
+                ud->async_mutex = NULL;
+            }
+            return 0;
+        }
+    }
+    if (!ud->async_thread)
+    {
+        ud->async_stop = 0;
+        ud->async_thread = SDL_CreateThread(TCP_AsyncWorker, "tcp_decode", ud);
+        if (!ud->async_thread)
+        {
+            if (ud->async_cond)
+            {
+                SDL_DestroyCond(ud->async_cond);
+                ud->async_cond = NULL;
+            }
+            if (ud->async_mutex)
+            {
+                SDL_DestroyMutex(ud->async_mutex);
+                ud->async_mutex = NULL;
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void TCP_AsyncCancelPending(TCP_UserData* ud, int bump_generation)
+{
+    TCP_AsyncJob *queue = NULL, *done = NULL;
+    if (!ud || !ud->async_mutex)
+        return;
+    SDL_LockMutex(ud->async_mutex);
+    if (bump_generation)
+        ud->async_generation++;
+    queue = ud->async_queue_head;
+    done = ud->async_done_head;
+    ud->async_queue_head = ud->async_queue_tail = NULL;
+    ud->async_done_head = ud->async_done_tail = NULL;
+    if (!ud->async_active)
+    {
+        ud->async_active_frame = 0;
+        ud->async_active_generation = 0;
+        ud->async_active_pal_version = 0;
+    }
+    ud->async_cancelled += ud->async_queued + ud->async_ready;
+    ud->async_queued = 0;
+    ud->async_ready = 0;
+    SDL_UnlockMutex(ud->async_mutex);
+    TCP_AsyncJobListFree(queue);
+    TCP_AsyncJobListFree(done);
+}
+
+static void TCP_AsyncShutdown(TCP_UserData* ud)
+{
+    if (!ud)
+        return;
+    if (ud->async_mutex)
+    {
+        SDL_LockMutex(ud->async_mutex);
+        ud->async_stop = 1;
+        if (ud->async_cond)
+            SDL_CondSignal(ud->async_cond);
+        SDL_UnlockMutex(ud->async_mutex);
+    }
+    if (ud->async_thread)
+    {
+        SDL_WaitThread(ud->async_thread, NULL);
+        ud->async_thread = NULL;
+    }
+    TCP_AsyncCancelPending(ud, 1);
+    if (ud->async_cond)
+    {
+        SDL_DestroyCond(ud->async_cond);
+        ud->async_cond = NULL;
+    }
+    if (ud->async_mutex)
+    {
+        SDL_DestroyMutex(ud->async_mutex);
+        ud->async_mutex = NULL;
+    }
+}
+
+static int TCP_AsyncPollDecoded(TCP_UserData* ud, Uint32 limit)
+{
+    Uint32 processed = 0;
+    if (!ud || !ud->async_mutex)
+        return 0;
+
+    while (limit == 0 || processed < limit)
+    {
+        TCP_AsyncJob* job = NULL;
+        SDL_LockMutex(ud->async_mutex);
+        job = ud->async_done_head;
+        if (job)
+        {
+            ud->async_done_head = job->next;
+            if (!ud->async_done_head)
+                ud->async_done_tail = NULL;
+            job->next = NULL;
+            if (ud->async_ready > 0)
+                ud->async_ready--;
+        }
+        SDL_UnlockMutex(ud->async_mutex);
+
+        if (!job)
+            break;
+
+        if (job->ok && job->generation == ud->async_generation && ud->cache)
+        {
+            if (!TCP_CacheLookup(ud, job->frame_id))
+            {
+                TCP_CacheInsert(ud, job->frame_id, job->pal_version,
+                                job->surface, job->w, job->h, job->x, job->y);
+                job->surface = NULL;
+            }
+        }
+        TCP_AsyncJobFree(job);
+        processed++;
+    }
+    return (int)processed;
+}
+
 static Uint32 RGB565to888_Pal(Uint16 color16, Uint32 R1, Uint32 G1, Uint32 B1, Uint32 R2, Uint32 G2, Uint32 B2, Uint32 R3, Uint32 G3, Uint32 B3)
 {
 
@@ -585,13 +969,14 @@ static Uint32 RGB565to888_Pal(Uint16 color16, Uint32 R1, Uint32 G1, Uint32 B1, U
     return A | R | G | B;
 }
 
-static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameOpts* opts)
+static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                 Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
 {
     Uint32 frameStart = ud->splist[id];
     Uint32 frameEnd = TCP_FindNextOffset(ud->splist, ud->number, frameStart, ud->len);
     Uint32 safeFrameStart, safeFrameEnd;
     if (!TCP_ClampRange(frameStart, frameEnd, ud->len, &safeFrameStart, &safeFrameEnd))
-        return 0;
+        return NULL;
 
     Uint8* frame = ud->data + safeFrameStart;
     Uint32 frameSize = safeFrameEnd - safeFrameStart;
@@ -605,16 +990,16 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
     Uint32 maskSize = 0;
 
     if (frameSize < sizeof(SP_INFO) + 4)
-        return 0;
+        return NULL;
     Uint32 maybeType = TCP_ReadU32(frame + sizeof(SP_INFO));
     if (maybeType == 1 || maybeType == 2)
     {
         type = maybeType;
         if (frameSize < sizeof(SP_INFO) + 8)
-            return 0;
+            return NULL;
         maskSize = TCP_ReadU32(frame + sizeof(SP_INFO) + 4);
         if (maskSize > frameSize)
-            return 0;
+            return NULL;
         line = (const Uint8*)(frame + sizeof(SP_INFO) + 8);
     }
     else
@@ -626,14 +1011,14 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
         size_t lineOff = (size_t)((const Uint8*)line - frame);
         size_t need = (size_t)info->height * sizeof(Uint32);
         if (lineOff > frameSize || need > frameSize - lineOff)
-            return 0;
+            return NULL;
     }
 
     if (!info->width || !info->height) //如果宽高为0
-        return 0;
+        return NULL;
     SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, (int)info->width, (int)info->height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (!sf)
-        return luaL_error(L, "%s", SDL_GetError());
+        return NULL;
     SDL_FillRect(sf, NULL, 0);
     SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_BLEND);
 
@@ -688,14 +1073,14 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                             break;
                         alpha = ((*rdata++) & 0x1F) << 3; // 0x1f=(11111) 获得Alpha通道的值
                         idx = *rdata++;
-                        c1 = (TCP_Pal8(ud, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
+                        c1 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
                         if (rdata + 3 <= lineLimit && *rdata == 0xC0)
                         {
                             rdata++;
                             dd = *rdata++;
                             cc = *rdata++;
                             a2 = (dd & 0x1F) << 3;
-                            c2 = (TCP_Pal8(ud, cc) & 0xFFFFFF) | (a2 << 24);
+                            c2 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, cc) & 0xFFFFFF) | (a2 << 24);
                             row[pos++] = BlendOver_ARGB8888(c1, c2);
                         }
                         else
@@ -710,14 +1095,14 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                         Repeat = (*rdata++) & 0x1F; // 获得重复的次数
                         alpha = (*rdata++) << 3;    // 获得Alpha通道值
                         idx = *rdata++;
-                        c1 = (TCP_Pal8(ud, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
+                        c1 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
                         if (rdata + 3 <= lineLimit && *rdata == 0xC0)
                         {
                             rdata++;
                             dd = *rdata++;
                             cc = *rdata++;
                             a2 = (dd & 0x1F) << 3;
-                            c2 = (TCP_Pal8(ud, cc) & 0xFFFFFF) | (a2 << 24);
+                            c2 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, cc) & 0xFFFFFF) | (a2 << 24);
                             Color = BlendOver_ARGB8888(c1, c2);
                         }
                         else
@@ -743,7 +1128,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                         if (rdata >= lineLimit)
                             break;
                         if (pos < linelen)
-                            row[pos] = TCP_Pal8(ud, *rdata);
+                            row[pos] = TCP_Pal8FromSnapshot(ud, pal, pal_count, *rdata);
                         pos++;
                         rdata++;
                         Repeat--;
@@ -755,7 +1140,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                     if (rdata + 2 > lineLimit)
                         break;
                     Repeat = (*rdata++) & 0x3F;
-                    Color = TCP_Pal8(ud, *rdata++);
+                    Color = TCP_Pal8FromSnapshot(ud, pal, pal_count, *rdata++);
                     while (Repeat)
                     {
                         if (pos < linelen)
@@ -804,7 +1189,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
             Sint32 dy = maskTopY - baseTopY;
 
             if (mframeSize < sizeof(SP_INFO) + 4)
-                return TCP_PushFrame(L, sf, info->width, info->height, info->x, info->y, opts);
+                return TCP_FinishDecodedSurface(sf, info->width, info->height, info->x, info->y, outW, outH, outX, outY);
 
             const Uint8* mline;
             Uint32 mMaybeType = TCP_ReadU32(mframe + sizeof(SP_INFO));
@@ -896,14 +1281,14 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                                 break;
                             alpha = ((*rdata++) & 0x1F) << 3;
                             idx = *rdata++;
-                            c1 = (TCP_Pal8(ud, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
+                            c1 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
                             if (rdata + 3 <= mLineLimit && *rdata == 0xC0)
                             {
                                 rdata++;
                                 dd = *rdata++;
                                 cc = *rdata++;
                                 a2 = (dd & 0x1F) << 3;
-                                c2 = (TCP_Pal8(ud, cc) & 0xFFFFFF) | (a2 << 24);
+                                c2 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, cc) & 0xFFFFFF) | (a2 << 24);
                                 if (pos < linelenMask)
                                     maskRow[pos++] = BlendOver_ARGB8888(c1, c2);
                             }
@@ -920,14 +1305,14 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                             Repeat = (*rdata++) & 0x1F;
                             alpha = (*rdata++) << 3;
                             idx = *rdata++;
-                            c1 = (TCP_Pal8(ud, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
+                            c1 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, idx) & 0xFFFFFF) | ((Uint32)alpha << 24);
                             if (rdata + 3 <= mLineLimit && *rdata == 0xC0)
                             {
                                 rdata++;
                                 dd = *rdata++;
                                 cc = *rdata++;
                                 a2 = (dd & 0x1F) << 3;
-                                c2 = (TCP_Pal8(ud, cc) & 0xFFFFFF) | (a2 << 24);
+                                c2 = (TCP_Pal8FromSnapshot(ud, pal, pal_count, cc) & 0xFFFFFF) | (a2 << 24);
                                 Color = BlendOver_ARGB8888(c1, c2);
                             }
                             else
@@ -959,7 +1344,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                             }
                             if (rdata >= mLineLimit)
                                 break;
-                            maskRow[pos++] = TCP_Pal8(ud, *rdata++);
+                            maskRow[pos++] = TCP_Pal8FromSnapshot(ud, pal, pal_count, *rdata++);
                             Repeat--;
                         }
                         break;
@@ -967,7 +1352,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
                         if (rdata + 2 > mLineLimit)
                             break;
                         Repeat = (*rdata++) & 0x3F;
-                        Color = TCP_Pal8(ud, *rdata++);
+                        Color = TCP_Pal8FromSnapshot(ud, pal, pal_count, *rdata++);
                         while (Repeat)
                         {
                             if (pos >= linelenMask)
@@ -1028,7 +1413,7 @@ static int TCP_GetPS(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
 
 skip_mask:
 
-    return TCP_PushFrame(L, sf, info->width, info->height, info->x, info->y, opts);
+    return TCP_FinishDecodedSurface(sf, info->width, info->height, info->x, info->y, outW, outH, outX, outY);
 }
 
 // 解码单个图层的RLE数据到临时缓冲区
@@ -1316,44 +1701,45 @@ static Uint32 TCP_DecodeTPLayer(
     return layerEnd - layerPos;
 }
 
-static int TCP_GetPT(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameOpts* opts)
+static SDL_Surface* TCP_DecodePT(TCP_UserData* ud, Uint32 id, const Uint32* pal_override, Uint32 pal_override_count,
+                                 Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
 {
     if (!ud->tplist)
-        return 0;
+        return NULL;
 
     Uint32 ofs = ud->tplist[id];
     if (!ofs)
-        return 0;
+        return NULL;
 
     // 查找下一帧的起始位置作为当前帧的结束边界
     Uint32 frameEnd = TCP_FindNextOffset(ud->tplist, ud->number, ofs, ud->len);
     Uint32 safeFrameStart, safeFrameEnd;
     if (!TCP_ClampRange(ofs, frameEnd, ud->len, &safeFrameStart, &safeFrameEnd))
-        return 0;
+        return NULL;
 
-    Uint32 palCount = ud->pal_count;
-    Uint32* pal = ud->pal_dyn;
+    Uint32 palCount = pal_override ? pal_override_count : ud->pal_count;
+    Uint32* pal = (Uint32*)(pal_override ? pal_override : ud->pal_dyn);
     if (!pal || !palCount)
-        return 0;
+        return NULL;
 
     Uint8* base = ud->data;
 
     // 读取第一个图层的信息以确定输出Surface的尺寸
     Uint32 firstLayerPos = safeFrameStart + 0x14;  // 跳过帧头0x14字节
     if (firstLayerPos + 20 > safeFrameEnd)
-        return 0;
+        return NULL;
 
     Sint16 keyX = TCP_ReadS16(base + firstLayerPos);
     Sint16 keyY = TCP_ReadS16(base + firstLayerPos + 2);
     Uint16 width = TCP_ReadU16(base + firstLayerPos + 4);
     Uint16 height = TCP_ReadU16(base + firstLayerPos + 6);
     if (!width || !height)
-        return 0;
+        return NULL;
 
     // 创建输出Surface
     SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, (int)width, (int)height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (!sf)
-        return luaL_error(L, "%s", SDL_GetError());
+        return NULL;
     SDL_FillRect(sf, NULL, 0);
     SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_BLEND);
     Uint32* dst = (Uint32*)sf->pixels;
@@ -1404,16 +1790,17 @@ static int TCP_GetPT(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
             break;
     }
 
-    return TCP_PushFrame(L, sf, (Uint32)width, (Uint32)height, (Sint32)keyX, (Sint32)keyY, opts);
+    return TCP_FinishDecodedSurface(sf, (Uint32)width, (Uint32)height, (Sint32)keyX, (Sint32)keyY, outW, outH, outX, outY);
 }
 
-static int TCP_GetPR(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameOpts* opts)
+static SDL_Surface* TCP_DecodePR(TCP_UserData* ud, Uint32 id,
+                                 Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
 {
     RP_INFO* info = &ud->rpinfo[id];
     Uint32 ofs = ud->rplist[id].offset;
     Uint32 blen = ud->rplist[id].len;
     if (ofs > ud->len || blen > ud->len - ofs)
-        return 0;
+        return NULL;
 
     SDL_Surface* sf = NULL;
 
@@ -1449,9 +1836,178 @@ static int TCP_GetPR(lua_State* L, TCP_UserData* ud, Uint32 id, const TCP_FrameO
     }
 
     if (!sf)
-        return luaL_error(L, "Failed to load image: %s", SDL_GetError());
+        return NULL;
 
-    return TCP_PushFrame(L, sf, (Uint32)info->width, (Uint32)info->height, (Sint32)info->x, (Sint32)info->y, opts);
+    return TCP_FinishDecodedSurface(sf, (Uint32)info->width, (Uint32)info->height, (Sint32)info->x, (Sint32)info->y, outW, outH, outX, outY);
+}
+
+static SDL_Surface* TCP_DecodeFrameSurface(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                           Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
+{
+    if (!ud || id >= ud->number)
+        return NULL;
+    if (ud->fmt == TCP_FMT_PS)
+    {
+        if (ud->splist && ud->splist[id])
+            return TCP_DecodePS(ud, id, pal, pal_count, outW, outH, outX, outY);
+        return NULL;
+    }
+    if (ud->fmt == TCP_FMT_PT)
+    {
+        if (ud->tplist && ud->tplist[id])
+            return TCP_DecodePT(ud, id, pal, pal_count, outW, outH, outX, outY);
+        return NULL;
+    }
+    if (ud->fmt == TCP_FMT_PR)
+    {
+        if (ud->rplist && ud->rplist[id].len)
+            return TCP_DecodePR(ud, id, outW, outH, outX, outY);
+        return NULL;
+    }
+    return NULL;
+}
+
+static int TCP_RequestFrame(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->number)
+    {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "frame index out of range");
+        return 2;
+    }
+
+    Uint32 id = (Uint32)idx;
+    TCP_AsyncPollDecoded(ud, 4);
+    if (TCP_CacheLookup(ud, id))
+    {
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, "ready");
+        return 2;
+    }
+
+    if (!TCP_AsyncEnsure(ud))
+    {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "async init failed");
+        return 2;
+    }
+
+    Uint32 pal_count = ud->pal_count ? ud->pal_count : 256;
+    if (!ud->pal_dyn && pal_count > 256)
+        pal_count = 256;
+    Uint32 pal_version = ud->pal_version;
+    Uint32* pal_snapshot = (Uint32*)SDL_malloc(sizeof(Uint32) * pal_count);
+    if (!pal_snapshot)
+    {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "out of memory");
+        return 2;
+    }
+    SDL_memcpy(pal_snapshot, ud->pal_dyn ? ud->pal_dyn : ud->pal, sizeof(Uint32) * pal_count);
+
+    SDL_LockMutex(ud->async_mutex);
+    if (TCP_AsyncQueueHasFrame(ud, id, pal_version))
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "pending");
+        return 2;
+    }
+    if (ud->async_queued >= TCP_ASYNC_QUEUE_CAP)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "queue full");
+        return 2;
+    }
+
+    TCP_AsyncJob* job = (TCP_AsyncJob*)SDL_calloc(1, sizeof(TCP_AsyncJob));
+    if (!job)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        SDL_free(pal_snapshot);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "out of memory");
+        return 2;
+    }
+    job->pal_snapshot = pal_snapshot;
+    job->frame_id = id;
+    job->generation = ud->async_generation;
+    job->pal_version = pal_version;
+    job->pal_count = pal_count;
+    if (ud->async_queue_tail)
+        ud->async_queue_tail->next = job;
+    else
+        ud->async_queue_head = job;
+    ud->async_queue_tail = job;
+    ud->async_queued++;
+    ud->async_submitted++;
+    SDL_CondSignal(ud->async_cond);
+    SDL_UnlockMutex(ud->async_mutex);
+
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "queued");
+    return 2;
+}
+
+static int TCP_PollAsync(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    Uint32 limit = (Uint32)luaL_optinteger(L, 2, 8);
+    lua_pushinteger(L, (lua_Integer)TCP_AsyncPollDecoded(ud, limit));
+    return 1;
+}
+
+static int TCP_IsFrameDecoded(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->number)
+    {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    TCP_AsyncPollDecoded(ud, 4);
+    lua_pushboolean(L, TCP_CacheLookup(ud, (Uint32)idx) != NULL);
+    return 1;
+}
+
+static int TCP_AsyncStats(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    if (ud)
+        TCP_AsyncPollDecoded(ud, 8);
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_queued : 0));
+    lua_setfield(L, -2, "queued");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_ready : 0));
+    lua_setfield(L, -2, "ready");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_submitted : 0));
+    lua_setfield(L, -2, "submitted");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_decoded : 0));
+    lua_setfield(L, -2, "decoded");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_failed : 0));
+    lua_setfield(L, -2, "failed");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_cancelled : 0));
+    lua_setfield(L, -2, "cancelled");
+    lua_pushboolean(L, ud && ud->async_thread != NULL);
+    lua_setfield(L, -2, "worker");
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "native_decode");
+    return 1;
+}
+
+static int TCP_LUA_CacheClear(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    TCP_AsyncCancelPending(ud, 1);
+    TCP_CacheClear(ud);
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 static int TCP_GetFrame(lua_State* L)
@@ -1468,24 +2024,39 @@ static int TCP_GetFrame(lua_State* L)
     TCP_FrameOpts opts;
     TCP_ParseFrameOpts(L, &opts);
 
-    if (ud->fmt == TCP_FMT_PS)
-    {
-        if (ud->splist && ud->splist[i])
-            return TCP_GetPS(L, ud, i, &opts);
+    TCP_CacheEntry* cached = TCP_CacheLookup(ud, i);
+    if (cached)
+        return TCP_PushCachedFrame(L, cached, &opts);
+
+    Uint32 w = 0, h = 0;
+    Sint32 x = 0, y = 0;
+    SDL_Surface* sf = TCP_DecodeFrameSurface(ud, i, ud->pal_dyn, ud->pal_count, &w, &h, &x, &y);
+    if (!sf)
         return 0;
-    }
-    if (ud->fmt == TCP_FMT_PT)
-    {
-        if (ud->tplist && ud->tplist[i])
-            return TCP_GetPT(L, ud, i, &opts);
-        return 0;
-    }
-    if (ud->fmt == TCP_FMT_PR)
-    {
-        if (ud->rplist && ud->rplist[i].len)
-            return TCP_GetPR(L, ud, i, &opts);
-        return 0;
-    }
+    SDL_Surface* cache_sf = SDL_DuplicateSurface(sf);
+    if (cache_sf)
+        TCP_CacheInsert(ud, i, ud->pal_version, cache_sf, w, h, x, y);
+    return TCP_PushFrame(L, sf, w, h, x, y, &opts);
+}
+
+static int TCP_GetFrameReady(lua_State* L)
+{
+    TCP_UserData* ud = TCP_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0)
+        return luaL_error(L, "Frame index out of range: %d.", (int)idx);
+    Uint32 i = (Uint32)idx;
+
+    if (i >= ud->number)
+        return luaL_error(L, "Frame index out of range: %d.", (int)idx);
+
+    TCP_FrameOpts opts;
+    TCP_ParseFrameOpts(L, &opts);
+    TCP_AsyncPollDecoded(ud, 4);
+
+    TCP_CacheEntry* cached = TCP_CacheLookup(ud, i);
+    if (cached)
+        return TCP_PushCachedFrame(L, cached, &opts);
     return 0;
 }
 
@@ -1526,6 +2097,9 @@ static int TCP_SetPP(lua_State* L)
             for (Uint32 j = 0; j < max; j++)
                 ud->pal_dyn[j] = ud->pal[j];
         }
+        ud->pal_version++;
+        TCP_AsyncCancelPending(ud, 1);
+        TCP_CacheClear(ud);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -1552,6 +2126,9 @@ static int TCP_SetPal(lua_State* L)
             Uint32 max = ud->pal_count < 256 ? ud->pal_count : 256;
             SDL_memcpy(ud->pal_dyn, ud->pal, max * sizeof(Uint32));
         }
+        ud->pal_version++;
+        TCP_AsyncCancelPending(ud, 1);
+        TCP_CacheClear(ud);
     }
     return 0;
 }
@@ -1577,6 +2154,11 @@ static int TCP_GC(lua_State* L)
 
 static void TCP_Reset(TCP_UserData* ud)
 {
+    TCP_AsyncShutdown(ud);
+    TCP_CacheClear(ud);
+    if (ud->cache)
+        SDL_free(ud->cache);
+    ud->cache = NULL;
     if (ud->pal_dyn && ud->pal_dyn != ud->pal)
         SDL_free(ud->pal_dyn);
     ud->pal_dyn = NULL;
@@ -1617,6 +2199,9 @@ int TCP_Create(lua_State* L, Uint8* data, size_t len)
     ud->pal_dyn = ud->pal;
     ud->pal_count = 256;
     ud->sp_rgb565 = 1;
+    ud->pal_version = 0;
+    ud->cache_cap = TCP_CACHE_CAP_DEFAULT;
+    ud->cache = (TCP_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(TCP_CacheEntry));
     luaL_setmetatable(L, TCP_MT_XY2);
 
     lua_createtable(L, 0, 8);

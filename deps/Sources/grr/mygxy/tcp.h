@@ -87,6 +87,30 @@ typedef struct
 
 typedef struct
 {
+    SDL_Surface* surface;
+    Uint32 frame_id;
+    Uint32 pal_version;
+    Uint32 w, h;
+    Sint32 x, y;
+    Uint32 lru_tick;
+} TCP_CacheEntry;
+
+typedef struct TCP_AsyncJob
+{
+    Uint32 frame_id;
+    Uint32 generation;
+    Uint32 pal_version;
+    Uint32 pal_count;
+    Uint32* pal_snapshot;
+    SDL_Surface* surface;
+    Uint32 w, h;
+    Sint32 x, y;
+    int ok;
+    struct TCP_AsyncJob* next;
+} TCP_AsyncJob;
+
+typedef struct
+{
     Uint8* data;
     Uint32 len;
     Uint32* splist; //SP格式
@@ -102,6 +126,31 @@ typedef struct
     Uint32 pal_count;  //pal_dyn长度
     Uint16 fmt;        //'PS'/'PR'/'PT'
     Uint8 sp_rgb565;   //1=RGB565调色板, 0=RGB/BGRA调色板
+
+    Uint32 pal_version;
+    TCP_CacheEntry* cache;
+    Uint32 cache_cap;
+    Uint32 cache_tick;
+
+    SDL_mutex* async_mutex;
+    SDL_cond* async_cond;
+    SDL_Thread* async_thread;
+    int async_stop;
+    Uint32 async_generation;
+    TCP_AsyncJob* async_queue_head;
+    TCP_AsyncJob* async_queue_tail;
+    TCP_AsyncJob* async_done_head;
+    TCP_AsyncJob* async_done_tail;
+    Uint32 async_queued;
+    Uint32 async_ready;
+    Uint32 async_submitted;
+    Uint32 async_decoded;
+    Uint32 async_failed;
+    Uint32 async_cancelled;
+    int async_active;
+    Uint32 async_active_frame;
+    Uint32 async_active_generation;
+    Uint32 async_active_pal_version;
 } TCP_UserData;
 
 int TCP_Create(lua_State* L, Uint8* data, size_t size);

@@ -27,17 +27,23 @@
  *  Forward declarations
  * ═══════════════════════════════════════════ */
 static int JY_GetFrame(lua_State* L);
+static int JY_GetFrameReady(lua_State* L);
 static int JY_GetFrameInfo(lua_State* L);
 static int JY_SetPal(lua_State* L);
 static int JY_GetPal(lua_State* L);
 static int JY_SetPP(lua_State* L);
 static int JY_SetPalette(lua_State* L);
 static int JY_Prefetch(lua_State* L);
+static int JY_RequestFrame(lua_State* L);
+static int JY_PollAsync(lua_State* L);
+static int JY_IsFrameDecoded(lua_State* L);
+static int JY_AsyncStats(lua_State* L);
 static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
 static int JY_GC(lua_State* L);
+static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth);
 
 static int JY_LUA_FreeSurface(lua_State* L);
 
@@ -46,6 +52,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"__close",     JY_GC},
     {"GetFrame",    JY_GetFrame},
     {"get_frame",   JY_GetFrame},
+    {"GetFrameReady", JY_GetFrameReady},
     {"GetFrameInfo", JY_GetFrameInfo},
     {"SetPal",      JY_SetPal},
     {"set_palette", JY_SetPalette},
@@ -53,6 +60,10 @@ static const luaL_Reg JY_FUNCS[] = {
     {"get_palette", JY_GetPal},
     {"SetPP",       JY_SetPP},
     {"Prefetch",    JY_Prefetch},
+    {"RequestFrame", JY_RequestFrame},
+    {"PollAsync",   JY_PollAsync},
+    {"IsFrameDecoded", JY_IsFrameDecoded},
+    {"AsyncStats",  JY_AsyncStats},
     {"CacheClear",  JY_LUA_CacheClear},
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
@@ -457,6 +468,256 @@ static void JY_CacheClear(JY_UserData* ud)
         JY_CacheEntryFree(&ud->cache[i]);
 }
 
+static void JY_AsyncJobFree(JY_AsyncJob* job)
+{
+    if (!job) return;
+    JY_FreeR8Triple(job->idx_pixels, job->alpha_pixels, job->depth);
+    SDL_free(job);
+}
+
+static void JY_AsyncJobListFree(JY_AsyncJob* job)
+{
+    while (job)
+    {
+        JY_AsyncJob* next = job->next;
+        job->next = NULL;
+        JY_AsyncJobFree(job);
+        job = next;
+    }
+}
+
+static int JY_AsyncQueueHasFrame(JY_UserData* ud, Uint32 frame_id)
+{
+    JY_AsyncJob* p;
+    if (ud->async_active && ud->async_active_frame == frame_id
+        && ud->async_active_generation == ud->async_generation)
+        return 1;
+    for (p = ud->async_queue_head; p; p = p->next)
+    {
+        if (p->frame_id == frame_id && p->generation == ud->async_generation)
+            return 1;
+    }
+    for (p = ud->async_done_head; p; p = p->next)
+    {
+        if (p->frame_id == frame_id && p->generation == ud->async_generation)
+            return 1;
+    }
+    return 0;
+}
+
+static int JY_AsyncWorker(void* ptr)
+{
+    JY_UserData* ud = (JY_UserData*)ptr;
+    for (;;)
+    {
+        JY_AsyncJob* job = NULL;
+        SDL_LockMutex(ud->async_mutex);
+        while (!ud->async_stop && !ud->async_queue_head)
+            SDL_CondWait(ud->async_cond, ud->async_mutex);
+
+        if (ud->async_stop)
+        {
+            JY_AsyncJob* discard = ud->async_queue_head;
+            ud->async_queue_head = ud->async_queue_tail = NULL;
+            ud->async_cancelled += ud->async_queued;
+            ud->async_queued = 0;
+            SDL_UnlockMutex(ud->async_mutex);
+            JY_AsyncJobListFree(discard);
+            break;
+        }
+
+        job = ud->async_queue_head;
+        if (job)
+        {
+            ud->async_queue_head = job->next;
+            if (!ud->async_queue_head)
+                ud->async_queue_tail = NULL;
+            job->next = NULL;
+            ud->async_active = 1;
+            ud->async_active_frame = job->frame_id;
+            ud->async_active_generation = job->generation;
+            if (ud->async_queued > 0)
+                ud->async_queued--;
+        }
+        SDL_UnlockMutex(ud->async_mutex);
+
+        if (!job)
+            continue;
+
+        job->ok = JY_DecodeFrame(ud, job->frame_id,
+                                 &job->idx_pixels, &job->alpha_pixels, &job->depth,
+                                 &job->w, &job->h);
+
+        SDL_LockMutex(ud->async_mutex);
+        ud->async_active = 0;
+        ud->async_active_frame = 0;
+        ud->async_active_generation = 0;
+        if (ud->async_stop || job->generation != ud->async_generation)
+        {
+            ud->async_cancelled++;
+            SDL_UnlockMutex(ud->async_mutex);
+            JY_AsyncJobFree(job);
+            continue;
+        }
+
+        if (job->ok)
+            ud->async_decoded++;
+        else
+            ud->async_failed++;
+        if (ud->async_done_tail)
+            ud->async_done_tail->next = job;
+        else
+            ud->async_done_head = job;
+        ud->async_done_tail = job;
+        ud->async_ready++;
+        SDL_UnlockMutex(ud->async_mutex);
+    }
+    return 0;
+}
+
+static int JY_AsyncEnsure(JY_UserData* ud)
+{
+    if (!ud)
+        return 0;
+    if (!ud->async_mutex)
+    {
+        ud->async_mutex = SDL_CreateMutex();
+        if (!ud->async_mutex)
+            return 0;
+    }
+    if (!ud->async_cond)
+    {
+        ud->async_cond = SDL_CreateCond();
+        if (!ud->async_cond)
+        {
+            if (ud->async_mutex)
+            {
+                SDL_DestroyMutex(ud->async_mutex);
+                ud->async_mutex = NULL;
+            }
+            return 0;
+        }
+    }
+    if (!ud->async_thread)
+    {
+        ud->async_stop = 0;
+        ud->async_thread = SDL_CreateThread(JY_AsyncWorker, "jy_decode", ud);
+        if (!ud->async_thread)
+        {
+            if (ud->async_cond)
+            {
+                SDL_DestroyCond(ud->async_cond);
+                ud->async_cond = NULL;
+            }
+            if (ud->async_mutex)
+            {
+                SDL_DestroyMutex(ud->async_mutex);
+                ud->async_mutex = NULL;
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void JY_AsyncCancelPending(JY_UserData* ud, int bump_generation)
+{
+    JY_AsyncJob *queue = NULL, *done = NULL;
+    if (!ud || !ud->async_mutex)
+        return;
+    SDL_LockMutex(ud->async_mutex);
+    if (bump_generation)
+        ud->async_generation++;
+    queue = ud->async_queue_head;
+    done = ud->async_done_head;
+    ud->async_queue_head = ud->async_queue_tail = NULL;
+    ud->async_done_head = ud->async_done_tail = NULL;
+    if (!ud->async_active)
+    {
+        ud->async_active_frame = 0;
+        ud->async_active_generation = 0;
+    }
+    ud->async_cancelled += ud->async_queued + ud->async_ready;
+    ud->async_queued = 0;
+    ud->async_ready = 0;
+    SDL_UnlockMutex(ud->async_mutex);
+    JY_AsyncJobListFree(queue);
+    JY_AsyncJobListFree(done);
+}
+
+static void JY_AsyncShutdown(JY_UserData* ud)
+{
+    if (!ud)
+        return;
+    if (ud->async_mutex)
+    {
+        SDL_LockMutex(ud->async_mutex);
+        ud->async_stop = 1;
+        if (ud->async_cond)
+            SDL_CondSignal(ud->async_cond);
+        SDL_UnlockMutex(ud->async_mutex);
+    }
+    if (ud->async_thread)
+    {
+        SDL_WaitThread(ud->async_thread, NULL);
+        ud->async_thread = NULL;
+    }
+    JY_AsyncCancelPending(ud, 1);
+    if (ud->async_cond)
+    {
+        SDL_DestroyCond(ud->async_cond);
+        ud->async_cond = NULL;
+    }
+    if (ud->async_mutex)
+    {
+        SDL_DestroyMutex(ud->async_mutex);
+        ud->async_mutex = NULL;
+    }
+}
+
+static int JY_AsyncPollDecoded(JY_UserData* ud, Uint32 limit)
+{
+    Uint32 processed = 0;
+    if (!ud || !ud->async_mutex)
+        return 0;
+
+    while (limit == 0 || processed < limit)
+    {
+        JY_AsyncJob* job = NULL;
+        SDL_LockMutex(ud->async_mutex);
+        job = ud->async_done_head;
+        if (job)
+        {
+            ud->async_done_head = job->next;
+            if (!ud->async_done_head)
+                ud->async_done_tail = NULL;
+            job->next = NULL;
+            if (ud->async_ready > 0)
+                ud->async_ready--;
+        }
+        SDL_UnlockMutex(ud->async_mutex);
+
+        if (!job)
+            break;
+
+        if (job->ok && job->generation == ud->async_generation && ud->cache)
+        {
+            if (!JY_CacheLookup(ud, job->frame_id))
+            {
+                JY_CacheInsert(ud, job->frame_id,
+                               job->idx_pixels, job->alpha_pixels, job->depth,
+                               job->w, job->h);
+                job->idx_pixels = NULL;
+                job->alpha_pixels = NULL;
+                job->depth = NULL;
+            }
+        }
+        JY_AsyncJobFree(job);
+        processed++;
+    }
+    return (int)processed;
+}
+
 /* ═══════════════════════════════════════════
  *  R8 cache 辅助（GetFrame / Composite 共享）
  * ═══════════════════════════════════════════ */
@@ -531,6 +792,7 @@ static int JY_GetFrame(lua_State* L)
 
     Uint32 id = (Uint32)idx;
     JY_FrameInfo* f = &ud->frames[id];
+    JY_AsyncPollDecoded(ud, 4);
 
     /* ─── Cache 命中：按当前 pal[] 实时反查生成 ARGB8888 surface ───
      * R8 优化的核心：cache 内只存 idx + alpha + depth，不存 ARGB
@@ -572,6 +834,31 @@ static int JY_GetFrame(lua_State* L)
     }
 
     return JY_PushFrame(L, sf, f);
+}
+
+static int JY_GetFrameReady(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->frame_count)
+        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
+
+    Uint32 id = (Uint32)idx;
+    JY_FrameInfo* f = &ud->frames[id];
+    JY_AsyncPollDecoded(ud, 4);
+
+    if (ud->cache)
+    {
+        JY_CacheEntry* hit = JY_CacheLookup(ud, id);
+        if (hit && hit->idx_pixels)
+        {
+            SDL_Surface* sf = JY_RenderFrameToSurface(
+                ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
+            if (sf)
+                return JY_PushFrame(L, sf, f);
+        }
+    }
+    return 0;
 }
 
 static int JY_GetFrameInfo(lua_State* L)
@@ -747,6 +1034,121 @@ static int JY_Prefetch(lua_State* L)
     return 0;
 }
 
+static int JY_RequestFrame(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->frame_count)
+    {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "frame index out of range");
+        return 2;
+    }
+
+    Uint32 id = (Uint32)idx;
+    JY_AsyncPollDecoded(ud, 4);
+    if (JY_CacheLookup(ud, id))
+    {
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, "ready");
+        return 2;
+    }
+
+    if (!JY_AsyncEnsure(ud))
+    {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "async init failed");
+        return 2;
+    }
+
+    SDL_LockMutex(ud->async_mutex);
+    if (JY_AsyncQueueHasFrame(ud, id))
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "pending");
+        return 2;
+    }
+    if (ud->async_queued >= 128)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "queue full");
+        return 2;
+    }
+
+    JY_AsyncJob* job = (JY_AsyncJob*)SDL_calloc(1, sizeof(JY_AsyncJob));
+    if (!job)
+    {
+        SDL_UnlockMutex(ud->async_mutex);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "out of memory");
+        return 2;
+    }
+    job->frame_id = id;
+    job->generation = ud->async_generation;
+    if (ud->async_queue_tail)
+        ud->async_queue_tail->next = job;
+    else
+        ud->async_queue_head = job;
+    ud->async_queue_tail = job;
+    ud->async_queued++;
+    ud->async_submitted++;
+    SDL_CondSignal(ud->async_cond);
+    SDL_UnlockMutex(ud->async_mutex);
+
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "queued");
+    return 2;
+}
+
+static int JY_PollAsync(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    Uint32 limit = (Uint32)luaL_optinteger(L, 2, 8);
+    lua_pushinteger(L, (lua_Integer)JY_AsyncPollDecoded(ud, limit));
+    return 1;
+}
+
+static int JY_IsFrameDecoded(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    lua_Integer idx = luaL_checkinteger(L, 2);
+    if (idx < 0 || (Uint32)idx >= ud->frame_count)
+    {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    JY_AsyncPollDecoded(ud, 4);
+    lua_pushboolean(L, JY_CacheLookup(ud, (Uint32)idx) != NULL);
+    return 1;
+}
+
+static int JY_AsyncStats(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    if (ud)
+        JY_AsyncPollDecoded(ud, 0);
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_queued : 0));
+    lua_setfield(L, -2, "queued");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_ready : 0));
+    lua_setfield(L, -2, "ready");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_submitted : 0));
+    lua_setfield(L, -2, "submitted");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_decoded : 0));
+    lua_setfield(L, -2, "decoded");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_failed : 0));
+    lua_setfield(L, -2, "failed");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_cancelled : 0));
+    lua_setfield(L, -2, "cancelled");
+    lua_pushboolean(L, ud && ud->async_thread != NULL);
+    lua_setfield(L, -2, "worker");
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "native_decode");
+    return 1;
+}
+
 /* ═══════════════════════════════════════════
  *  Lua API: CacheClear() — manually free LRU SDL_Surface cache
  *  ★ 用于场景切换 / 战斗结束时主动释放 C 层 SDL_Surface 缓存（每个 jy 最多 ~44MB），
@@ -758,7 +1160,10 @@ static int JY_LUA_CacheClear(lua_State* L)
 {
     JY_UserData* ud = JY_Check(L, 1);
     if (ud)
+    {
+        JY_AsyncCancelPending(ud, 1);
         JY_CacheClear(ud);
+    }
     return 0;
 }
 
@@ -1330,6 +1735,7 @@ static int JY_CompositeTo(lua_State* L)
  * ═══════════════════════════════════════════ */
 static void JY_Reset(JY_UserData* ud)
 {
+    JY_AsyncShutdown(ud);
     JY_CacheClear(ud);
 
     if (ud->cache)

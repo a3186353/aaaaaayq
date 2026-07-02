@@ -48,6 +48,18 @@ typedef struct
     Uint32  lru_tick;
 } JY_CacheEntry;
 
+typedef struct JY_AsyncJob
+{
+    Uint32 frame_id;
+    Uint32 generation;
+    Uint8* idx_pixels;
+    Uint8* alpha_pixels;
+    Uint16* depth;
+    Uint16 w, h;
+    int ok;
+    struct JY_AsyncJob* next;
+} JY_AsyncJob;
+
 /* ─── 主 UserData ─── */
 typedef struct
 {
@@ -90,6 +102,27 @@ typedef struct
     JY_CacheEntry* cache;
     Uint32 cache_cap;          /* 默认 JY_CACHE_CAP_DEFAULT (32)，运行时可按需调整 */
     Uint32 cache_tick;
+
+    /* 后台 CPU 解码队列：worker 只读 atlas/frames 并产出 R8 三 buffer。
+     * 主线程 PollAsync/GetFrame/IsFrameDecoded 吸收结果写入 cache。 */
+    SDL_mutex* async_mutex;
+    SDL_cond* async_cond;
+    SDL_Thread* async_thread;
+    int async_stop;
+    Uint32 async_generation;
+    JY_AsyncJob* async_queue_head;
+    JY_AsyncJob* async_queue_tail;
+    JY_AsyncJob* async_done_head;
+    JY_AsyncJob* async_done_tail;
+    Uint32 async_queued;
+    Uint32 async_ready;
+    Uint32 async_submitted;
+    Uint32 async_decoded;
+    Uint32 async_failed;
+    Uint32 async_cancelled;
+    int async_active;
+    Uint32 async_active_frame;
+    Uint32 async_active_generation;
 
     /* ★ R10：旧 zbuf_cached 已删除
      *   - 旧策略：单 z-buffer 仅保留最深像素 → 半透明部件被遮挡时颜色丢失
