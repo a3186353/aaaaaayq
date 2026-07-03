@@ -266,39 +266,6 @@ static int resource_is_shell_type(const char* type)
     return strcmp(type, "tcp_shell") == 0 || strcmp(type, "jy_shell") == 0;
 }
 
-static void resource_log_event(const ResourceToken* token, const char* event, const char* message)
-{
-    if (!token)
-        return;
-    fprintf(stderr,
-        "[资源异步][C事件] event=%s status=%s type=%s path=%s priority=%s scope=%s domain=%s generation=%lld frame=%u msg=%s\n",
-        event ? event : "",
-        resource_status_name(token->status),
-        token->resource_type ? token->resource_type : "",
-        token->save_path ? token->save_path : (token->resource_id ? token->resource_id : ""),
-        resource_priority_name(token->priority),
-        token->scope ? token->scope : "",
-        token->domain ? token->domain : "",
-        token->has_generation ? (long long)token->generation : -1LL,
-        token->has_frame ? (unsigned int)token->frame : 0U,
-        message ? message : "");
-}
-
-static void resource_log_slow_phase(const ResourceWorkerJob* job, const char* phase, Uint32 start_ticks)
-{
-    Uint32 cost = SDL_GetTicks() - start_ticks;
-    if (cost < 10)
-        return;
-    fprintf(stderr,
-        "[资源异步][慢阶段] phase=%s path=%s ms=%u priority=%s scope=%s\n",
-        phase ? phase : "",
-        job && job->token && job->token->save_path ? job->token->save_path :
-            (job && job->token && job->token->resource_id ? job->token->resource_id : ""),
-        (unsigned int)cost,
-        job && job->token ? resource_priority_name(job->token->priority) : "",
-        job && job->token && job->token->scope ? job->token->scope : "");
-}
-
 static ResourcePriority resource_parse_priority(const char* s, const char* queue_priority)
 {
     if (s)
@@ -436,7 +403,6 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     if (status == RESOURCE_STATUS_READY) g_resource.ready++;
     else if (status == RESOURCE_STATUS_FAILED) g_resource.failed++;
     else if (status == RESOURCE_STATUS_DEGRADED) g_resource.degraded++;
-    resource_log_event(token, "terminal", message);
     resource_push_event(token->id, status, token->resource_id, message);
 }
 
@@ -1172,10 +1138,6 @@ static int resource_worker_loop(void* ptr)
         unsigned char* data;
         size_t size;
         TCP_UserData* tcp;
-        Uint32 read_start;
-        Uint32 parse_start;
-        Uint32 decode_start;
-        Uint32 warm_start;
         char warm_err[160];
         SDL_LockMutex(g_resource.worker_mutex);
         while (!g_resource.worker_stop && !g_resource.worker_head)
@@ -1216,21 +1178,16 @@ static int resource_worker_loop(void* ptr)
             data = NULL;
             size = 0;
             tcp = NULL;
-            read_start = SDL_GetTicks();
             if (!WPK_NativeReadData(job->wpk_ud, job->wpk_id, &data, &size, err, sizeof(err)))
             {
-                resource_log_slow_phase(job, "wpk_read", read_start);
                 job->result_ready = 1;
                 job->result_success = 0;
                 SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "wpk_read failed");
             }
             else
             {
-                resource_log_slow_phase(job, "wpk_read", read_start);
-                parse_start = SDL_GetTicks();
                 tcp = TCP_NativeCreateFromData(data, size, err, sizeof(err));
                 SDL_free(data);
-                resource_log_slow_phase(job, "tcp_parse", parse_start);
                 if (!tcp)
                 {
                     job->result_ready = 1;
@@ -1241,7 +1198,6 @@ static int resource_worker_loop(void* ptr)
                 {
                     if (job->shell_frame > 0)
                     {
-                        warm_start = SDL_GetTicks();
                         warm_err[0] = '\0';
                         job->warm_requested = 1;
                         if (TCP_NativeDecodeGroupFrame(tcp, job->shell_group ? job->shell_group : 1,
@@ -1249,16 +1205,6 @@ static int resource_worker_loop(void* ptr)
                         {
                             job->warm_success = 1;
                         }
-                        else
-                        {
-                            fprintf(stderr,
-                                "[资源异步][C事件] event=first_frame_failed type=tcp_shell path=%s group=%u frame=%u msg=%s\n",
-                                job->token && job->token->save_path ? job->token->save_path : "",
-                                (unsigned int)(job->shell_group ? job->shell_group : 1),
-                                (unsigned int)job->shell_frame,
-                                warm_err[0] ? warm_err : "frame_decode failed");
-                        }
-                        resource_log_slow_phase(job, "frame_decode", warm_start);
                     }
                     job->result_ready = 1;
                     job->result_success = 1;
@@ -1269,7 +1215,6 @@ static int resource_worker_loop(void* ptr)
         else if (job->is_tcp_frame)
         {
             SDL_memset(err, 0, sizeof(err));
-            decode_start = SDL_GetTicks();
             if (TCP_NativeDecodeFrameWithPalette(job->tcp_ud, job->frame_id, job->pal_snapshot,
                     job->pal_count, job->pal_version, &job->result_frame, err, sizeof(err)))
             {
@@ -1282,7 +1227,6 @@ static int resource_worker_loop(void* ptr)
                 job->result_success = 0;
                 SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "frame_decode failed");
             }
-            resource_log_slow_phase(job, "frame_decode", decode_start);
         }
         else
         {
@@ -2016,13 +1960,11 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     token->next = g_resource.tokens;
     g_resource.tokens = token;
     g_resource.created++;
-    resource_log_event(token, "submit", "created");
 
     if (token->status == RESOURCE_STATUS_DEGRADED)
     {
         g_resource.degraded++;
         resource_store_failure(token, "cold download disabled");
-        resource_log_event(token, "terminal", "cold download disabled");
         resource_push_event(token->id, RESOURCE_STATUS_DEGRADED, token->resource_id, "cold download disabled");
     }
     else if (token->priority == RESOURCE_PRIORITY_PREHEAT)
@@ -2203,7 +2145,6 @@ static int resource_submit_native_producer(ResourceToken* token)
     }
     else if (token->urls && token->url_count > 0)
     {
-        resource_log_event(token, "native skipped", "download producer queued");
         return 0;
     }
     else
@@ -2229,15 +2170,12 @@ static int resource_submit_native_producer(ResourceToken* token)
     {
         if (token->worker_started)
         {
-            resource_log_event(token, "native accepted", "worker producer already pending");
             return 1;
         }
         if (resource_worker_submit(token))
         {
             token->worker_started = 1;
             token->shell_started = resource_is_tcp_shell(token);
-            resource_log_event(token, "native accepted",
-                resource_is_tcp_shell(token) ? "tcp shell producer accepted" : "tcp frame producer accepted");
             return 1;
         }
         resource_store_failure(token, "worker init failed");
@@ -2245,7 +2183,6 @@ static int resource_submit_native_producer(ResourceToken* token)
         return 0;
     }
 
-    resource_log_event(token, "native accepted", "frame producer accepted");
     resource_try_native_frame(token);
     return 1;
 }
