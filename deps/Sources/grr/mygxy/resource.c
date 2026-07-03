@@ -9,6 +9,7 @@
 #include "lua_proxy.h"
 #include "tcp.h"
 #include "jy.h"
+#include "wpk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,12 +43,14 @@
 #define RESOURCE_DEFAULT_CALLBACK_BUDGET 4
 #define RESOURCE_PREHEAT_AGING_TICKS 40
 #define RESOURCE_DEFAULT_NATIVE_RETRIES 600
+#define RESOURCE_WORKER_THREADS 3
 
 typedef enum ResourceNativeKind
 {
     RESOURCE_NATIVE_NONE = 0,
     RESOURCE_NATIVE_TCP = 1,
-    RESOURCE_NATIVE_JY = 2
+    RESOURCE_NATIVE_JY = 2,
+    RESOURCE_NATIVE_WPK = 3
 } ResourceNativeKind;
 
 typedef enum ResourcePriority
@@ -94,6 +97,8 @@ typedef struct ResourceToken
     int has_generation;
     Uint32 frame;
     int has_frame;
+    Uint32 shell_group;
+    Uint32 shell_frame;
     unsigned int created_tick;
     unsigned int retry_tick;
     unsigned int submit_attempts;
@@ -101,11 +106,18 @@ typedef struct ResourceToken
     unsigned int max_tries;
     ResourceNativeKind native_kind;
     void* native_ud;
+    WPK_UserData* wpk_ud;
+    Uint32 wpk_id;
+    int has_wpk_id;
+    int wpk_ref;
+    int shell_started;
+    int worker_started;
     int native_ref;
     int result_ready;
     int result_success;
     char* result_data;
     size_t result_data_len;
+    void* result_native;
     char* result_error;
     struct ResourceCallback* callbacks;
     struct ResourceToken* next;
@@ -126,6 +138,32 @@ typedef struct ResourceEvent
     struct ResourceEvent* next;
 } ResourceEvent;
 
+typedef struct ResourceWorkerJob
+{
+    ResourceToken* token;
+    ResourcePriority priority;
+    unsigned int token_id;
+    WPK_UserData* wpk_ud;
+    Uint32 wpk_id;
+    Uint32 shell_group;
+    Uint32 shell_frame;
+    TCP_UserData* tcp_ud;
+    Uint32 frame_id;
+    Uint32* pal_snapshot;
+    Uint32 pal_count;
+    Uint32 pal_version;
+    int is_tcp_shell;
+    int is_tcp_frame;
+    int warm_requested;
+    int warm_success;
+    int result_ready;
+    int result_success;
+    TCP_UserData* result_tcp;
+    TCP_NativeFrameData result_frame;
+    char result_error[160];
+    struct ResourceWorkerJob* next;
+} ResourceWorkerJob;
+
 typedef struct ResourceState
 {
     unsigned int next_token_id;
@@ -139,6 +177,7 @@ typedef struct ResourceState
     unsigned int ready;
     unsigned int failed;
     unsigned int degraded;
+    unsigned int shell_degraded;
     unsigned int callback_budget;
     unsigned int callback_dispatched;
     unsigned int render_submitted;
@@ -147,14 +186,37 @@ typedef struct ResourceState
     unsigned int native_failed;
     unsigned int native_queue_full;
     unsigned int native_retried;
+    unsigned int shell_submitted;
+    unsigned int shell_ready;
+    unsigned int shell_failed;
+    unsigned int shell_warm_ready;
+    unsigned int shell_warm_failed;
+    unsigned int frame_submitted;
+    unsigned int frame_ready;
+    unsigned int frame_failed;
+    unsigned int worker_active;
+    unsigned int worker_thread_count;
+    unsigned int worker_poll_tick;
     unsigned int poll_tick;
     unsigned int native_cursor_id;
     ResourceToken* tokens;
     ResourceEvent* events_head;
     ResourceEvent* events_tail;
+    SDL_mutex* worker_mutex;
+    SDL_cond* worker_cond;
+    SDL_Thread* worker_threads[RESOURCE_WORKER_THREADS];
+    int worker_stop;
+    ResourceWorkerJob* worker_head;
+    ResourceWorkerJob* worker_tail;
+    ResourceWorkerJob* worker_done_head;
+    ResourceWorkerJob* worker_done_tail;
 } ResourceState;
 
 static ResourceState g_resource = {0};
+
+static int resource_is_tcp_shell(const ResourceToken* token);
+static int resource_submit_native_producer(ResourceToken* token);
+static void resource_worker_promote_token(ResourceToken* token);
 
 static char* resource_strdup(const char* s)
 {
@@ -182,6 +244,59 @@ static const char* resource_status_name(ResourceStatus status)
     default:
         return "queued";
     }
+}
+
+static const char* resource_priority_name(ResourcePriority priority)
+{
+    switch (priority)
+    {
+    case RESOURCE_PRIORITY_CRITICAL: return "critical";
+    case RESOURCE_PRIORITY_HIGH: return "high";
+    case RESOURCE_PRIORITY_PREHEAT: return "preheat";
+    case RESOURCE_PRIORITY_NORMAL:
+    default:
+        return "normal";
+    }
+}
+
+static int resource_is_shell_type(const char* type)
+{
+    if (!type)
+        return 0;
+    return strcmp(type, "tcp_shell") == 0 || strcmp(type, "jy_shell") == 0;
+}
+
+static void resource_log_event(const ResourceToken* token, const char* event, const char* message)
+{
+    if (!token)
+        return;
+    fprintf(stderr,
+        "[资源异步][C事件] event=%s status=%s type=%s path=%s priority=%s scope=%s domain=%s generation=%lld frame=%u msg=%s\n",
+        event ? event : "",
+        resource_status_name(token->status),
+        token->resource_type ? token->resource_type : "",
+        token->save_path ? token->save_path : (token->resource_id ? token->resource_id : ""),
+        resource_priority_name(token->priority),
+        token->scope ? token->scope : "",
+        token->domain ? token->domain : "",
+        token->has_generation ? (long long)token->generation : -1LL,
+        token->has_frame ? (unsigned int)token->frame : 0U,
+        message ? message : "");
+}
+
+static void resource_log_slow_phase(const ResourceWorkerJob* job, const char* phase, Uint32 start_ticks)
+{
+    Uint32 cost = SDL_GetTicks() - start_ticks;
+    if (cost < 10)
+        return;
+    fprintf(stderr,
+        "[资源异步][慢阶段] phase=%s path=%s ms=%u priority=%s scope=%s\n",
+        phase ? phase : "",
+        job && job->token && job->token->save_path ? job->token->save_path :
+            (job && job->token && job->token->resource_id ? job->token->resource_id : ""),
+        (unsigned int)cost,
+        job && job->token ? resource_priority_name(job->token->priority) : "",
+        job && job->token && job->token->scope ? job->token->scope : "");
 }
 
 static ResourcePriority resource_parse_priority(const char* s, const char* queue_priority)
@@ -238,8 +353,11 @@ static void resource_clear_result(ResourceToken* token)
         return;
     free(token->result_data);
     free(token->result_error);
+    if (token->result_native && token->resource_type && strcmp(token->resource_type, "tcp_shell") == 0)
+        TCP_NativeFree((TCP_UserData*)token->result_native);
     token->result_data = NULL;
     token->result_data_len = 0;
+    token->result_native = NULL;
     token->result_error = NULL;
     token->result_ready = 0;
     token->result_success = 0;
@@ -274,6 +392,8 @@ static void resource_free_token(lua_State* L, ResourceToken* token)
     free(token->degrade);
     if (token->native_ref != LUA_NOREF)
         luaL_unref(L, LUA_REGISTRYINDEX, token->native_ref);
+    if (token->wpk_ref != LUA_NOREF)
+        luaL_unref(L, LUA_REGISTRYINDEX, token->wpk_ref);
     free(token);
 }
 
@@ -316,6 +436,7 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     if (status == RESOURCE_STATUS_READY) g_resource.ready++;
     else if (status == RESOURCE_STATUS_FAILED) g_resource.failed++;
     else if (status == RESOURCE_STATUS_DEGRADED) g_resource.degraded++;
+    resource_log_event(token, "terminal", message);
     resource_push_event(token->id, status, token->resource_id, message);
 }
 
@@ -334,6 +455,7 @@ static void resource_promote_priority(ResourceToken* token, ResourcePriority pri
             g_resource.queued_low--;
         g_resource.queued_high++;
     }
+    resource_worker_promote_token(token);
 }
 
 static ResourcePriority resource_effective_priority(const ResourceToken* token)
@@ -343,6 +465,17 @@ static ResourcePriority resource_effective_priority(const ResourceToken* token)
     if (token->priority == RESOURCE_PRIORITY_PREHEAT
         && g_resource.poll_tick > token->created_tick
         && g_resource.poll_tick - token->created_tick >= RESOURCE_PREHEAT_AGING_TICKS)
+        return RESOURCE_PRIORITY_NORMAL;
+    return token->priority;
+}
+
+static ResourcePriority resource_effective_priority_at(const ResourceToken* token, unsigned int tick)
+{
+    if (!token)
+        return RESOURCE_PRIORITY_NORMAL;
+    if (token->priority == RESOURCE_PRIORITY_PREHEAT
+        && tick > token->created_tick
+        && tick - token->created_tick >= RESOURCE_PREHEAT_AGING_TICKS)
         return RESOURCE_PRIORITY_NORMAL;
     return token->priority;
 }
@@ -491,6 +624,17 @@ static int resource_store_failure(ResourceToken* token, const char* message)
     return token->result_error != NULL;
 }
 
+static int resource_store_native_success(ResourceToken* token, void* native)
+{
+    if (!token || !native)
+        return 0;
+    resource_clear_result(token);
+    token->result_success = 1;
+    token->result_ready = 1;
+    token->result_native = native;
+    return 1;
+}
+
 static unsigned int resource_callback_budget(void)
 {
     return g_resource.callback_budget ? g_resource.callback_budget : RESOURCE_DEFAULT_CALLBACK_BUDGET;
@@ -504,11 +648,12 @@ static unsigned int resource_dispatch_pending_callbacks(lua_State* L)
     while (p && dispatched < budget)
     {
         ResourceToken* next = p->next;
-        if (!p->callbacks_done && p->result_ready && resource_is_terminal(p->status))
+        if (!p->callbacks_done && p->callbacks && p->result_ready && resource_is_terminal(p->status))
         {
             resource_dispatch_callbacks(L, p, p->result_success,
                 p->result_data, p->result_data_len, p->result_error);
-            resource_clear_result(p);
+            if (!(resource_is_tcp_shell(p) && p->result_native))
+                resource_clear_result(p);
             dispatched++;
         }
         p = next;
@@ -754,19 +899,514 @@ static void resource_finish_native_failed(ResourceToken* token, const char* mess
     g_resource.native_failed++;
 }
 
+static int resource_is_tcp_shell(const ResourceToken* token)
+{
+    return token && token->resource_type && strcmp(token->resource_type, "tcp_shell") == 0;
+}
+
+static void resource_finish_shell_ready(ResourceToken* token, TCP_UserData* tcp)
+{
+    if (!token || resource_is_terminal(token->status))
+    {
+        TCP_NativeFree(tcp);
+        return;
+    }
+    if (!tcp || !resource_store_native_success(token, tcp))
+    {
+        TCP_NativeFree(tcp);
+        resource_store_failure(token, "out of memory");
+        resource_set_status(token, RESOURCE_STATUS_FAILED, "out of memory");
+        g_resource.shell_failed++;
+        return;
+    }
+    resource_set_status(token, RESOURCE_STATUS_READY, "ready");
+    g_resource.shell_ready++;
+}
+
+static void resource_finish_shell_failed(ResourceToken* token, const char* message)
+{
+    if (!token || resource_is_terminal(token->status))
+        return;
+    resource_store_failure(token, message ? message : "shell async failed");
+    resource_set_status(token, RESOURCE_STATUS_FAILED, message ? message : "shell async failed");
+    g_resource.shell_failed++;
+}
+
+static void resource_worker_push_done(ResourceWorkerJob* job)
+{
+    if (!job)
+        return;
+    SDL_LockMutex(g_resource.worker_mutex);
+    if (g_resource.worker_done_tail)
+        g_resource.worker_done_tail->next = job;
+    else
+        g_resource.worker_done_head = job;
+    g_resource.worker_done_tail = job;
+    job->next = NULL;
+    if (g_resource.worker_active > 0)
+        g_resource.worker_active--;
+    SDL_UnlockMutex(g_resource.worker_mutex);
+}
+
+static void resource_worker_job_free(ResourceWorkerJob* job)
+{
+    if (!job)
+        return;
+    TCP_NativeFree(job->result_tcp);
+    TCP_NativeClearFrameData(&job->result_frame);
+    SDL_free(job->pal_snapshot);
+    free(job);
+}
+
+static void resource_worker_job_list_free(ResourceWorkerJob* job)
+{
+    while (job)
+    {
+        ResourceWorkerJob* next = job->next;
+        job->next = NULL;
+        resource_worker_job_free(job);
+        job = next;
+    }
+}
+
+static void resource_worker_enqueue(ResourceWorkerJob* job)
+{
+    ResourceWorkerJob* p;
+    ResourceWorkerJob* prev = NULL;
+    if (!job)
+        return;
+    if (job->token)
+        job->priority = resource_effective_priority(job->token);
+    p = g_resource.worker_head;
+    while (p)
+    {
+        if (job->priority > p->priority)
+            break;
+        if (job->priority == p->priority && job->token_id < p->token_id)
+            break;
+        prev = p;
+        p = p->next;
+    }
+    if (prev)
+    {
+        job->next = prev->next;
+        prev->next = job;
+    }
+    else
+    {
+        job->next = g_resource.worker_head;
+        g_resource.worker_head = job;
+    }
+    if (!job->next)
+        g_resource.worker_tail = job;
+}
+
+static void resource_worker_promote_token(ResourceToken* token)
+{
+    ResourceWorkerJob* p;
+    ResourceWorkerJob* prev = NULL;
+    if (!token || !g_resource.worker_mutex)
+        return;
+    SDL_LockMutex(g_resource.worker_mutex);
+    p = g_resource.worker_head;
+    while (p)
+    {
+        if (p->token == token)
+            break;
+        prev = p;
+        p = p->next;
+    }
+    if (p)
+    {
+        if (prev)
+            prev->next = p->next;
+        else
+            g_resource.worker_head = p->next;
+        if (g_resource.worker_tail == p)
+            g_resource.worker_tail = prev;
+        p->priority = resource_effective_priority(token);
+        p->shell_group = token->shell_group;
+        p->shell_frame = token->shell_frame;
+        p->next = NULL;
+        resource_worker_enqueue(p);
+    }
+    SDL_UnlockMutex(g_resource.worker_mutex);
+}
+
+static ResourceWorkerJob* resource_worker_pop_locked(void)
+{
+    ResourceWorkerJob* p = g_resource.worker_head;
+    ResourceWorkerJob* prev = NULL;
+    ResourceWorkerJob* best = NULL;
+    ResourceWorkerJob* best_prev = NULL;
+    ResourcePriority best_priority = RESOURCE_PRIORITY_PREHEAT;
+    while (p)
+    {
+        ResourcePriority eff = p->token ? resource_effective_priority_at(p->token, g_resource.worker_poll_tick) : p->priority;
+        p->priority = eff;
+        if (!best || eff > best_priority || (eff == best_priority && p->token_id < best->token_id))
+        {
+            best = p;
+            best_prev = prev;
+            best_priority = eff;
+        }
+        prev = p;
+        p = p->next;
+    }
+    if (!best)
+        return NULL;
+    if (best_prev)
+        best_prev->next = best->next;
+    else
+        g_resource.worker_head = best->next;
+    if (g_resource.worker_tail == best)
+        g_resource.worker_tail = best_prev;
+    best->next = NULL;
+    return best;
+}
+
+static unsigned int resource_update_shell_results(unsigned int max_ops)
+{
+    unsigned int ops = 0;
+    ResourceWorkerJob* job;
+    ResourceToken* token;
+    if (!g_resource.worker_mutex)
+        return 0;
+    if (max_ops == 0)
+        max_ops = 8;
+
+    while (ops < max_ops)
+    {
+        job = NULL;
+        SDL_LockMutex(g_resource.worker_mutex);
+        job = g_resource.worker_done_head;
+        if (job)
+        {
+            g_resource.worker_done_head = job->next;
+            if (!g_resource.worker_done_head)
+                g_resource.worker_done_tail = NULL;
+            job->next = NULL;
+        }
+        SDL_UnlockMutex(g_resource.worker_mutex);
+
+        if (!job)
+            break;
+
+        token = job->token;
+        if (job->warm_requested)
+        {
+            if (job->warm_success)
+                g_resource.shell_warm_ready++;
+            else
+                g_resource.shell_warm_failed++;
+        }
+        if (!token || token->cancelled || resource_is_terminal(token->status))
+        {
+            TCP_NativeFree(job->result_tcp);
+            job->result_tcp = NULL;
+        }
+        else if (job->is_tcp_frame)
+        {
+            if (job->result_ready && job->result_success
+                && TCP_NativeStoreDecodedFrame((TCP_UserData*)token->native_ud, &job->result_frame))
+            {
+                resource_finish_native_ready(token);
+                g_resource.frame_ready++;
+            }
+            else
+            {
+                resource_finish_native_failed(token, job->result_error[0] ? job->result_error : "frame decode failed");
+                g_resource.frame_failed++;
+            }
+        }
+        else if (job->result_ready && job->result_success && job->result_tcp)
+        {
+            if (job->warm_requested && job->warm_success)
+                TCP_NativeStoreDecodedFrame(job->result_tcp, &job->result_frame);
+            resource_finish_shell_ready(token, job->result_tcp);
+            job->result_tcp = NULL;
+        }
+        else
+        {
+            resource_finish_shell_failed(token, job->result_error[0] ? job->result_error : "shell async failed");
+        }
+
+        resource_worker_job_free(job);
+        ops++;
+    }
+    return ops;
+}
+
+static unsigned int resource_worker_count_jobs(ResourceWorkerJob* job)
+{
+    unsigned int count = 0;
+    while (job)
+    {
+        count++;
+        job = job->next;
+    }
+    return count;
+}
+
+static void resource_worker_queue_counts(unsigned int* out_pending, unsigned int* out_done)
+{
+    if (out_pending) *out_pending = 0;
+    if (out_done) *out_done = 0;
+    if (!g_resource.worker_mutex)
+        return;
+    SDL_LockMutex(g_resource.worker_mutex);
+    if (out_pending)
+        *out_pending = resource_worker_count_jobs(g_resource.worker_head);
+    if (out_done)
+        *out_done = resource_worker_count_jobs(g_resource.worker_done_head);
+    SDL_UnlockMutex(g_resource.worker_mutex);
+}
+
+static int resource_worker_loop(void* ptr)
+{
+    (void)ptr;
+    for (;;)
+    {
+        ResourceWorkerJob* job = NULL;
+        char err[160];
+        unsigned char* data;
+        size_t size;
+        TCP_UserData* tcp;
+        Uint32 read_start;
+        Uint32 parse_start;
+        Uint32 decode_start;
+        Uint32 warm_start;
+        char warm_err[160];
+        SDL_LockMutex(g_resource.worker_mutex);
+        while (!g_resource.worker_stop && !g_resource.worker_head)
+            SDL_CondWait(g_resource.worker_cond, g_resource.worker_mutex);
+        if (g_resource.worker_stop)
+        {
+            SDL_UnlockMutex(g_resource.worker_mutex);
+            break;
+        }
+        job = resource_worker_pop_locked();
+        if (job)
+            g_resource.worker_active++;
+        SDL_UnlockMutex(g_resource.worker_mutex);
+
+        if (!job)
+            continue;
+
+        if (!job->token)
+        {
+            job->result_ready = 1;
+            job->result_success = 0;
+            SDL_snprintf(job->result_error, sizeof(job->result_error), "token missing");
+            resource_worker_push_done(job);
+            continue;
+        }
+        if (job->token->cancelled || resource_is_terminal(job->token->status))
+        {
+            job->result_ready = 1;
+            job->result_success = 0;
+            SDL_snprintf(job->result_error, sizeof(job->result_error), "cancelled");
+            resource_worker_push_done(job);
+            continue;
+        }
+
+        if (job->is_tcp_shell)
+        {
+            SDL_memset(err, 0, sizeof(err));
+            data = NULL;
+            size = 0;
+            tcp = NULL;
+            read_start = SDL_GetTicks();
+            if (!WPK_NativeReadData(job->wpk_ud, job->wpk_id, &data, &size, err, sizeof(err)))
+            {
+                resource_log_slow_phase(job, "wpk_read", read_start);
+                job->result_ready = 1;
+                job->result_success = 0;
+                SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "wpk_read failed");
+            }
+            else
+            {
+                resource_log_slow_phase(job, "wpk_read", read_start);
+                parse_start = SDL_GetTicks();
+                tcp = TCP_NativeCreateFromData(data, size, err, sizeof(err));
+                SDL_free(data);
+                resource_log_slow_phase(job, "tcp_parse", parse_start);
+                if (!tcp)
+                {
+                    job->result_ready = 1;
+                    job->result_success = 0;
+                    SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "tcp_parse failed");
+                }
+                else
+                {
+                    if (job->shell_frame > 0)
+                    {
+                        warm_start = SDL_GetTicks();
+                        warm_err[0] = '\0';
+                        job->warm_requested = 1;
+                        if (TCP_NativeDecodeGroupFrame(tcp, job->shell_group ? job->shell_group : 1,
+                                job->shell_frame, &job->result_frame, warm_err, sizeof(warm_err)))
+                        {
+                            job->warm_success = 1;
+                        }
+                        else
+                        {
+                            fprintf(stderr,
+                                "[资源异步][C事件] event=first_frame_failed type=tcp_shell path=%s group=%u frame=%u msg=%s\n",
+                                job->token && job->token->save_path ? job->token->save_path : "",
+                                (unsigned int)(job->shell_group ? job->shell_group : 1),
+                                (unsigned int)job->shell_frame,
+                                warm_err[0] ? warm_err : "frame_decode failed");
+                        }
+                        resource_log_slow_phase(job, "frame_decode", warm_start);
+                    }
+                    job->result_ready = 1;
+                    job->result_success = 1;
+                    job->result_tcp = tcp;
+                }
+            }
+        }
+        else if (job->is_tcp_frame)
+        {
+            SDL_memset(err, 0, sizeof(err));
+            decode_start = SDL_GetTicks();
+            if (TCP_NativeDecodeFrameWithPalette(job->tcp_ud, job->frame_id, job->pal_snapshot,
+                    job->pal_count, job->pal_version, &job->result_frame, err, sizeof(err)))
+            {
+                job->result_ready = 1;
+                job->result_success = 1;
+            }
+            else
+            {
+                job->result_ready = 1;
+                job->result_success = 0;
+                SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "frame_decode failed");
+            }
+            resource_log_slow_phase(job, "frame_decode", decode_start);
+        }
+        else
+        {
+            job->result_ready = 1;
+            job->result_success = 0;
+            SDL_snprintf(job->result_error, sizeof(job->result_error), "unsupported shell type");
+        }
+
+        resource_worker_push_done(job);
+    }
+    return 0;
+}
+
+static int resource_worker_submit(ResourceToken* token)
+{
+    ResourceWorkerJob* job;
+    TCP_UserData* tcp;
+    unsigned int started;
+    if (!token)
+        return 0;
+    if (!g_resource.worker_mutex)
+    {
+        g_resource.worker_mutex = SDL_CreateMutex();
+        if (!g_resource.worker_mutex)
+            return 0;
+    }
+    if (!g_resource.worker_cond)
+    {
+        g_resource.worker_cond = SDL_CreateCond();
+        if (!g_resource.worker_cond)
+            return 0;
+    }
+    started = g_resource.worker_thread_count;
+    while (started < RESOURCE_WORKER_THREADS)
+    {
+        char name[32];
+        SDL_snprintf(name, sizeof(name), "resource_worker_%u", started + 1);
+        g_resource.worker_stop = 0;
+        g_resource.worker_threads[started] = SDL_CreateThread(resource_worker_loop, name, NULL);
+        if (!g_resource.worker_threads[started])
+        {
+            if (started == 0)
+                return 0;
+            break;
+        }
+        started++;
+    }
+    g_resource.worker_thread_count = started;
+
+    job = (ResourceWorkerJob*)calloc(1, sizeof(ResourceWorkerJob));
+    if (!job)
+        return 0;
+    job->token = token;
+    job->priority = token->priority;
+    job->token_id = token->id;
+    job->wpk_ud = token->wpk_ud;
+    job->wpk_id = token->wpk_id;
+    job->shell_group = token->shell_group;
+    job->shell_frame = token->shell_frame;
+    job->is_tcp_shell = resource_is_tcp_shell(token);
+    job->is_tcp_frame = !job->is_tcp_shell && token->native_kind == RESOURCE_NATIVE_TCP && token->native_ud && token->has_frame;
+    if (job->is_tcp_frame)
+    {
+        tcp = (TCP_UserData*)token->native_ud;
+        if (TCP_NativeIsFrameDecoded(tcp, token->frame))
+        {
+            resource_worker_job_free(job);
+            resource_finish_native_ready(token);
+            return 1;
+        }
+        job->tcp_ud = tcp;
+        job->frame_id = token->frame;
+        job->pal_count = tcp->pal_count ? tcp->pal_count : 256;
+        if (!tcp->pal_dyn && job->pal_count > 256)
+            job->pal_count = 256;
+        job->pal_version = tcp->pal_version;
+        job->pal_snapshot = (Uint32*)SDL_malloc(sizeof(Uint32) * job->pal_count);
+        if (!job->pal_snapshot)
+        {
+            resource_worker_job_free(job);
+            return 0;
+        }
+        SDL_memcpy(job->pal_snapshot, tcp->pal_dyn ? tcp->pal_dyn : tcp->pal, sizeof(Uint32) * job->pal_count);
+    }
+
+    SDL_LockMutex(g_resource.worker_mutex);
+    resource_worker_enqueue(job);
+    SDL_CondSignal(g_resource.worker_cond);
+    SDL_UnlockMutex(g_resource.worker_mutex);
+    if (job->is_tcp_shell)
+        g_resource.shell_submitted++;
+    else if (job->is_tcp_frame)
+        g_resource.frame_submitted++;
+    return 1;
+}
+
 static int resource_try_native_frame(ResourceToken* token)
 {
     const char* status = NULL;
     int ret;
     if (!token || token->status != RESOURCE_STATUS_QUEUED || token->cancelled)
         return 0;
+    if (resource_is_shell_type(token->resource_type))
+        return 0;
     if (token->native_kind == RESOURCE_NATIVE_NONE)
         return 0;
 
-    resource_native_poll_frame(token, 2);
+    if (token->native_kind != RESOURCE_NATIVE_TCP)
+        resource_native_poll_frame(token, 2);
     if (resource_native_is_frame_ready(token))
     {
         resource_finish_native_ready(token);
+        return 1;
+    }
+    if (token->native_kind == RESOURCE_NATIVE_TCP)
+    {
+        if (token->worker_started)
+            return 0;
+        if (resource_worker_submit(token))
+        {
+            token->worker_started = 1;
+            return 0;
+        }
+        resource_finish_native_failed(token, "worker init failed");
         return 1;
     }
 
@@ -817,7 +1457,10 @@ static unsigned int resource_update_native_frames(unsigned int max_ops)
         ResourceToken* wrap = NULL;
         while (p)
         {
-            if (p->native_kind != RESOURCE_NATIVE_NONE && p->status == RESOURCE_STATUS_QUEUED)
+            if (!resource_is_shell_type(p->resource_type)
+                && p->native_kind != RESOURCE_NATIVE_NONE
+                && p->status == RESOURCE_STATUS_QUEUED
+                && !(p->native_kind == RESOURCE_NATIVE_TCP && p->worker_started))
             {
                 if (p->id > g_resource.native_cursor_id)
                 {
@@ -893,6 +1536,13 @@ static void resource_update_downloads(lua_State* L)
 static void resource_update_all(lua_State* L, unsigned int native_ops)
 {
     g_resource.poll_tick++;
+    if (g_resource.worker_mutex)
+    {
+        SDL_LockMutex(g_resource.worker_mutex);
+        g_resource.worker_poll_tick = g_resource.poll_tick;
+        SDL_UnlockMutex(g_resource.worker_mutex);
+    }
+    resource_update_shell_results(native_ops);
     resource_update_native_frames(native_ops);
     resource_update_downloads(L);
 }
@@ -972,6 +1622,7 @@ static int resource_read_native_ref(lua_State* L, int idx, ResourceNativeKind* o
 {
     void* ud = NULL;
     ResourceNativeKind kind = RESOURCE_NATIVE_NONE;
+    int ref = LUA_NOREF;
 
     lua_getfield(L, idx, "native_ud");
     if (lua_isnil(L, -1))
@@ -991,14 +1642,47 @@ static int resource_read_native_ref(lua_State* L, int idx, ResourceNativeKind* o
             ud = resource_test_userdata(L, -1, JY_MT);
             if (ud)
                 kind = RESOURCE_NATIVE_JY;
+            else
+            {
+                ud = resource_test_userdata(L, -1, WPK_NAME);
+                if (ud)
+                    kind = RESOURCE_NATIVE_WPK;
+            }
         }
     }
 
+    if (ud)
+    {
+        lua_pushvalue(L, -1);
+        ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
     lua_pop(L, 1);
 
     if (out_kind) *out_kind = kind;
     if (out_ud) *out_ud = ud;
-    return LUA_NOREF;
+    return ref;
+}
+
+static int resource_read_wpk_ref(lua_State* L, int idx, WPK_UserData** out_ud)
+{
+    WPK_UserData* ud = NULL;
+    int ref = LUA_NOREF;
+    lua_getfield(L, idx, "wpk_ud");
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        lua_getfield(L, idx, "wpk");
+    }
+    if (lua_isuserdata(L, -1))
+        ud = (WPK_UserData*)resource_test_userdata(L, -1, WPK_NAME);
+    if (ud)
+    {
+        lua_pushvalue(L, -1);
+        ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    lua_pop(L, 1);
+    if (out_ud) *out_ud = ud;
+    return ref;
 }
 
 static int resource_add_callback_ref(ResourceToken* token, int ref)
@@ -1159,6 +1843,9 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     unsigned int url_count;
     int callback_ref;
     int timeout;
+    int requested_frame;
+    Uint32 requested_shell_group;
+    Uint32 requested_shell_frame;
     ResourcePriority parsed_priority;
     ResourceToken* existing;
     ResourceToken* token;
@@ -1201,12 +1888,29 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         resource_table_int(L, req_idx, "\xe8\xb6\x85\xe6\x97\xb6", RESOURCE_DEFAULT_TIMEOUT));
     if (timeout <= 0)
         timeout = RESOURCE_DEFAULT_TIMEOUT;
+    requested_frame = resource_table_int(L, req_idx, "frame", -2147483647);
+    requested_shell_group = (Uint32)resource_table_int(L, req_idx, "shell_group",
+        resource_table_int(L, req_idx, "group",
+            resource_table_int(L, req_idx, "direction",
+                resource_table_int(L, req_idx, "\xe6\x96\xb9\xe5\x90\x91", 1))));
+    requested_shell_frame = (Uint32)resource_table_int(L, req_idx, "shell_frame",
+        resource_table_int(L, req_idx, "first_frame",
+            resource_table_int(L, req_idx, "firstFrame", requested_frame != -2147483647 ? requested_frame : 1)));
+    if (requested_shell_group == 0)
+        requested_shell_group = 1;
+    if (requested_shell_frame == 0)
+        requested_shell_frame = 1;
 
     parsed_priority = resource_parse_priority(priority, queue_priority);
     dedupe_key = resource_make_dedupe_key(L, req_idx, urls, url_count, resource_id);
     existing = resource_find_by_dedupe_key(dedupe_key);
     if (existing)
     {
+        if (resource_is_shell_type(existing->resource_type))
+        {
+            existing->shell_group = requested_shell_group;
+            existing->shell_frame = requested_shell_frame;
+        }
         resource_promote_priority(existing, parsed_priority);
         if (callback_ref != LUA_NOREF && !resource_add_callback_ref(existing, callback_ref))
         {
@@ -1269,14 +1973,21 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     token->status = token->allow_cold_download ? RESOURCE_STATUS_QUEUED : RESOURCE_STATUS_DEGRADED;
     token->download_ref = LUA_NOREF;
     token->native_ref = LUA_NOREF;
+    token->wpk_ref = LUA_NOREF;
     token->max_tries = (unsigned int)resource_table_int(L, req_idx, "max_tries",
         resource_table_int(L, req_idx, "\xe6\x9c\x80\xe5\xa4\xa7\xe9\x87\x8d\xe8\xaf\x95", RESOURCE_DEFAULT_NATIVE_RETRIES));
     if (token->max_tries == 0)
         token->max_tries = RESOURCE_DEFAULT_NATIVE_RETRIES;
     token->generation = (lua_Integer)resource_table_int(L, req_idx, "generation", 0);
     token->has_generation = resource_table_int(L, req_idx, "generation", -2147483647) != -2147483647;
-    token->frame = (Uint32)resource_table_int(L, req_idx, "frame", 0);
-    token->has_frame = resource_table_int(L, req_idx, "frame", -2147483647) != -2147483647;
+    token->frame = requested_frame != -2147483647 ? (Uint32)requested_frame : 0;
+    token->has_frame = requested_frame != -2147483647;
+    token->shell_group = requested_shell_group;
+    token->shell_frame = requested_shell_frame;
+    token->wpk_id = (Uint32)resource_table_int(L, req_idx, "wpk_id",
+        resource_table_int(L, req_idx, "wpkid",
+            resource_table_int(L, req_idx, "\xe5\x8c\x85ID", 0)));
+    token->has_wpk_id = token->wpk_id > 0;
     token->timeout = timeout;
     token->urls = urls;
     token->url_count = url_count;
@@ -1290,6 +2001,7 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     token->domain = domain ? domain : resource_strdup("");
     token->degrade = degrade;
     token->native_ref = resource_read_native_ref(L, req_idx, &token->native_kind, &token->native_ud);
+    token->wpk_ref = resource_read_wpk_ref(L, req_idx, &token->wpk_ud);
     if (callback_ref != LUA_NOREF && !resource_add_callback_ref(token, callback_ref))
     {
         luaL_unref(L, LUA_REGISTRYINDEX, callback_ref);
@@ -1304,11 +2016,13 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     token->next = g_resource.tokens;
     g_resource.tokens = token;
     g_resource.created++;
+    resource_log_event(token, "submit", "created");
 
     if (token->status == RESOURCE_STATUS_DEGRADED)
     {
         g_resource.degraded++;
         resource_store_failure(token, "cold download disabled");
+        resource_log_event(token, "terminal", "cold download disabled");
         resource_push_event(token->id, RESOURCE_STATUS_DEGRADED, token->resource_id, "cold download disabled");
     }
     else if (token->priority == RESOURCE_PRIORITY_PREHEAT)
@@ -1379,10 +2093,31 @@ static void resource_push_token_table(lua_State* L, const ResourceToken* token)
     lua_setfield(L, -2, "cancelled");
     lua_pushboolean(L, token->native_kind != RESOURCE_NATIVE_NONE);
     lua_setfield(L, -2, "native_decode");
+    lua_pushboolean(L, resource_is_tcp_shell(token) && token->result_native != NULL);
+    lua_setfield(L, -2, "shell_ready");
+    if (token->has_wpk_id)
+    {
+        lua_pushinteger(L, (lua_Integer)token->wpk_id);
+        lua_setfield(L, -2, "wpk_id");
+    }
+    if (resource_is_tcp_shell(token))
+    {
+        lua_pushinteger(L, (lua_Integer)token->shell_group);
+        lua_setfield(L, -2, "group");
+        lua_pushinteger(L, (lua_Integer)token->shell_frame);
+        lua_setfield(L, -2, "first_frame");
+    }
     lua_pushinteger(L, (lua_Integer)token->submit_attempts);
     lua_setfield(L, -2, "attempts");
     lua_pushinteger(L, (lua_Integer)token->queue_full_count);
     lua_setfield(L, -2, "queue_full");
+    if (token->result_error)
+    {
+        lua_pushstring(L, token->result_error);
+        lua_setfield(L, -2, "message");
+        lua_pushstring(L, token->result_error);
+        lua_setfield(L, -2, "error");
+    }
 }
 
 static int resource_lua_query(lua_State* L)
@@ -1438,7 +2173,80 @@ static int resource_lua_request(lua_State* L)
     token = resource_create_token(L, 1);
     if (!token)
         return luaL_error(L, "resource: out of memory");
+    if (token->status == RESOURCE_STATUS_QUEUED
+        && (!token->urls || token->url_count == 0))
+        resource_submit_native_producer(token);
     resource_push_token_table(L, token);
+    return 1;
+}
+
+static int resource_submit_native_producer(ResourceToken* token)
+{
+    const char* message = NULL;
+    int accepted;
+    if (!token || resource_is_terminal(token->status))
+        return 0;
+
+    if (resource_is_tcp_shell(token))
+    {
+        if (!token->wpk_ud || !token->has_wpk_id)
+            message = "tcp_shell requires wpk_ud+wpk_id";
+    }
+    else if (resource_is_shell_type(token->resource_type))
+    {
+        message = "shell async only supports tcp_shell";
+    }
+    else if (token->native_kind != RESOURCE_NATIVE_NONE)
+    {
+        if (!token->has_frame)
+            message = "native frame missing";
+    }
+    else if (token->urls && token->url_count > 0)
+    {
+        resource_log_event(token, "native skipped", "download producer queued");
+        return 0;
+    }
+    else
+    {
+        message = "native producer unavailable";
+    }
+
+    if (message)
+    {
+        if (resource_is_shell_type(token->resource_type))
+            g_resource.shell_degraded++;
+        resource_store_failure(token, message);
+        resource_set_status(token, RESOURCE_STATUS_DEGRADED, message);
+        return 0;
+    }
+
+    accepted = (resource_is_tcp_shell(token) && token->wpk_ud && token->has_wpk_id)
+        || (token->native_kind != RESOURCE_NATIVE_NONE && token->has_frame);
+    if (!accepted)
+        return 0;
+
+    if (resource_is_tcp_shell(token) || token->native_kind == RESOURCE_NATIVE_TCP)
+    {
+        if (token->worker_started)
+        {
+            resource_log_event(token, "native accepted", "worker producer already pending");
+            return 1;
+        }
+        if (resource_worker_submit(token))
+        {
+            token->worker_started = 1;
+            token->shell_started = resource_is_tcp_shell(token);
+            resource_log_event(token, "native accepted",
+                resource_is_tcp_shell(token) ? "tcp shell producer accepted" : "tcp frame producer accepted");
+            return 1;
+        }
+        resource_store_failure(token, "worker init failed");
+        resource_set_status(token, RESOURCE_STATUS_DEGRADED, "worker init failed");
+        return 0;
+    }
+
+    resource_log_event(token, "native accepted", "frame producer accepted");
+    resource_try_native_frame(token);
     return 1;
 }
 
@@ -1452,16 +2260,7 @@ static int resource_lua_submit(lua_State* L)
     if (!token)
         return luaL_error(L, "resource: out of memory");
 
-    accepted = token->native_kind != RESOURCE_NATIVE_NONE && token->has_frame;
-    if (accepted)
-    {
-        resource_try_native_frame(token);
-    }
-    else if (!resource_is_terminal(token->status))
-    {
-        resource_store_failure(token, "native producer unavailable");
-        resource_set_status(token, RESOURCE_STATUS_DEGRADED, "native producer unavailable");
-    }
+    accepted = resource_submit_native_producer(token);
 
     resource_push_token_table(L, token);
     lua_pushboolean(L, accepted);
@@ -1473,6 +2272,7 @@ static int resource_lua_preload(lua_State* L)
 {
     lua_Integer out_index = 1;
     int result_idx;
+    int accepted;
     ResourceToken* token;
     luaL_checktype(L, 1, LUA_TTABLE);
     lua_newtable(L);
@@ -1486,7 +2286,10 @@ static int resource_lua_preload(lua_State* L)
             if (!token)
                 return luaL_error(L, "resource: out of memory");
             g_resource.preload++;
+            accepted = resource_submit_native_producer(token);
             resource_push_token_table(L, token);
+            lua_pushboolean(L, accepted);
+            lua_setfield(L, -2, "accepted");
             lua_rawseti(L, result_idx, out_index++);
         }
         lua_pop(L, 1);
@@ -1632,6 +2435,8 @@ static int resource_push_stats(lua_State* L)
 {
     unsigned int active = 0;
     unsigned int low_active = 0;
+    unsigned int worker_pending = 0;
+    unsigned int worker_done = 0;
     ResourceToken* token = g_resource.tokens;
     while (token)
     {
@@ -1643,6 +2448,7 @@ static int resource_push_stats(lua_State* L)
         }
         token = token->next;
     }
+    resource_worker_queue_counts(&worker_pending, &worker_done);
 
     lua_createtable(L, 0, 24);
     lua_pushboolean(L, 1);
@@ -1667,6 +2473,8 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "failed");
     lua_pushinteger(L, (lua_Integer)g_resource.degraded);
     lua_setfield(L, -2, "degraded");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_degraded);
+    lua_setfield(L, -2, "shell_degraded");
     lua_pushinteger(L, (lua_Integer)resource_max_active());
     lua_setfield(L, -2, "max_active");
     lua_pushinteger(L, (lua_Integer)resource_low_active_max());
@@ -1687,6 +2495,30 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "native_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.native_retried);
     lua_setfield(L, -2, "native_retried");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_submitted);
+    lua_setfield(L, -2, "shell_submitted");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_ready);
+    lua_setfield(L, -2, "shell_ready");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_failed);
+    lua_setfield(L, -2, "shell_failed");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_warm_ready);
+    lua_setfield(L, -2, "shell_warm_ready");
+    lua_pushinteger(L, (lua_Integer)g_resource.shell_warm_failed);
+    lua_setfield(L, -2, "shell_warm_failed");
+    lua_pushinteger(L, (lua_Integer)g_resource.frame_submitted);
+    lua_setfield(L, -2, "frame_submitted");
+    lua_pushinteger(L, (lua_Integer)g_resource.frame_ready);
+    lua_setfield(L, -2, "frame_ready");
+    lua_pushinteger(L, (lua_Integer)g_resource.frame_failed);
+    lua_setfield(L, -2, "frame_failed");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_active);
+    lua_setfield(L, -2, "worker_active");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_thread_count);
+    lua_setfield(L, -2, "worker_threads");
+    lua_pushinteger(L, (lua_Integer)worker_pending);
+    lua_setfield(L, -2, "worker_pending");
+    lua_pushinteger(L, (lua_Integer)worker_done);
+    lua_setfield(L, -2, "worker_done");
     lua_pushinteger(L, (lua_Integer)g_resource.poll_tick);
     lua_setfield(L, -2, "poll_tick");
     lua_pushinteger(L, (lua_Integer)g_resource.native_cursor_id);
@@ -1732,7 +2564,12 @@ static int resource_lua_get_ready(lua_State* L)
     else if (lua_istable(L, 1))
         return resource_lua_query(L);
 
-    if (token && token->native_kind != RESOURCE_NATIVE_NONE && token->status == RESOURCE_STATUS_QUEUED)
+    resource_update_shell_results(8);
+
+    if (token && token->native_kind != RESOURCE_NATIVE_NONE
+        && token->native_kind != RESOURCE_NATIVE_TCP
+        && token->status == RESOURCE_STATUS_QUEUED
+        && !resource_is_shell_type(token->resource_type))
     {
         resource_native_poll_frame(token, 2);
         if (resource_native_is_frame_ready(token))
@@ -1743,6 +2580,12 @@ static int resource_lua_get_ready(lua_State* L)
     {
         lua_pushnil(L);
         return 1;
+    }
+    if (resource_is_tcp_shell(token) && token->result_native)
+    {
+        TCP_UserData* tcp = (TCP_UserData*)token->result_native;
+        token->result_native = NULL;
+        return TCP_NativePushParsed(L, tcp);
     }
     resource_push_token_table(L, token);
     return 1;
@@ -1781,7 +2624,44 @@ static int resource_lua_gc(lua_State* L)
     ResourceEvent* ev = g_resource.events_head;
     ResourceToken* next_token;
     ResourceEvent* next_event;
+    unsigned int i;
     (void)L;
+    if (g_resource.worker_mutex)
+    {
+        SDL_LockMutex(g_resource.worker_mutex);
+        g_resource.worker_stop = 1;
+        if (g_resource.worker_cond)
+        {
+            for (i = 0; i < g_resource.worker_thread_count && i < RESOURCE_WORKER_THREADS; i++)
+                SDL_CondSignal(g_resource.worker_cond);
+        }
+        SDL_UnlockMutex(g_resource.worker_mutex);
+    }
+    for (i = 0; i < g_resource.worker_thread_count && i < RESOURCE_WORKER_THREADS; i++)
+    {
+        if (g_resource.worker_threads[i])
+        {
+            SDL_WaitThread(g_resource.worker_threads[i], NULL);
+            g_resource.worker_threads[i] = NULL;
+        }
+    }
+    g_resource.worker_thread_count = 0;
+    resource_worker_job_list_free(g_resource.worker_head);
+    resource_worker_job_list_free(g_resource.worker_done_head);
+    g_resource.worker_head = NULL;
+    g_resource.worker_tail = NULL;
+    g_resource.worker_done_head = NULL;
+    g_resource.worker_done_tail = NULL;
+    if (g_resource.worker_cond)
+    {
+        SDL_DestroyCond(g_resource.worker_cond);
+        g_resource.worker_cond = NULL;
+    }
+    if (g_resource.worker_mutex)
+    {
+        SDL_DestroyMutex(g_resource.worker_mutex);
+        g_resource.worker_mutex = NULL;
+    }
     while (token)
     {
         next_token = token->next;

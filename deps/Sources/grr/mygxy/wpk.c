@@ -638,7 +638,7 @@ static Sint32 WPK_WpkIdAsS32(Uint32 v)
     return (Sint32)v;
 }
 
-typedef struct
+struct WPK_UserData
 {
     Uint32 number;
     WPK_FileInfo* list;
@@ -666,6 +666,7 @@ typedef struct
     Uint32 zstd_dict_id;
     Uint8* zstd_dict_buf;
     size_t zstd_dict_size;
+    SDL_mutex* native_mutex;
 
     Uint8 idx_is_skpw;
 
@@ -678,7 +679,40 @@ typedef struct
 
     Uint32 skpw_unknown;
     Uint32 skpw_version;
-} WPK_UserData;
+};
+
+static int WPK_InitNativeState(WPK_UserData* ud)
+{
+    if (!ud)
+        return 0;
+    ud->native_mutex = SDL_CreateMutex();
+    return ud->native_mutex != NULL;
+}
+
+static void WPK_DestroyNativeState(WPK_UserData* ud)
+{
+    if (!ud || !ud->native_mutex)
+        return;
+    SDL_DestroyMutex(ud->native_mutex);
+    ud->native_mutex = NULL;
+}
+
+static int WPK_LockNativeState(WPK_UserData* ud)
+{
+    if (!ud || !ud->native_mutex)
+        return 0;
+    SDL_LockMutex(ud->native_mutex);
+    return 1;
+}
+
+static void WPK_UnlockNativeState(WPK_UserData* ud)
+{
+    if (ud && ud->native_mutex)
+        SDL_UnlockMutex(ud->native_mutex);
+}
+
+#define WPK_LOCK_OR_RETURN(ud, ret) do { if (!WPK_LockNativeState(ud)) return (ret); } while (0)
+#define WPK_UNLOCK_RETURN(ud, ret) do { int _wpk_unlock_ret = (ret); WPK_UnlockNativeState(ud); return _wpk_unlock_ret; } while (0)
 
 static int WPK_WriteFileAll(const char* path, const void* data, size_t size)
 {
@@ -1417,6 +1451,9 @@ static void WPK_XorDecrypt_XC(Uint8* buf, Uint32 dwDataSize, Uint32 dwBlockSize)
 
 static void WPK_PushBytesAndSize(lua_State* L, const void* data, size_t size);
 static int WPK_TryPushNeoxDecompress(lua_State* L, WPK_UserData* ud, const Uint8* src, size_t srcSize);
+static int WPK_NativeDecodeBuffer(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi,
+                                  const Uint8* raw, size_t inSize, Uint8** outData, size_t* outSize,
+                                  char* err, size_t errSize);
 
 static int WPK_TryPushAcXcDecoded(lua_State* L, WPK_UserData* ud, const Uint8* in, size_t inSize)
 {
@@ -1487,6 +1524,8 @@ static int WPK_TryPushZstdDecompress(lua_State* L, WPK_UserData* ud, const Uint8
 static int WPK_TryPushLz4fDecompress(lua_State* L, const Uint8* src, size_t srcSize);
 static int WPK_TryPushZlibDecompress(lua_State* L, const Uint8* src, size_t srcSize);
 static int WPK_TryInflateWithWindowBits(lua_State* L, const Uint8* src, size_t srcSize, int windowBits);
+static size_t WPK_ZstdOutputBound(const Uint8* src, size_t srcSize);
+static int WPK_ZstdFrameGetDictID(const Uint8* src, size_t srcSize, Uint32* outId);
 
 static int WPK_TryPushNeoxDecompress(lua_State* L, WPK_UserData* ud, const Uint8* src, size_t srcSize)
 {
@@ -2151,6 +2190,33 @@ static int WPK_DecodedCachePush(lua_State* L, WPK_UserData* ud, Uint32 index, co
     return 1;
 }
 
+static int WPK_DecodedCacheCopy(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi, Uint8** outData, size_t* outSize)
+{
+    WPK_DecodedCacheEntry* e = WPK_DecodedCacheFind(ud, index, fi);
+    if (!outData || !outSize)
+        return 0;
+    *outData = NULL;
+    *outSize = 0;
+    if (!e)
+    {
+        g_wpk_stats.decoded_lru_misses++;
+        return 0;
+    }
+
+    WPK_DecodedCacheTouch(ud, e);
+    g_wpk_stats.decoded_lru_hits++;
+    Uint8* copy = (Uint8*)SDL_malloc(e->size ? e->size : 1);
+    if (!copy)
+        return 0;
+    if (e->size)
+        SDL_memcpy(copy, e->data, e->size);
+    else
+        copy[0] = 0;
+    *outData = copy;
+    *outSize = e->size;
+    return 1;
+}
+
 static void WPK_DecodedCacheStoreBuffer(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi, const void* data, size_t size)
 {
     WPK_DecodedCacheEntry* old;
@@ -2219,6 +2285,488 @@ static void WPK_DecodedCacheStoreResult(lua_State* L, WPK_UserData* ud, Uint32 i
     }
     data = lua_tolstring(L, -2, &size);
     WPK_DecodedCacheStoreBuffer(ud, index, fi, data, size);
+}
+
+static int WPK_NativeCopyBuffer(const Uint8* data, size_t size, Uint8** outData, size_t* outSize)
+{
+    if (!outData || !outSize || (!data && size > 0))
+        return 0;
+    Uint8* copy = (Uint8*)SDL_malloc(size ? size : 1);
+    if (!copy)
+        return 0;
+    if (size)
+        SDL_memcpy(copy, data, size);
+    else
+        copy[0] = 0;
+    *outData = copy;
+    *outSize = size;
+    return 1;
+}
+
+static int WPK_NativeTryInflateWithWindowBits(const Uint8* src, size_t srcSize, int windowBits,
+                                              Uint8** outData, size_t* outSize)
+{
+    const size_t capLimit = (size_t)(256u * 1024u * 1024u);
+
+    if (!src || srcSize == 0 || !outData || !outSize)
+        return 0;
+
+    z_stream strm;
+    SDL_memset(&strm, 0, sizeof(strm));
+    strm.next_in = (Bytef*)src;
+    strm.avail_in = (uInt)((srcSize > (size_t)0xFFFFFFFFu) ? (size_t)0xFFFFFFFFu : srcSize);
+
+    int ret = inflateInit2_(&strm, windowBits, zlibVersion(), (int)sizeof(strm));
+    if (ret != 0)
+        return 0;
+
+    size_t outCap = srcSize * 8;
+    if (outCap < 65536)
+        outCap = 65536;
+    if (outCap > capLimit)
+        outCap = capLimit;
+
+    Uint8* outBuf = (Uint8*)SDL_malloc(outCap);
+    if (!outBuf)
+    {
+        inflateEnd(&strm);
+        return 0;
+    }
+
+    size_t produced = 0;
+    int ok = 0;
+    int safety = 0;
+
+    while (1)
+    {
+        if (produced >= outCap)
+        {
+            if (outCap >= capLimit)
+                break;
+            size_t newCap = outCap * 2;
+            if (newCap > capLimit)
+                newCap = capLimit;
+            Uint8* newBuf = (Uint8*)SDL_realloc(outBuf, newCap);
+            if (!newBuf)
+                break;
+            outBuf = newBuf;
+            outCap = newCap;
+        }
+
+        strm.next_out = (Bytef*)(outBuf + produced);
+        size_t availOut = outCap - produced;
+        if (availOut > (size_t)0xFFFFFFFFu)
+            availOut = (size_t)0xFFFFFFFFu;
+        strm.avail_out = (uInt)availOut;
+
+        ret = inflate(&strm, Z_NO_FLUSH);
+        produced = (size_t)((Uint8*)strm.next_out - outBuf);
+
+        if (ret == Z_STREAM_END)
+        {
+            ok = 1;
+            break;
+        }
+        if (ret != Z_OK && ret != Z_BUF_ERROR)
+            break;
+        if (strm.avail_out != 0 && ret == Z_BUF_ERROR)
+            break;
+        if (++safety > 2048)
+            break;
+    }
+
+    inflateEnd(&strm);
+    if (!ok)
+    {
+        SDL_free(outBuf);
+        return 0;
+    }
+    *outData = outBuf;
+    *outSize = produced;
+    return 1;
+}
+
+static int WPK_NativeTryZlibDecompress(const Uint8* src, size_t srcSize, Uint8** outData, size_t* outSize)
+{
+    if (!WPK_IsZlibHeader(src, srcSize) && !WPK_IsGzipMagic(src, srcSize))
+        return 0;
+    if (WPK_NativeTryInflateWithWindowBits(src, srcSize, 15 + 32, outData, outSize))
+        return 1;
+    return WPK_NativeTryInflateWithWindowBits(src, srcSize, -15, outData, outSize);
+}
+
+static int WPK_NativeTryLz4fDecompress(const Uint8* src, size_t srcSize, Uint8** outData, size_t* outSize)
+{
+    if (!WPK_IsLz4FrameMagic(src, srcSize))
+        return 0;
+
+    const size_t capLimit = (size_t)(256u * 1024u * 1024u);
+    LZ4F_decompressionContext_t dctx = NULL;
+    size_t r = LZ4F_createDecompressionContext(&dctx, LZ4F_getVersion());
+    if ((LZ4F_isError(r) || !dctx))
+    {
+        dctx = NULL;
+        r = LZ4F_createDecompressionContext(&dctx, 100);
+        if (LZ4F_isError(r) || !dctx)
+            return 0;
+    }
+
+    size_t outCap = srcSize * 8;
+    if (outCap < 65536)
+        outCap = 65536;
+    if (outCap > capLimit)
+        outCap = capLimit;
+
+    Uint8* outBuf = (Uint8*)SDL_malloc(outCap);
+    if (!outBuf)
+    {
+        LZ4F_freeDecompressionContext(dctx);
+        return 0;
+    }
+
+    const Uint8* inPtr = src;
+    size_t inRemaining = srcSize;
+    size_t produced = 0;
+    int ok = 0;
+
+    while (1)
+    {
+        if (produced >= outCap)
+        {
+            if (outCap >= capLimit)
+                break;
+            size_t newCap = outCap * 2;
+            if (newCap > capLimit)
+                newCap = capLimit;
+            Uint8* newBuf = (Uint8*)SDL_realloc(outBuf, newCap);
+            if (!newBuf)
+                break;
+            outBuf = newBuf;
+            outCap = newCap;
+        }
+
+        size_t dstSize = outCap - produced;
+        if (dstSize > (size_t)0xFFFFFFFFu)
+            dstSize = (size_t)0xFFFFFFFFu;
+
+        size_t srcChunk = inRemaining;
+        size_t ret = LZ4F_decompress(dctx, outBuf + produced, &dstSize, inPtr, &srcChunk, NULL);
+        if (LZ4F_isError(ret))
+            break;
+        if (srcChunk == 0 && dstSize == 0)
+            break;
+        inPtr += srcChunk;
+        inRemaining -= srcChunk;
+        produced += dstSize;
+        if (ret == 0)
+        {
+            ok = 1;
+            break;
+        }
+        if (inRemaining == 0)
+            break;
+    }
+
+    LZ4F_freeDecompressionContext(dctx);
+    if (!ok)
+    {
+        SDL_free(outBuf);
+        return 0;
+    }
+    *outData = outBuf;
+    *outSize = produced;
+    return 1;
+}
+
+static int WPK_NativeTryZstdDecompress(WPK_UserData* ud, const Uint8* src, size_t srcSize,
+                                       Uint8** outData, size_t* outSize)
+{
+    if (!WPK_IsZstdFrameMagic(src, srcSize))
+        return 0;
+
+    Uint32 wantDictId = 0;
+    if (ud)
+    {
+        wantDictId = (Uint32)ZSTD_getDictID_fromFrame(src, srcSize);
+        int hasDict = wantDictId ? 1 : WPK_ZstdFrameGetDictID(src, srcSize, &wantDictId);
+        if (hasDict)
+        {
+            if (ud->zstd_ddict && ud->zstd_dict_id != wantDictId)
+            {
+                ZSTD_freeDDict(ud->zstd_ddict);
+                ud->zstd_ddict = NULL;
+                ud->zstd_dict_id = 0;
+                if (ud->zstd_dict_buf)
+                {
+                    SDL_free(ud->zstd_dict_buf);
+                    ud->zstd_dict_buf = NULL;
+                    ud->zstd_dict_size = 0;
+                }
+            }
+            WPK_TryLoadZstdDictNearSelf(ud, wantDictId);
+        }
+    }
+
+    const size_t capLimit = (size_t)(256u * 1024u * 1024u);
+    size_t outCap = WPK_ZstdOutputBound(src, srcSize);
+    if (outCap == 0 || outCap > capLimit)
+        outCap = srcSize * 8;
+    if (outCap < 65536)
+        outCap = 65536;
+    if (outCap > capLimit)
+        outCap = capLimit;
+
+    Uint8* tmp = (Uint8*)SDL_malloc(outCap);
+    if (!tmp)
+        return 0;
+
+    if (ud && !ud->zstd_dctx)
+        ud->zstd_dctx = ZSTD_createDCtx();
+    if (ud && ud->zstd_dctx)
+        ZSTD_DCtx_setMaxWindowSize(ud->zstd_dctx, capLimit);
+
+    for (int attempt = 0; attempt < 6; attempt++)
+    {
+        size_t produced = (size_t)-1;
+        if (ud && ud->zstd_dctx)
+        {
+            if (ud->zstd_ddict && (!wantDictId || ud->zstd_dict_id == wantDictId))
+                produced = ZSTD_decompress_usingDDict(ud->zstd_dctx, tmp, outCap, src, srcSize, ud->zstd_ddict);
+            else
+                produced = ZSTD_decompressDCtx(ud->zstd_dctx, tmp, outCap, src, srcSize);
+        }
+        else
+        {
+            produced = ZSTD_decompress(tmp, outCap, src, srcSize);
+        }
+
+        if (!ZSTD_isError(produced) && produced <= outCap)
+        {
+            *outData = tmp;
+            *outSize = produced;
+            return 1;
+        }
+
+        if (outCap >= capLimit)
+            break;
+        size_t newCap = outCap * 2;
+        if (newCap > capLimit)
+            newCap = capLimit;
+        Uint8* newBuf = (Uint8*)SDL_realloc(tmp, newCap);
+        if (!newBuf)
+            break;
+        tmp = newBuf;
+        outCap = newCap;
+    }
+
+    SDL_free(tmp);
+    return 0;
+}
+
+static int WPK_NativeTryNeoxDecompress(WPK_UserData* ud, const Uint8* src, size_t srcSize,
+                                       Uint8** outData, size_t* outSize)
+{
+    if (!src || srcSize < 4)
+        return 0;
+    Uint32 magic = WPK_ReadU32LE(src);
+    if (!WPK_IsNeoxMagicU32(magic))
+        return 0;
+
+    if (magic == 0x4E4F4E45u)
+    {
+        if (srcSize <= 4)
+            return 0;
+        if (srcSize >= 8)
+        {
+            Uint32 maybeSize = WPK_ReadU32LE(src + 4);
+            if (maybeSize == (Uint32)(srcSize - 8))
+                return WPK_NativeCopyBuffer(src + 8, srcSize - 8, outData, outSize);
+        }
+        return WPK_NativeCopyBuffer(src + 4, srcSize - 4, outData, outSize);
+    }
+
+    if (magic == 0x5A535444u)
+    {
+        if (srcSize <= 4)
+            return 0;
+        if (WPK_NativeTryZstdDecompress(ud, src + 4, srcSize - 4, outData, outSize))
+            return 1;
+        if (srcSize > 8)
+            return WPK_NativeTryZstdDecompress(ud, src + 8, srcSize - 8, outData, outSize);
+        return 0;
+    }
+
+    if (magic == 0x4C5A3446u)
+    {
+        if (srcSize <= 4)
+            return 0;
+        if (WPK_NativeTryLz4fDecompress(src + 4, srcSize - 4, outData, outSize))
+            return 1;
+        if (srcSize > 8)
+            return WPK_NativeTryLz4fDecompress(src + 8, srcSize - 8, outData, outSize);
+        return 0;
+    }
+
+    if (magic == 0x5A4C4942u || magic == 0x5A4C4941u)
+    {
+        if (srcSize <= 4)
+            return 0;
+        if (WPK_NativeTryZlibDecompress(src + 4, srcSize - 4, outData, outSize))
+            return 1;
+        if (srcSize > 8)
+            return WPK_NativeTryZlibDecompress(src + 8, srcSize - 8, outData, outSize);
+        return 0;
+    }
+    return 0;
+}
+
+static int WPK_NativeTryAcXcDecoded(WPK_UserData* ud, const Uint8* in, size_t inSize,
+                                    Uint8** outData, size_t* outSize)
+{
+    if (!in || inSize < 10)
+        return 0;
+
+    Uint16 m = WPK_ReadU16LE(in);
+    if (m != 0x4341u && m != 0x4358u && m != 0x434Eu)
+        return 0;
+
+    Uint32 dwDataSize = (Uint32)(inSize - 8);
+    Uint32 factor = (Uint32)in[2];
+    Uint32 dwBlockSize = 0;
+    if (factor > 0)
+        dwBlockSize = (Uint32)128u << (factor - 1u);
+    if (dwBlockSize > dwDataSize)
+        dwBlockSize = dwDataSize;
+
+    Uint32 dwActualSize = dwBlockSize & 0xFFFFFFF0u;
+    Uint8* dec = (Uint8*)SDL_malloc(dwDataSize ? dwDataSize : 1);
+    if (!dec)
+        return 0;
+    if (dwDataSize)
+        SDL_memcpy(dec, in + 8, dwDataSize);
+
+    if (m == 0x4341u || m == 0x434Eu)
+    {
+        Uint8 key[16];
+        if (m == 0x434Eu)
+            WPK_GenerateNcKeyFromHeader(in, inSize, key);
+        else
+            WPK_GenerateAesKeyFromHeader(in, inSize, key);
+        int usedWin = 0;
+#if defined(_WIN32)
+        if (dwActualSize != 0)
+            usedWin = WPK_Aes128DecryptEcb_Windows(dec, dwActualSize, key);
+#endif
+        if (!usedWin)
+        {
+            WPK_Aes128Ctx ctx;
+            WPK_Aes128Init(&ctx, key);
+            for (Uint32 off = 0; off + 16 <= dwActualSize; off += 16)
+                WPK_Aes128DecryptBlock(&ctx, dec + off);
+        }
+        WPK_XorDecrypt_AC(dec, dwDataSize, dwActualSize, dwBlockSize, key);
+    }
+    else
+    {
+        WPK_XorDecrypt_XC(dec, dwDataSize, dwBlockSize);
+    }
+
+    if (m == 0x434Eu)
+        WPK_DeobfuscateNc(dec, dwDataSize, in);
+    WPK_DeobfuscateXor5AReverse64(dec, dwDataSize);
+
+    if (WPK_NativeTryNeoxDecompress(ud, dec, dwDataSize, outData, outSize))
+    {
+        SDL_free(dec);
+        return 1;
+    }
+
+    *outData = dec;
+    *outSize = dwDataSize;
+    return 1;
+}
+
+static int WPK_NativeDecodeBuffer(WPK_UserData* ud, Uint32 index, const WPK_FileInfo* fi,
+                                  const Uint8* raw, size_t inSize, Uint8** outData, size_t* outSize,
+                                  char* err, size_t errSize)
+{
+    if (!raw && inSize > 0)
+    {
+        if (err && errSize) SDL_snprintf(err, errSize, "empty raw buffer");
+        return 0;
+    }
+
+    if (WPK_NativeTryAcXcDecoded(ud, raw, inSize, outData, outSize))
+    {
+        g_wpk_stats.getdata_acxc_hits++;
+        if (ud)
+            WPK_DecodedCacheStoreBuffer(ud, index, fi, *outData, *outSize);
+        return 1;
+    }
+
+    if (WPK_NativeTryNeoxDecompress(ud, raw, inSize, outData, outSize))
+    {
+        g_wpk_stats.getdata_neox_hits++;
+        if (ud)
+            WPK_DecodedCacheStoreBuffer(ud, index, fi, *outData, *outSize);
+        return 1;
+    }
+
+    if (fi && fi->hash && inSize > 4)
+    {
+        Uint8 key[4];
+        key[0] = (Uint8)((fi->hash >> 0) & 0xFF);
+        key[1] = (Uint8)((fi->hash >> 8) & 0xFF);
+        key[2] = (Uint8)((fi->hash >> 16) & 0xFF);
+        key[3] = (Uint8)((fi->hash >> 24) & 0xFF);
+        Uint8* dec = (Uint8*)SDL_malloc(inSize);
+        if (dec)
+        {
+            SDL_memcpy(dec, raw, 4);
+            WPK_XorRepeat4(dec + 4, raw + 4, inSize - 4, key);
+            if (WPK_NativeTryAcXcDecoded(ud, dec, inSize, outData, outSize)
+                || WPK_NativeTryNeoxDecompress(ud, dec, inSize, outData, outSize)
+                || (WPK_LooksLikeCompressed(dec, inSize) && WPK_NativeCopyBuffer(dec, inSize, outData, outSize)))
+            {
+                g_wpk_stats.getdata_hashxor_hits++;
+                if (ud)
+                    WPK_DecodedCacheStoreBuffer(ud, index, fi, *outData, *outSize);
+                SDL_free(dec);
+                return 1;
+            }
+            SDL_free(dec);
+        }
+    }
+
+    if (inSize >= 2)
+    {
+        Uint8* dec = (Uint8*)SDL_malloc(inSize);
+        if (dec)
+        {
+            WPK_XorByte(dec, raw, inSize, 0x5A);
+            if (WPK_NativeTryAcXcDecoded(ud, dec, inSize, outData, outSize)
+                || WPK_NativeTryNeoxDecompress(ud, dec, inSize, outData, outSize)
+                || (WPK_LooksLikeCompressed(dec, inSize) && WPK_NativeCopyBuffer(dec, inSize, outData, outSize)))
+            {
+                g_wpk_stats.getdata_xor5a_hits++;
+                if (ud)
+                    WPK_DecodedCacheStoreBuffer(ud, index, fi, *outData, *outSize);
+                SDL_free(dec);
+                return 1;
+            }
+            SDL_free(dec);
+        }
+    }
+
+    g_wpk_stats.getdata_raw_hits++;
+    if (!WPK_NativeCopyBuffer(raw, inSize, outData, outSize))
+    {
+        if (err && errSize) SDL_snprintf(err, errSize, "out of memory");
+        return 0;
+    }
+    if (ud)
+        WPK_DecodedCacheStoreBuffer(ud, index, fi, *outData, *outSize);
+    return 1;
 }
 
 static int WPK_TryPushZstdDecompress(lua_State* L, WPK_UserData* ud, const Uint8* src, size_t srcSize)
@@ -2555,6 +3103,7 @@ static int WPK_TryPushDecompress(lua_State* L, WPK_UserData* ud, const Uint8* sr
 static int WPK_SetZstdDict(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    Uint32 result_id;
 
     size_t dictSize = 0;
     const char* dict = luaL_checklstring(L, 2, &dictSize);
@@ -2573,6 +3122,12 @@ static int WPK_SetZstdDict(lua_State* L)
         return 0;
     }
 
+    if (!WPK_LockNativeState(ud))
+    {
+        ZSTD_freeDDict(ddict);
+        SDL_free(dictCopy);
+        return 0;
+    }
     if (ud->zstd_ddict)
         ZSTD_freeDDict(ud->zstd_ddict);
     ud->zstd_ddict = ddict;
@@ -2581,8 +3136,10 @@ static int WPK_SetZstdDict(lua_State* L)
         SDL_free(ud->zstd_dict_buf);
     ud->zstd_dict_buf = dictCopy;
     ud->zstd_dict_size = dictSize;
+    result_id = ud->zstd_dict_id;
+    WPK_UnlockNativeState(ud);
 
-    lua_pushinteger(L, (lua_Integer)ud->zstd_dict_id);
+    lua_pushinteger(L, (lua_Integer)result_id);
     return 1;
 }
 
@@ -2590,16 +3147,25 @@ static int WPK_GetData(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     Uint32 i = (Uint32)luaL_checkinteger(L, 2) - 1;
+    const WPK_FileInfo* fi;
+    Uint32 wpkid;
+    Uint8* raw = NULL;
+    size_t inSize = 0;
 
+#define WPK_GETDATA_RETURN(v) do { int _wpk_getdata_ret = (v); WPK_UnlockNativeState(ud); return _wpk_getdata_ret; } while (0)
+
+    if (!WPK_LockNativeState(ud))
+    {
+        g_wpk_stats.getdata_failures++;
+        return 0;
+    }
     if (i < ud->number)
     {
-        const WPK_FileInfo* fi = &ud->list[i];
-        Uint32 wpkid = fi->wpkid;
-        Uint8* raw = NULL;
-        size_t inSize = 0;
+        fi = &ud->list[i];
+        wpkid = fi->wpkid;
 
         if (WPK_DecodedCachePush(L, ud, i, fi))
-            return 2;
+            WPK_GETDATA_RETURN(2);
 
         if (WPK_WpkIdAsS32(wpkid) < 0)
         {
@@ -2609,26 +3175,26 @@ static int WPK_GetData(lua_State* L)
             if (!fp)
             {
                 g_wpk_stats.getdata_failures++;
-                return WPK_PushEmptyBytesAndSize(L);
+                WPK_GETDATA_RETURN(WPK_PushEmptyBytesAndSize(L));
             }
             if (SDL_RWseek(fp, 0, RW_SEEK_END) < 0)
             {
                 SDL_RWclose(fp);
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
             Sint64 sz = SDL_RWtell(fp);
             if (sz < 0)
             {
                 SDL_RWclose(fp);
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
             if (SDL_RWseek(fp, 0, RW_SEEK_SET) < 0)
             {
                 SDL_RWclose(fp);
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
 
             inSize = (size_t)sz;
@@ -2638,7 +3204,7 @@ static int WPK_GetData(lua_State* L)
                 g_wpk_stats.getdata_raw_hits++;
                 WPK_PushEmptyBytesAndSize(L);
                 WPK_DecodedCacheStoreResult(L, ud, i, fi);
-                return 2;
+                WPK_GETDATA_RETURN(2);
             }
 
             raw = (Uint8*)SDL_malloc(inSize);
@@ -2646,7 +3212,7 @@ static int WPK_GetData(lua_State* L)
             {
                 SDL_RWclose(fp);
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
 
             size_t readCount = WPK_RWreadAll(fp, raw, inSize);
@@ -2655,7 +3221,7 @@ static int WPK_GetData(lua_State* L)
             {
                 SDL_free(raw);
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
         }
         else
@@ -2665,14 +3231,14 @@ static int WPK_GetData(lua_State* L)
                 g_wpk_stats.getdata_raw_hits++;
                 WPK_PushEmptyBytesAndSize(L);
                 WPK_DecodedCacheStoreResult(L, ud, i, fi);
-                return 2;
+                WPK_GETDATA_RETURN(2);
             }
 
             SDL_RWops* fp = WPK_OpenWpkFile(ud, wpkid);
             if (!fp)
             {
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
 
             inSize = (size_t)fi->size;
@@ -2702,7 +3268,7 @@ static int WPK_GetData(lua_State* L)
                 if (!raw)
                 {
                     g_wpk_stats.getdata_failures++;
-                    return 0;
+                    WPK_GETDATA_RETURN(0);
                 }
 
                 size_t readCount = WPK_RWreadAll(fp, raw, inSize);
@@ -2724,7 +3290,7 @@ static int WPK_GetData(lua_State* L)
             if (!raw)
             {
                 g_wpk_stats.getdata_failures++;
-                return 0;
+                WPK_GETDATA_RETURN(0);
             }
             if (SDL_RWtell(fp) < 0)
             {
@@ -2741,7 +3307,7 @@ static int WPK_GetData(lua_State* L)
             g_wpk_stats.getdata_acxc_hits++;
             WPK_DecodedCacheStoreResult(L, ud, i, fi);
             SDL_free(raw);
-            return 2;
+            WPK_GETDATA_RETURN(2);
         }
 
         if (WPK_TryPushNeoxDecompress(L, ud, raw, inSize))
@@ -2749,7 +3315,7 @@ static int WPK_GetData(lua_State* L)
             g_wpk_stats.getdata_neox_hits++;
             WPK_DecodedCacheStoreResult(L, ud, i, fi);
             SDL_free(raw);
-            return 2;
+            WPK_GETDATA_RETURN(2);
         }
 
         if (ud->list[i].hash && inSize > 4)
@@ -2772,7 +3338,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
@@ -2781,7 +3347,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 if (WPK_LooksLikeCompressed(dec, inSize))
@@ -2791,7 +3357,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 SDL_free(dec);
@@ -2811,7 +3377,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 if (WPK_TryPushNeoxDecompress(L, ud, dec, inSize))
@@ -2820,7 +3386,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 if (WPK_LooksLikeCompressed(dec, inSize))
@@ -2830,7 +3396,7 @@ static int WPK_GetData(lua_State* L)
                     WPK_DecodedCacheStoreResult(L, ud, i, fi);
                     SDL_free(dec);
                     SDL_free(raw);
-                    return 2;
+                    WPK_GETDATA_RETURN(2);
                 }
 
                 SDL_free(dec);
@@ -2841,37 +3407,187 @@ static int WPK_GetData(lua_State* L)
         WPK_PushBytesAndSize(L, raw, inSize);
         WPK_DecodedCacheStoreResult(L, ud, i, fi);
         SDL_free(raw);
-        return 2;
+        WPK_GETDATA_RETURN(2);
     }
+#undef WPK_GETDATA_RETURN
     g_wpk_stats.getdata_failures++;
+    WPK_UnlockNativeState(ud);
     return 0;
+}
+
+int WPK_NativeReadData(WPK_UserData* ud, unsigned int id, unsigned char** outData, size_t* outSize,
+                       char* err, size_t errSize)
+{
+    Uint32 i;
+    WPK_FileInfo fi_copy;
+    const WPK_FileInfo* fi;
+    Uint32 wpkid;
+    char base_dir[256];
+    char base_name[128];
+    Uint8* raw = NULL;
+    size_t inSize = 0;
+    int ok;
+    size_t readCount;
+    if (outData) *outData = NULL;
+    if (outSize) *outSize = 0;
+    if (!ud || !outData || !outSize)
+    {
+        if (err && errSize) SDL_snprintf(err, errSize, "invalid wpk handle");
+        return 0;
+    }
+    if (!WPK_LockNativeState(ud))
+    {
+        if (err && errSize) SDL_snprintf(err, errSize, "native mutex missing");
+        g_wpk_stats.getdata_failures++;
+        return 0;
+    }
+    if (id == 0 || id > ud->number)
+    {
+        WPK_UnlockNativeState(ud);
+        if (err && errSize) SDL_snprintf(err, errSize, "wpk id out of range");
+        return 0;
+    }
+
+    i = (Uint32)id - 1;
+    fi_copy = ud->list[i];
+    SDL_strlcpy(base_dir, ud->base_dir, sizeof(base_dir));
+    SDL_strlcpy(base_name, ud->base_name, sizeof(base_name));
+    fi = &fi_copy;
+    wpkid = fi->wpkid;
+    if (WPK_DecodedCacheCopy(ud, i, fi, (Uint8**)outData, outSize))
+    {
+        WPK_UnlockNativeState(ud);
+        return 1;
+    }
+    WPK_UnlockNativeState(ud);
+
+    if (WPK_WpkIdAsS32(wpkid) < 0)
+    {
+        char path[512];
+        SDL_snprintf(path, sizeof(path), "%s" WPK_SEP_STR "%s" WPK_SEP_STR "%s", base_dir, base_name, fi->md5);
+        if (!WPK_ReadFileAll(path, &raw, &inSize))
+        {
+            g_wpk_stats.getdata_failures++;
+            if (err && errSize) SDL_snprintf(err, errSize, "read loose file failed");
+            return 0;
+        }
+    }
+    else
+    {
+        char lower_base_name[128];
+        char path[512];
+        const char* openPath;
+        SDL_RWops* fp;
+#if defined(__ANDROID__)
+        char localPath[512];
+#endif
+        if (fi->size == 0)
+        {
+            g_wpk_stats.getdata_raw_hits++;
+            return WPK_NativeCopyBuffer((const Uint8*)"", 0, (Uint8**)outData, outSize);
+        }
+
+        SDL_strlcpy(lower_base_name, base_name, sizeof(lower_base_name));
+        for (size_t n = 0; lower_base_name[n]; n++)
+            lower_base_name[n] = (char)SDL_tolower((unsigned char)lower_base_name[n]);
+
+        SDL_snprintf(path, sizeof(path), "%s" WPK_SEP_STR "%s%u.wpk", base_dir, lower_base_name, (unsigned)wpkid);
+        openPath = path;
+#if defined(__ANDROID__)
+        if (WPK_CopyToInternalStorage(path, localPath))
+            openPath = localPath;
+#endif
+        fp = SDL_RWFromFile(openPath, "rb");
+        if (!fp && wpkid == 0)
+        {
+            SDL_snprintf(path, sizeof(path), "%s" WPK_SEP_STR "%s.wpk", base_dir, lower_base_name);
+            openPath = path;
+#if defined(__ANDROID__)
+            if (WPK_CopyToInternalStorage(path, localPath))
+                openPath = localPath;
+#endif
+            fp = SDL_RWFromFile(openPath, "rb");
+        }
+        if (!fp)
+        {
+            g_wpk_stats.getdata_failures++;
+            if (err && errSize) SDL_snprintf(err, errSize, "open data pack failed");
+            return 0;
+        }
+
+        inSize = (size_t)fi->size;
+        if (SDL_RWseek(fp, (Sint64)fi->offset, RW_SEEK_SET) < 0)
+        {
+            SDL_RWclose(fp);
+            g_wpk_stats.getdata_failures++;
+            if (err && errSize) SDL_snprintf(err, errSize, "seek data pack failed");
+            return 0;
+        }
+
+        raw = (Uint8*)SDL_malloc(inSize ? inSize : 1);
+        if (!raw)
+        {
+            SDL_RWclose(fp);
+            g_wpk_stats.getdata_failures++;
+            if (err && errSize) SDL_snprintf(err, errSize, "out of memory");
+            return 0;
+        }
+        readCount = WPK_RWreadAll(fp, raw, inSize);
+        SDL_RWclose(fp);
+        if (readCount != inSize)
+        {
+            SDL_free(raw);
+            g_wpk_stats.getdata_failures++;
+            if (err && errSize) SDL_snprintf(err, errSize, "read data pack failed");
+            return 0;
+        }
+    }
+
+    if (!WPK_LockNativeState(ud))
+    {
+        SDL_free(raw);
+        if (err && errSize) SDL_snprintf(err, errSize, "native mutex missing");
+        g_wpk_stats.getdata_failures++;
+        return 0;
+    }
+    ok = WPK_NativeDecodeBuffer(ud, i, fi, raw, inSize, (Uint8**)outData, outSize, err, errSize);
+    WPK_UnlockNativeState(ud);
+    SDL_free(raw);
+    if (!ok)
+        g_wpk_stats.getdata_failures++;
+    return ok;
 }
 
 static int WPK_GetInfoByMd5(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     const char* md5 = luaL_checkstring(L, 2);
+    WPK_FileInfo info;
+    int idx;
 
     char md5Lower[33];
     if (!WPK_NormalizeMd5Hex32(md5Lower, md5))
         return 0;
 
-    int idx = WPK_FindByMd5(ud, md5Lower);
+    WPK_LOCK_OR_RETURN(ud, 0);
+    idx = WPK_FindByMd5(ud, md5Lower);
     if (idx < 0)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
+    info = ud->list[idx];
+    WPK_UnlockNativeState(ud);
 
     lua_createtable(L, 0, 8);
     lua_pushinteger(L, (lua_Integer)(idx + 1));
     lua_setfield(L, -2, "id");
-    lua_pushlstring(L, ud->list[idx].md5, 32);
+    lua_pushlstring(L, info.md5, 32);
     lua_setfield(L, -2, "md5");
-    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(ud->list[idx].wpkid));
+    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(info.wpkid));
     lua_setfield(L, -2, "wpkid");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].offset);
+    lua_pushinteger(L, (lua_Integer)info.offset);
     lua_setfield(L, -2, "offset");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].size);
+    lua_pushinteger(L, (lua_Integer)info.size);
     lua_setfield(L, -2, "size");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].file_index);
+    lua_pushinteger(L, (lua_Integer)info.file_index);
     lua_setfield(L, -2, "fileindex");
     lua_pushvalue(L, 1);
     lua_setfield(L, -2, "wpk");
@@ -2885,8 +3601,10 @@ static int WPK_GetInfoByHash(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     Uint32 hash = (Uint32)luaL_checkinteger(L, 2);
+    WPK_FileInfo info;
 
     int idx = -1;
+    WPK_LOCK_OR_RETURN(ud, 0);
     for (Uint32 i = 0; i < ud->number; i++)
     {
         if (ud->list[i].hash == hash)
@@ -2897,20 +3615,22 @@ static int WPK_GetInfoByHash(lua_State* L)
     }
 
     if (idx < 0)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
+    info = ud->list[idx];
+    WPK_UnlockNativeState(ud);
 
     lua_createtable(L, 0, 8);
     lua_pushinteger(L, (lua_Integer)(idx + 1));
     lua_setfield(L, -2, "id");
-    lua_pushlstring(L, ud->list[idx].md5, 32);
+    lua_pushlstring(L, info.md5, 32);
     lua_setfield(L, -2, "md5");
-    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(ud->list[idx].wpkid));
+    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(info.wpkid));
     lua_setfield(L, -2, "wpkid");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].offset);
+    lua_pushinteger(L, (lua_Integer)info.offset);
     lua_setfield(L, -2, "offset");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].size);
+    lua_pushinteger(L, (lua_Integer)info.size);
     lua_setfield(L, -2, "size");
-    lua_pushinteger(L, (lua_Integer)ud->list[idx].file_index);
+    lua_pushinteger(L, (lua_Integer)info.file_index);
     lua_setfield(L, -2, "fileindex");
     lua_pushvalue(L, 1);
     lua_setfield(L, -2, "wpk");
@@ -2924,6 +3644,7 @@ static int WPK_GetList(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
 
+    WPK_LOCK_OR_RETURN(ud, 0);
     if (lua_istable(L, 2))
     {
         lua_pushvalue(L, 2);
@@ -2934,7 +3655,7 @@ static int WPK_GetList(lua_State* L)
         {
             lua_rawgeti(L, LUA_REGISTRYINDEX, ud->list_ref);
             if (lua_istable(L, -1))
-                return 1;
+                WPK_UNLOCK_RETURN(ud, 1);
             lua_pop(L, 1);
             luaL_unref(L, LUA_REGISTRYINDEX, ud->list_ref);
             ud->list_ref = LUA_NOREF;
@@ -2969,6 +3690,7 @@ static int WPK_GetList(lua_State* L)
         lua_pushvalue(L, -1);
         ud->list_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     }
+    WPK_UnlockNativeState(ud);
     return 1;
 }
 
@@ -2992,6 +3714,7 @@ static int WPK_Upsert(lua_State* L)
     if (!WPK_NormalizeMd5Hex32(md5Lower, md5))
         return 0;
 
+    WPK_LOCK_OR_RETURN(ud, 0);
     int idx = WPK_FindByMd5(ud, md5Lower);
     int isNew = 0;
     if (idx < 0)
@@ -2999,7 +3722,7 @@ static int WPK_Upsert(lua_State* L)
         Uint32 newCount = ud->number + 1;
         WPK_FileInfo* p = (WPK_FileInfo*)SDL_realloc(ud->list, sizeof(WPK_FileInfo) * newCount);
         if (!p)
-            return 0;
+            WPK_UNLOCK_RETURN(ud, 0);
         ud->list = p;
         idx = (int)ud->number;
         ud->number = newCount;
@@ -3027,6 +3750,7 @@ static int WPK_Upsert(lua_State* L)
 
     WPK_DecodedCacheClear(ud);
     WPK_InvalidateListCache(L, ud);
+    WPK_UnlockNativeState(ud);
 
     lua_pushinteger(L, (lua_Integer)(idx + 1));
     lua_pushboolean(L, isNew);
@@ -3043,12 +3767,14 @@ static int WPK_SetHash(lua_State* L)
     if (!WPK_NormalizeMd5Hex32(md5Lower, md5))
         return 0;
 
+    WPK_LOCK_OR_RETURN(ud, 0);
     int idx = WPK_FindByMd5(ud, md5Lower);
     if (idx < 0)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
 
     ud->list[idx].hash = hash;
     WPK_DecodedCacheClear(ud);
+    WPK_UnlockNativeState(ud);
     lua_pushinteger(L, (lua_Integer)(idx + 1));
     return 1;
 }
@@ -3246,12 +3972,13 @@ static int WPK_SaveIdx(lua_State* L)
 
     WPK_CloseCachedWriteFiles(ud);
 
+    WPK_LOCK_OR_RETURN(ud, 0);
     if (!ud->idx_is_skpw)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
     if (!outPath || !outPath[0])
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
     if (!ud->list || ud->number == 0)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
 
     const Uint32 recordCount = ud->number;
     const size_t headerStart = 0x20;
@@ -3264,7 +3991,7 @@ static int WPK_SaveIdx(lua_State* L)
 
     Uint8* plain = (Uint8*)SDL_malloc(plainSize);
     if (!plain)
-        return 0;
+        WPK_UNLOCK_RETURN(ud, 0);
     SDL_memset(plain, 0, plainSize);
 
     plain[0] = 'S';
@@ -3304,7 +4031,7 @@ static int WPK_SaveIdx(lua_State* L)
         if (!WPK_HexToBin16(ud->list[i].md5, bin16))
         {
             SDL_free(plain);
-            return 0;
+            WPK_UNLOCK_RETURN(ud, 0);
         }
 
         Uint8* rec = plain + headerStart + (size_t)i * recordSize;
@@ -3348,6 +4075,7 @@ static int WPK_SaveIdx(lua_State* L)
             plain[crcOff + (size_t)i * 4 + 3] = (Uint8)((h >> 24) & 0xFF);
         }
     }
+    WPK_UnlockNativeState(ud);
 
     int ok = 0;
     if (encrypt)
@@ -3463,6 +4191,7 @@ static int WPK_GC(lua_State* L)
         ud->zstd_dict_buf = NULL;
         ud->zstd_dict_size = 0;
     }
+    WPK_DestroyNativeState(ud);
     if (ud->wpk_files)
     {
         for (Uint32 i = 0; i < ud->wpk_files_count; i++)
@@ -3636,6 +4365,11 @@ static int WPK_NEW(lua_State* L)
 
         WPK_UserData* ud = (WPK_UserData*)lua_newuserdata(L, sizeof(WPK_UserData));
         SDL_memset(ud, 0, sizeof(WPK_UserData));
+        if (!WPK_InitNativeState(ud))
+        {
+            SDL_free(data);
+            return 0;
+        }
         ud->idx_is_skpw = 1;
         ud->idx_is_skpe = (Uint8)idxIsSkpe;
         ud->skpw_unknown = unknown;
@@ -3652,6 +4386,7 @@ static int WPK_NEW(lua_State* L)
         {
             ud->number = 0;
             ud->list = NULL;
+            WPK_DestroyNativeState(ud);
             SDL_free(data);
             return 0;
         }
@@ -3713,6 +4448,7 @@ static int WPK_NEW(lua_State* L)
             SDL_free(ud->list);
             ud->list = NULL;
             ud->number = 0;
+            WPK_DestroyNativeState(ud);
             return 0;
         }
         SDL_memset(ud->wpk_files, 0, sizeof(SDL_RWops*) * ud->wpk_files_count);
@@ -3734,6 +4470,11 @@ static int WPK_NEW(lua_State* L)
 
     WPK_UserData* ud = (WPK_UserData*)lua_newuserdata(L, sizeof(WPK_UserData));
     SDL_memset(ud, 0, sizeof(WPK_UserData));
+    if (!WPK_InitNativeState(ud))
+    {
+        SDL_free(data);
+        return 0;
+    }
     ud->idx_is_skpw = 0;
         ud->idx_is_skpe = (Uint8)idxIsSkpe;
     ud->list_ref = LUA_NOREF;
@@ -3748,6 +4489,7 @@ static int WPK_NEW(lua_State* L)
     {
         ud->number = 0;
         ud->list = NULL;
+        WPK_DestroyNativeState(ud);
         SDL_free(data);
         return 0;
     }
@@ -3768,6 +4510,10 @@ static int WPK_NEW(lua_State* L)
         }
         if (md5Off == (size_t)-1)
         {
+            SDL_free(ud->list);
+            ud->list = NULL;
+            ud->number = 0;
+            WPK_DestroyNativeState(ud);
             SDL_free(data);
             return 0;
         }
@@ -3803,6 +4549,7 @@ static int WPK_NEW(lua_State* L)
         SDL_free(ud->list);
         ud->list = NULL;
         ud->number = 0;
+        WPK_DestroyNativeState(ud);
         return 0;
     }
     SDL_memset(ud->wpk_files, 0, sizeof(SDL_RWops*) * ud->wpk_files_count);

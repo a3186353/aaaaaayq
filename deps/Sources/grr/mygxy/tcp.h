@@ -9,8 +9,6 @@
 #pragma once
 #include "lua_proxy.h"
 #include "sdl_proxy.h"
-#include "lua_proxy.h"
-#include "sdl_proxy.h"
 
 #define TCP_MT_XY2 "xy2_tcp"
 #define TCP_MT_XYQ "xyq_tcp"
@@ -162,7 +160,28 @@ typedef struct
     Uint32 async_active_pal_version;
 } TCP_UserData;
 
+typedef struct
+{
+    SDL_Surface* surface;
+    Uint32 frame_id;
+    Uint32 pal_version;
+    Uint32 w;
+    Uint32 h;
+    Sint32 x;
+    Sint32 y;
+} TCP_NativeFrameData;
+
 int TCP_Create(lua_State* L, Uint8* data, size_t size);
+TCP_UserData* TCP_NativeCreateFromData(const Uint8* data, size_t size, char* err, size_t errSize);
+void TCP_NativeFree(TCP_UserData* ud);
+int TCP_NativePushParsed(lua_State* L, TCP_UserData* ud);
+int TCP_NativeWarmFrame(TCP_UserData* ud, Uint32 group, Uint32 frame, char* err, size_t errSize);
+int TCP_NativeDecodeGroupFrame(TCP_UserData* ud, Uint32 group, Uint32 frame,
+                               TCP_NativeFrameData* out, char* err, size_t errSize);
+int TCP_NativeDecodeFrameWithPalette(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                     Uint32 pal_version, TCP_NativeFrameData* out, char* err, size_t errSize);
+int TCP_NativeStoreDecodedFrame(TCP_UserData* ud, TCP_NativeFrameData* frame);
+void TCP_NativeClearFrameData(TCP_NativeFrameData* frame);
 int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status);
 int TCP_NativePollAsync(TCP_UserData* ud, Uint32 limit);
 int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id);

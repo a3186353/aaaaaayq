@@ -61,6 +61,10 @@ static int TCP_AsyncPollDecoded(TCP_UserData* ud, Uint32 limit);
 static SDL_Surface* TCP_DecodeFrameSurface(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
                                            Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY);
 static int TCP_GC(lua_State* L);
+static void TCP_Reset(TCP_UserData* ud);
+static void TCP_PushInfo(lua_State* L, const TCP_UserData* ud);
+static Uint32 TCP_FramesPerGroup(const TCP_UserData* ud);
+static int TCP_FrameIndexFromGroup(const TCP_UserData* ud, Uint32 group, Uint32 frame, Uint32* out_id);
 
 static const luaL_Reg TCP_FUNCS[] = {
     {"__gc", TCP_GC},
@@ -1867,6 +1871,132 @@ static SDL_Surface* TCP_DecodeFrameSurface(TCP_UserData* ud, Uint32 id, const Ui
     return NULL;
 }
 
+static Uint32 TCP_FramesPerGroup(const TCP_UserData* ud)
+{
+    if (!ud || !ud->data)
+        return 0;
+    if (ud->fmt == TCP_FMT_PS && ud->len >= sizeof(SP_HEAD))
+        return ((const SP_HEAD*)ud->data)->frame;
+    if (ud->fmt == TCP_FMT_PR && ud->len >= sizeof(RP_HEAD))
+        return ((const RP_HEAD*)ud->data)->frame;
+    if (ud->fmt == TCP_FMT_PT && ud->len >= sizeof(TP_HEAD))
+        return ((const TP_HEAD*)ud->data)->frame;
+    return ud->number;
+}
+
+static int TCP_FrameIndexFromGroup(const TCP_UserData* ud, Uint32 group, Uint32 frame, Uint32* out_id)
+{
+    Uint32 per_group;
+    Uint64 id64;
+    if (out_id)
+        *out_id = 0;
+    if (!ud || !out_id || ud->number == 0)
+        return 0;
+    if (group == 0)
+        group = 1;
+    if (frame == 0)
+        frame = 1;
+    per_group = TCP_FramesPerGroup(ud);
+    if (per_group == 0)
+        per_group = ud->number;
+    id64 = (Uint64)(group - 1) * (Uint64)per_group + (Uint64)(frame - 1);
+    if (id64 >= (Uint64)ud->number)
+        return 0;
+    *out_id = (Uint32)id64;
+    return 1;
+}
+
+int TCP_NativeWarmFrame(TCP_UserData* ud, Uint32 group, Uint32 frame, char* err, size_t errSize)
+{
+    TCP_NativeFrameData decoded;
+    if (!TCP_NativeDecodeGroupFrame(ud, group, frame, &decoded, err, errSize))
+        return 0;
+    return TCP_NativeStoreDecodedFrame(ud, &decoded);
+}
+
+void TCP_NativeClearFrameData(TCP_NativeFrameData* frame)
+{
+    if (!frame)
+        return;
+    if (frame->surface)
+    {
+        SDL_FreeSurface(frame->surface);
+        frame->surface = NULL;
+    }
+    frame->frame_id = 0;
+    frame->pal_version = 0;
+    frame->w = 0;
+    frame->h = 0;
+    frame->x = 0;
+    frame->y = 0;
+}
+
+int TCP_NativeDecodeFrameWithPalette(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                     Uint32 pal_version, TCP_NativeFrameData* out, char* err, size_t errSize)
+{
+    SDL_Surface* sf;
+    Uint32 w;
+    Uint32 h;
+    Sint32 x;
+    Sint32 y;
+    if (out)
+        SDL_memset(out, 0, sizeof(*out));
+    if (!ud || !out || id >= ud->number)
+    {
+        if (err && errSize)
+            SDL_snprintf(err, errSize, "frame index out of range");
+        return 0;
+    }
+    w = 0;
+    h = 0;
+    x = 0;
+    y = 0;
+    sf = TCP_DecodeFrameSurface(ud, id, pal, pal_count, &w, &h, &x, &y);
+    if (!sf)
+    {
+        if (err && errSize)
+            SDL_snprintf(err, errSize, "frame decode failed");
+        return 0;
+    }
+    out->surface = sf;
+    out->frame_id = id;
+    out->pal_version = pal_version;
+    out->w = w;
+    out->h = h;
+    out->x = x;
+    out->y = y;
+    return 1;
+}
+
+int TCP_NativeDecodeGroupFrame(TCP_UserData* ud, Uint32 group, Uint32 frame,
+                               TCP_NativeFrameData* out, char* err, size_t errSize)
+{
+    Uint32 id;
+    Uint32 pal_count;
+    const Uint32* pal;
+    if (!TCP_FrameIndexFromGroup(ud, group, frame, &id))
+    {
+        if (err && errSize)
+            SDL_snprintf(err, errSize, "frame out of range");
+        return 0;
+    }
+    pal_count = ud->pal_count ? ud->pal_count : 256;
+    pal = ud->pal_dyn ? ud->pal_dyn : ud->pal;
+    return TCP_NativeDecodeFrameWithPalette(ud, id, pal, pal_count, ud->pal_version, out, err, errSize);
+}
+
+int TCP_NativeStoreDecodedFrame(TCP_UserData* ud, TCP_NativeFrameData* frame)
+{
+    if (!ud || !frame)
+        return 0;
+    if (!frame->surface)
+        return 1;
+    TCP_CacheInsert(ud, frame->frame_id, frame->pal_version,
+                    frame->surface, frame->w, frame->h, frame->x, frame->y);
+    frame->surface = NULL;
+    return 1;
+}
+
 static int TCP_RequestFrame(lua_State* L)
 {
     TCP_UserData* ud = TCP_Check(L, 1);
@@ -1963,7 +2093,6 @@ int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id)
 {
     if (!ud || id >= ud->number)
         return 0;
-    TCP_AsyncPollDecoded(ud, 4);
     return TCP_CacheLookup(ud, id) != NULL;
 }
 
@@ -2228,6 +2357,77 @@ static int TCP_SetPal(lua_State* L)
     return 0;
 }
 
+static void TCP_PushInfo(lua_State* L, const TCP_UserData* ud)
+{
+    lua_createtable(L, 0, 10);
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->fmt : 0));
+    lua_setfield(L, -2, "flag");
+    if (ud)
+    {
+        char type[3];
+        type[0] = (char)(ud->fmt & 0xFF);
+        type[1] = (char)((ud->fmt >> 8) & 0xFF);
+        type[2] = '\0';
+        lua_pushstring(L, type);
+        lua_setfield(L, -2, "type");
+    }
+    lua_createtable(L, 0, 0);
+    lua_setfield(L, -2, "dts");
+    lua_pushinteger(L, (lua_Integer)(ud ? ud->number : 0));
+    lua_setfield(L, -2, "number");
+    if (ud)
+    {
+        Uint32 group = 1;
+        Uint32 frame = ud->number;
+        Uint32 width = 0, height = 0;
+        Sint32 x = 0, y = 0;
+        if (ud->fmt == TCP_FMT_PS && ud->data && ud->len >= sizeof(SP_HEAD))
+        {
+            SP_HEAD* head = (SP_HEAD*)ud->data;
+            group = head->group;
+            frame = head->frame;
+            width = head->width;
+            height = head->height;
+            x = head->x;
+            y = head->y;
+        }
+        else if (ud->fmt == TCP_FMT_PR && ud->data && ud->len >= sizeof(RP_HEAD))
+        {
+            RP_HEAD* head = (RP_HEAD*)ud->data;
+            group = head->group;
+            frame = head->frame;
+            width = head->width;
+            height = head->height;
+            x = head->x;
+            y = head->y;
+        }
+        else if (ud->fmt == TCP_FMT_PT && ud->data && ud->len >= sizeof(TP_HEAD))
+        {
+            TP_HEAD* head = (TP_HEAD*)ud->data;
+            group = head->group;
+            frame = head->frame;
+            width = head->width;
+            height = head->height;
+            x = head->x;
+            y = head->y;
+            lua_pushinteger(L, (lua_Integer)ud->pal_count);
+            lua_setfield(L, -2, "pal_count");
+        }
+        lua_pushinteger(L, (lua_Integer)group);
+        lua_setfield(L, -2, "group");
+        lua_pushinteger(L, (lua_Integer)frame);
+        lua_setfield(L, -2, "frame");
+        lua_pushinteger(L, (lua_Integer)width);
+        lua_setfield(L, -2, "width");
+        lua_pushinteger(L, (lua_Integer)height);
+        lua_setfield(L, -2, "height");
+        lua_pushinteger(L, (lua_Integer)x);
+        lua_setfield(L, -2, "x");
+        lua_pushinteger(L, (lua_Integer)y);
+        lua_setfield(L, -2, "y");
+    }
+}
+
 static int TCP_NEW(lua_State* L)
 {
     size_t len;
@@ -2266,6 +2466,279 @@ static void TCP_Reset(TCP_UserData* ud)
     ud->tplist = NULL;
     ud->len = 0;
     ud->number = 0;
+}
+
+static int TCP_SetErr(char* err, size_t errSize, const char* msg)
+{
+    if (err && errSize)
+        SDL_snprintf(err, errSize, "%s", msg ? msg : "tcp parse failed");
+    return 0;
+}
+
+void TCP_NativeFree(TCP_UserData* ud)
+{
+    if (!ud)
+        return;
+    TCP_Reset(ud);
+    SDL_free(ud);
+}
+
+TCP_UserData* TCP_NativeCreateFromData(const Uint8* data, size_t len, char* err, size_t errSize)
+{
+    SP_HEAD* head;
+    TCP_UserData* ud;
+    if (!data || len < 16)
+    {
+        TCP_SetErr(err, errSize, "tcp data too small");
+        return NULL;
+    }
+    if (len > 0xFFFFFFFFu)
+    {
+        TCP_SetErr(err, errSize, "tcp data too large");
+        return NULL;
+    }
+
+    head = (SP_HEAD*)data;
+    if (head->flag != TCP_FMT_PS && head->flag != TCP_FMT_PR && head->flag != TCP_FMT_PT)
+    {
+        TCP_SetErr(err, errSize, "invalid tcp type");
+        return NULL;
+    }
+
+    ud = (TCP_UserData*)SDL_calloc(1, sizeof(TCP_UserData));
+    if (!ud)
+    {
+        TCP_SetErr(err, errSize, "out of memory");
+        return NULL;
+    }
+
+    ud->data = (Uint8*)SDL_malloc(len);
+    if (!ud->data)
+    {
+        TCP_NativeFree(ud);
+        TCP_SetErr(err, errSize, "out of memory");
+        return NULL;
+    }
+    ud->len = (Uint32)len;
+    SDL_memcpy(ud->data, data, len);
+    data = ud->data;
+    head = (SP_HEAD*)data;
+    ud->fmt = head->flag;
+    ud->pal_dyn = ud->pal;
+    ud->pal_count = 256;
+    ud->sp_rgb565 = 1;
+    ud->pal_version = 0;
+    ud->cache_cap = TCP_CACHE_CAP_DEFAULT;
+    ud->cache = (TCP_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(TCP_CacheEntry));
+    if (!ud->cache)
+    {
+        TCP_NativeFree(ud);
+        TCP_SetErr(err, errSize, "out of memory");
+        return NULL;
+    }
+
+    if (head->flag == TCP_FMT_PS)
+    {
+        Uint64 number64 = (Uint64)head->group * (Uint64)head->frame;
+        if (number64 > 0xFFFFFFFFu)
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "tcp frame count overflow");
+            return NULL;
+        }
+
+        if (head->len == 0x800F)
+        {
+            Uint32 HLen = ud->data[2] + 4;
+            if (HLen < 6 || HLen >= ud->len)
+            {
+                TCP_NativeFree(ud);
+                TCP_SetErr(err, errSize, "invalid SP header");
+                return NULL;
+            }
+
+            Uint8 colorlen = *(ud->data + HLen - 2);
+            Uint32 palCount = colorlen ? (Uint32)colorlen : 256U;
+            Uint64 need = (Uint64)HLen + (Uint64)palCount * 3ULL + (Uint64)number64 * 4ULL;
+            if (need > (Uint64)ud->len)
+            {
+                TCP_NativeFree(ud);
+                TCP_SetErr(err, errSize, "invalid SP palette");
+                return NULL;
+            }
+
+            Uint8* pal24 = ud->data + HLen;
+            Uint8* fl = pal24 + palCount * 3;
+            ud->pal_dyn = (Uint32*)SDL_malloc(sizeof(Uint32) * palCount);
+            if (!ud->pal_dyn)
+            {
+                TCP_NativeFree(ud);
+                TCP_SetErr(err, errSize, "out of memory");
+                return NULL;
+            }
+            ud->pal_count = palCount;
+            ud->sp_rgb565 = 0;
+
+            for (Uint32 i = 0; i < palCount; i++)
+            {
+                Uint8 b = pal24[i * 3 + 0];
+                Uint8 g = pal24[i * 3 + 1];
+                Uint8 r = pal24[i * 3 + 2];
+                ud->pal_dyn[i] = (255U << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+                if (i < 256)
+                    ud->pal[i] = ud->pal_dyn[i];
+            }
+            for (Uint32 i = palCount; i < 256; i++)
+                ud->pal[i] = 0;
+
+            ud->splist = (Uint32*)fl;
+            ud->number = (Uint32)number64;
+            for (Uint32 i = 0; i < ud->number; i++)
+            {
+                if (ud->splist[i])
+                    ud->splist[i] += HLen;
+            }
+        }
+        else
+        {
+            Uint32 headerPlus = (Uint32)head->len + 4;
+            if (headerPlus < 16)
+            {
+                TCP_NativeFree(ud);
+                TCP_SetErr(err, errSize, "invalid SP header");
+                return NULL;
+            }
+            Uint64 need = (Uint64)headerPlus + 512ULL + (Uint64)number64 * 4ULL;
+            if (need > (Uint64)ud->len)
+            {
+                TCP_NativeFree(ud);
+                TCP_SetErr(err, errSize, "invalid SP frame table");
+                return NULL;
+            }
+
+            Uint8* p = ud->data + headerPlus;
+            Uint16* pal16 = (Uint16*)p;
+            for (Uint32 i = 0; i < 256; i++)
+                ud->pal[i] = RGB565to888(pal16[i], 255);
+            p += 512;
+
+            ud->splist = (Uint32*)p;
+            ud->number = (Uint32)number64;
+            for (Uint32 i = 0; i < ud->number; i++)
+            {
+                if (ud->splist[i])
+                    ud->splist[i] += (head->len + 4);
+            }
+        }
+    }
+    else if (head->flag == TCP_FMT_PR)
+    {
+        if (ud->len < sizeof(RP_HEAD))
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "invalid PR header");
+            return NULL;
+        }
+        RP_HEAD* rphead = (RP_HEAD*)data;
+        Uint64 number = (Uint64)rphead->number;
+        Uint64 need = (Uint64)sizeof(RP_HEAD) + number * (Uint64)sizeof(RP_INFO) + 4ULL + number * (Uint64)sizeof(RP_LIST);
+        if (need > (Uint64)ud->len)
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "invalid PR frame table");
+            return NULL;
+        }
+        data += sizeof(RP_HEAD);
+        ud->rpinfo = (RP_INFO*)data;
+        data += rphead->number * sizeof(RP_INFO) + 4;
+        ud->rplist = (RP_LIST*)data;
+        ud->number = rphead->number;
+    }
+    else if (head->flag == TCP_FMT_PT)
+    {
+        if (ud->len < sizeof(TP_HEAD))
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "invalid PT header");
+            return NULL;
+        }
+        TP_HEAD* tphead = (TP_HEAD*)data;
+        Uint64 number64 = (Uint64)tphead->group * (Uint64)tphead->frame;
+        if (number64 > 0xFFFFFFFFu)
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "tcp frame count overflow");
+            return NULL;
+        }
+        ud->number = (Uint32)number64;
+        ud->fmt = tphead->flag;
+        ud->sp_rgb565 = 0;
+
+        Uint32 palCount = tphead->palette_len;
+        if (!palCount)
+            palCount = 256;
+        Uint64 need = (Uint64)sizeof(TP_HEAD) + (Uint64)palCount * 4ULL + (Uint64)ud->number * 4ULL;
+        if (need > (Uint64)ud->len)
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "invalid PT frame table");
+            return NULL;
+        }
+        ud->pal_dyn = (Uint32*)SDL_malloc(sizeof(Uint32) * palCount);
+        if (!ud->pal_dyn)
+        {
+            TCP_NativeFree(ud);
+            TCP_SetErr(err, errSize, "out of memory");
+            return NULL;
+        }
+        ud->pal_count = palCount;
+
+        Uint8* palbgra = ud->data + sizeof(TP_HEAD);
+        for (Uint32 i = 0; i < palCount; i++)
+        {
+            Uint8 b = palbgra[i * 4 + 0];
+            Uint8 g = palbgra[i * 4 + 1];
+            Uint8 r = palbgra[i * 4 + 2];
+            Uint8 a = palbgra[i * 4 + 3];
+            if (a && a < 255)
+            {
+                Uint32 ha = (Uint32)a / 2u;
+                Uint32 rr = ((Uint32)r * 255u + ha) / (Uint32)a;
+                Uint32 gg = ((Uint32)g * 255u + ha) / (Uint32)a;
+                Uint32 bb = ((Uint32)b * 255u + ha) / (Uint32)a;
+                if (rr > 255u) rr = 255u;
+                if (gg > 255u) gg = 255u;
+                if (bb > 255u) bb = 255u;
+                r = (Uint8)rr;
+                g = (Uint8)gg;
+                b = (Uint8)bb;
+            }
+            ud->pal_dyn[i] = ((Uint32)a << 24) | ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+            if (i < 256)
+                ud->pal[i] = ud->pal_dyn[i];
+        }
+        for (Uint32 i = palCount; i < 256; i++)
+            ud->pal[i] = 0;
+        ud->tplist = (Uint32*)(ud->data + sizeof(TP_HEAD) + palCount * 4);
+    }
+
+    return ud;
+}
+
+int TCP_NativePushParsed(lua_State* L, TCP_UserData* src)
+{
+    TCP_UserData* ud;
+    if (!L || !src)
+        return 0;
+    TCP_RegisterMetatableAlias(L, TCP_MT_XYQ, TCP_MT_XY2, TCP_FUNCS);
+    ud = (TCP_UserData*)lua_newuserdata(L, sizeof(TCP_UserData));
+    SDL_memcpy(ud, src, sizeof(TCP_UserData));
+    if (src->pal_dyn == src->pal)
+        ud->pal_dyn = ud->pal;
+    SDL_free(src);
+    luaL_setmetatable(L, TCP_MT_XY2);
+    TCP_PushInfo(L, ud);
+    return 2;
 }
 
 int TCP_Create(lua_State* L, Uint8* data, size_t len)
