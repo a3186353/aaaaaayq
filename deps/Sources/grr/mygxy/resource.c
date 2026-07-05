@@ -44,6 +44,7 @@
 #define RESOURCE_PREHEAT_AGING_TICKS 40
 #define RESOURCE_DEFAULT_NATIVE_RETRIES 600
 #define RESOURCE_WORKER_THREADS 3
+#define RESOURCE_DEFAULT_WORKER_THREADS 3
 #define RESOURCE_RESULT_TTL_TICKS 600
 
 typedef enum ResourceNativeKind
@@ -199,8 +200,11 @@ typedef struct ResourceState
     unsigned int frame_ready;
     unsigned int frame_failed;
     unsigned int tokens_freed;
+    unsigned int worker_configured;
     unsigned int worker_active;
     unsigned int worker_thread_count;
+    unsigned int worker_jobs_started;
+    unsigned int worker_cancelled;
     unsigned int worker_poll_tick;
     unsigned int poll_tick;
     unsigned int native_cursor_id;
@@ -742,6 +746,16 @@ static int resource_store_native_success(ResourceToken* token, void* native)
 static unsigned int resource_callback_budget(void)
 {
     return g_resource.callback_budget ? g_resource.callback_budget : RESOURCE_DEFAULT_CALLBACK_BUDGET;
+}
+
+static unsigned int resource_worker_target_threads(void)
+{
+    unsigned int n = g_resource.worker_configured ? g_resource.worker_configured : RESOURCE_DEFAULT_WORKER_THREADS;
+    if (n < 1)
+        n = 1;
+    if (n > RESOURCE_WORKER_THREADS)
+        n = RESOURCE_WORKER_THREADS;
+    return n;
 }
 
 static unsigned int resource_dispatch_pending_callbacks(lua_State* L)
@@ -1312,6 +1326,7 @@ static unsigned int resource_worker_cancel_scope(const char* scope)
     g_resource.worker_head = keep_head;
     g_resource.worker_tail = keep_tail;
     SDL_UnlockMutex(g_resource.worker_mutex);
+    g_resource.worker_cancelled += dropped;
     resource_worker_job_list_free(drop_head);
     return dropped;
 }
@@ -1337,7 +1352,10 @@ static int resource_worker_loop(void* ptr)
         }
         job = resource_worker_pop_locked();
         if (job)
+        {
             g_resource.worker_active++;
+            g_resource.worker_jobs_started++;
+        }
         SDL_UnlockMutex(g_resource.worker_mutex);
 
         if (!job)
@@ -1448,7 +1466,7 @@ static int resource_worker_submit(ResourceToken* token)
             return 0;
     }
     started = g_resource.worker_thread_count;
-    while (started < RESOURCE_WORKER_THREADS)
+    while (started < resource_worker_target_threads())
     {
         char name[32];
         SDL_snprintf(name, sizeof(name), "resource_worker_%u", started + 1);
@@ -1717,7 +1735,7 @@ static void resource_update_downloads(lua_State* L)
     resource_dispatch_pending_callbacks(L);
 }
 
-static void resource_update_all(lua_State* L, unsigned int native_ops)
+static void resource_update_all(lua_State* L, unsigned int native_ops, unsigned int worker_done_ops)
 {
     g_resource.poll_tick++;
     if (g_resource.worker_mutex)
@@ -1726,7 +1744,7 @@ static void resource_update_all(lua_State* L, unsigned int native_ops)
         g_resource.worker_poll_tick = g_resource.poll_tick;
         SDL_UnlockMutex(g_resource.worker_mutex);
     }
-    resource_update_shell_results(native_ops);
+    resource_update_shell_results(worker_done_ops ? worker_done_ops : native_ops);
     resource_update_native_frames(native_ops);
     resource_update_downloads(L);
     resource_reap_finished(L);
@@ -2484,6 +2502,7 @@ static int resource_lua_poll(lua_State* L)
     ResourceEvent* ev;
     ResourceEvent* next;
     unsigned int max_ops = 8;
+    unsigned int worker_done_ops = 0;
     if (lua_isnumber(L, 3))
         max_ops = (unsigned int)lua_tointeger(L, 3);
     else if (lua_isnumber(L, 2))
@@ -2492,7 +2511,13 @@ static int resource_lua_poll(lua_State* L)
         if (n >= 1)
             max_ops = (unsigned int)n;
     }
-    resource_update_all(L, max_ops);
+    if (lua_isnumber(L, 2))
+    {
+        lua_Number n = lua_tonumber(L, 2);
+        if (n >= 1)
+            worker_done_ops = (unsigned int)n;
+    }
+    resource_update_all(L, max_ops, worker_done_ops);
     ev = g_resource.events_head;
     lua_newtable(L);
     while (ev)
@@ -2715,8 +2740,14 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "tokens_terminal");
     lua_pushinteger(L, (lua_Integer)g_resource.tokens_freed);
     lua_setfield(L, -2, "tokens_freed");
+    lua_pushinteger(L, (lua_Integer)g_resource.tokens_freed);
+    lua_setfield(L, -2, "token_reaped");
     lua_pushinteger(L, (lua_Integer)events_pending);
     lua_setfield(L, -2, "events_pending");
+    lua_pushinteger(L, (lua_Integer)resource_worker_target_threads());
+    lua_setfield(L, -2, "worker_configured");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_jobs_started);
+    lua_setfield(L, -2, "worker_started");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_active);
     lua_setfield(L, -2, "worker_active");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_thread_count);
@@ -2725,6 +2756,18 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "worker_pending");
     lua_pushinteger(L, (lua_Integer)worker_done);
     lua_setfield(L, -2, "worker_done");
+    lua_pushinteger(L, (lua_Integer)worker_done);
+    lua_setfield(L, -2, "worker_done_pending");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_cancelled);
+    lua_setfield(L, -2, "worker_cancelled");
+    lua_pushinteger(L, (lua_Integer)(g_resource.worker_active + worker_pending + worker_done));
+    lua_setfield(L, -2, "token_held_by_worker");
+    lua_pushinteger(L, (lua_Integer)active);
+    lua_setfield(L, -2, "download_active");
+    lua_pushinteger(L, (lua_Integer)low_active);
+    lua_setfield(L, -2, "download_low_active");
+    lua_pushinteger(L, (lua_Integer)(g_resource.queued_high + g_resource.queued_low));
+    lua_setfield(L, -2, "download_pending");
     lua_pushinteger(L, (lua_Integer)g_resource.poll_tick);
     lua_setfield(L, -2, "poll_tick");
     lua_pushinteger(L, (lua_Integer)g_resource.native_cursor_id);
@@ -2755,7 +2798,7 @@ static int resource_lua_update(lua_State* L)
         if (n >= 1)
             max_ops = (unsigned int)n;
     }
-    resource_update_all(L, max_ops);
+    resource_update_all(L, max_ops, max_ops);
     resource_drop_update_events();
     resource_reap_finished(L);
     lua_pushboolean(L, 1);
@@ -2817,20 +2860,26 @@ static int resource_lua_config(lua_State* L)
             resource_table_int(L, 1, "\xe4\xbd\x8e\xe4\xbc\x98\xe5\x85\x88\xe7\xba\xa7\xe6\x9c\x80\xe5\xa4\xa7\xe6\xb4\xbb\xe8\xb7\x83", (int)resource_low_active_max()));
         int callback_budget = resource_table_int(L, 1, "callback_budget",
             resource_table_int(L, 1, "\xe5\x9b\x9e\xe8\xb0\x83\xe9\xa2\x84\xe7\xae\x97", (int)resource_callback_budget()));
+        int worker_threads = resource_table_int(L, 1, "worker_threads",
+            resource_table_int(L, 1, "\xe8\xb5\x84\xe6\xba\x90Worker\xe7\xba\xbf\xe7\xa8\x8b", (int)resource_worker_target_threads()));
         if (max_active > 0)
-            g_resource.max_active = (unsigned int)max_active;
+            g_resource.max_active = (unsigned int)(max_active > 64 ? 64 : max_active);
         if (low_active >= 0)
-            g_resource.low_active_max = (unsigned int)low_active;
+            g_resource.low_active_max = (unsigned int)(low_active > 64 ? 64 : low_active);
         if (callback_budget > 0)
-            g_resource.callback_budget = (unsigned int)callback_budget;
+            g_resource.callback_budget = (unsigned int)(callback_budget > 64 ? 64 : callback_budget);
+        if (worker_threads > 0)
+            g_resource.worker_configured = (unsigned int)(worker_threads > RESOURCE_WORKER_THREADS ? RESOURCE_WORKER_THREADS : worker_threads);
     }
-    lua_createtable(L, 0, 3);
+    lua_createtable(L, 0, 4);
     lua_pushinteger(L, (lua_Integer)resource_max_active());
     lua_setfield(L, -2, "max_active");
     lua_pushinteger(L, (lua_Integer)resource_low_active_max());
     lua_setfield(L, -2, "low_active_max");
     lua_pushinteger(L, (lua_Integer)resource_callback_budget());
     lua_setfield(L, -2, "callback_budget");
+    lua_pushinteger(L, (lua_Integer)resource_worker_target_threads());
+    lua_setfield(L, -2, "worker_threads");
     return 1;
 }
 
