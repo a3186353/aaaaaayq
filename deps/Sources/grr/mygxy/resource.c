@@ -44,6 +44,7 @@
 #define RESOURCE_PREHEAT_AGING_TICKS 40
 #define RESOURCE_DEFAULT_NATIVE_RETRIES 600
 #define RESOURCE_WORKER_THREADS 3
+#define RESOURCE_RESULT_TTL_TICKS 600
 
 typedef enum ResourceNativeKind
 {
@@ -100,6 +101,8 @@ typedef struct ResourceToken
     Uint32 shell_group;
     Uint32 shell_frame;
     unsigned int created_tick;
+    unsigned int terminal_tick;
+    unsigned int event_pending;
     unsigned int retry_tick;
     unsigned int submit_attempts;
     unsigned int queue_full_count;
@@ -132,6 +135,7 @@ typedef struct ResourceCallback
 typedef struct ResourceEvent
 {
     unsigned int token_id;
+    ResourceToken* token;
     ResourceStatus status;
     char* resource_id;
     char* message;
@@ -194,6 +198,7 @@ typedef struct ResourceState
     unsigned int frame_submitted;
     unsigned int frame_ready;
     unsigned int frame_failed;
+    unsigned int tokens_freed;
     unsigned int worker_active;
     unsigned int worker_thread_count;
     unsigned int worker_poll_tick;
@@ -364,12 +369,76 @@ static void resource_free_token(lua_State* L, ResourceToken* token)
     free(token);
 }
 
-static void resource_push_event(unsigned int token_id, ResourceStatus status, const char* resource_id, const char* message)
+static int resource_token_can_reap(const ResourceToken* token)
+{
+    if (!token || !resource_is_terminal(token->status))
+        return 0;
+    if (token->download_ref != LUA_NOREF)
+        return 0;
+    if (token->worker_started)
+        return 0;
+    if (token->callbacks && !token->callbacks_done)
+        return 0;
+    if (token->event_pending)
+        return 0;
+    if (token->result_native)
+    {
+        if (token->terminal_tick
+            && g_resource.poll_tick > token->terminal_tick
+            && g_resource.poll_tick - token->terminal_tick >= RESOURCE_RESULT_TTL_TICKS)
+            return 1;
+        return 0;
+    }
+    return 1;
+}
+
+static unsigned int resource_reap_finished(lua_State* L)
+{
+    ResourceToken* token = g_resource.tokens;
+    ResourceToken* prev = NULL;
+    unsigned int count = 0;
+    while (token)
+    {
+        ResourceToken* next = token->next;
+        if (resource_token_can_reap(token))
+        {
+            if (prev)
+                prev->next = next;
+            else
+                g_resource.tokens = next;
+            token->next = NULL;
+            resource_free_token(L, token);
+            g_resource.tokens_freed++;
+            count++;
+        }
+        else
+        {
+            prev = token;
+        }
+        token = next;
+    }
+    return count;
+}
+
+static ResourceToken* resource_find_token_ptr(unsigned int id)
+{
+    ResourceToken* token = g_resource.tokens;
+    while (token)
+    {
+        if (token->id == id)
+            return token;
+        token = token->next;
+    }
+    return NULL;
+}
+
+static int resource_push_event(ResourceToken* token, ResourceStatus status, const char* resource_id, const char* message)
 {
     ResourceEvent* ev = (ResourceEvent*)calloc(1, sizeof(ResourceEvent));
     if (!ev)
-        return;
-    ev->token_id = token_id;
+        return 0;
+    ev->token_id = token ? token->id : 0;
+    ev->token = token;
     ev->status = status;
     ev->resource_id = resource_strdup(resource_id);
     ev->message = resource_strdup(message);
@@ -378,11 +447,94 @@ static void resource_push_event(unsigned int token_id, ResourceStatus status, co
     else
         g_resource.events_head = ev;
     g_resource.events_tail = ev;
+    return 1;
+}
+
+static unsigned int resource_drop_events(unsigned int token_id)
+{
+    ResourceEvent* ev = g_resource.events_head;
+    ResourceEvent* prev = NULL;
+    unsigned int count = 0;
+    while (ev)
+    {
+        ResourceEvent* next = ev->next;
+        if (token_id == 0 || ev->token_id == token_id)
+        {
+            ResourceToken* token = ev->token ? ev->token : resource_find_token_ptr(ev->token_id);
+            if (token)
+                token->event_pending = 0;
+            if (prev)
+                prev->next = next;
+            else
+                g_resource.events_head = next;
+            if (g_resource.events_tail == ev)
+                g_resource.events_tail = prev;
+            free(ev->resource_id);
+            free(ev->message);
+            free(ev);
+            count++;
+        }
+        else
+        {
+            prev = ev;
+        }
+        ev = next;
+    }
+    return count;
+}
+
+static unsigned int resource_drop_update_events(void)
+{
+    ResourceEvent* ev = g_resource.events_head;
+    ResourceEvent* prev = NULL;
+    unsigned int count = 0;
+    while (ev)
+    {
+        ResourceEvent* next = ev->next;
+        ResourceToken* token = ev->token ? ev->token : resource_find_token_ptr(ev->token_id);
+        int drop = 0;
+        if (!token)
+        {
+            drop = 1;
+        }
+        else if (token->callbacks_done)
+        {
+            drop = 1;
+        }
+        else if (!token->callbacks && token->terminal_tick
+            && g_resource.poll_tick > token->terminal_tick
+            && g_resource.poll_tick - token->terminal_tick >= RESOURCE_RESULT_TTL_TICKS)
+        {
+            drop = 1;
+        }
+        if (drop)
+        {
+            if (token)
+                token->event_pending = 0;
+            if (prev)
+                prev->next = next;
+            else
+                g_resource.events_head = next;
+            if (g_resource.events_tail == ev)
+                g_resource.events_tail = prev;
+            free(ev->resource_id);
+            free(ev->message);
+            free(ev);
+            count++;
+        }
+        else
+        {
+            prev = ev;
+        }
+        ev = next;
+    }
+    return count;
 }
 
 static void resource_set_status(ResourceToken* token, ResourceStatus status, const char* message)
 {
     ResourceStatus old_status;
+    int event_queued;
     if (!token)
         return;
     old_status = token->status;
@@ -403,7 +555,12 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     if (status == RESOURCE_STATUS_READY) g_resource.ready++;
     else if (status == RESOURCE_STATUS_FAILED) g_resource.failed++;
     else if (status == RESOURCE_STATUS_DEGRADED) g_resource.degraded++;
-    resource_push_event(token->id, status, token->resource_id, message);
+    event_queued = resource_push_event(token, status, token->resource_id, message);
+    if (resource_is_terminal(status))
+    {
+        token->terminal_tick = g_resource.poll_tick;
+        token->event_pending = event_queued ? 1u : 0u;
+    }
 }
 
 static void resource_promote_priority(ResourceToken* token, ResourcePriority priority)
@@ -454,25 +611,6 @@ static unsigned int resource_max_active(void)
 static unsigned int resource_low_active_max(void)
 {
     return g_resource.low_active_max ? g_resource.low_active_max : RESOURCE_DEFAULT_LOW_ACTIVE;
-}
-
-static void resource_count_active(unsigned int* out_total, unsigned int* out_low)
-{
-    ResourceToken* p = g_resource.tokens;
-    unsigned int total = 0;
-    unsigned int low = 0;
-    while (p)
-    {
-        if (!p->cancelled && p->download_ref != LUA_NOREF)
-        {
-            total++;
-            if (p->priority == RESOURCE_PRIORITY_PREHEAT)
-                low++;
-        }
-        p = p->next;
-    }
-    if (out_total) *out_total = total;
-    if (out_low) *out_low = low;
 }
 
 static int resource_call_download_method(lua_State* L, ResourceToken* token, const char* method, int nargs, int nret)
@@ -1059,6 +1197,8 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
             break;
 
         token = job->token;
+        if (token)
+            token->worker_started = 0;
         if (job->warm_requested)
         {
             if (job->warm_success)
@@ -1126,6 +1266,54 @@ static void resource_worker_queue_counts(unsigned int* out_pending, unsigned int
     if (out_done)
         *out_done = resource_worker_count_jobs(g_resource.worker_done_head);
     SDL_UnlockMutex(g_resource.worker_mutex);
+}
+
+static unsigned int resource_worker_cancel_scope(const char* scope)
+{
+    ResourceWorkerJob* job;
+    ResourceWorkerJob* keep_head = NULL;
+    ResourceWorkerJob* keep_tail = NULL;
+    ResourceWorkerJob* drop_head = NULL;
+    ResourceWorkerJob* drop_tail = NULL;
+    unsigned int dropped = 0;
+    if (!scope || !scope[0] || !g_resource.worker_mutex)
+        return 0;
+    SDL_LockMutex(g_resource.worker_mutex);
+    job = g_resource.worker_head;
+    g_resource.worker_head = NULL;
+    g_resource.worker_tail = NULL;
+    while (job)
+    {
+        ResourceWorkerJob* next = job->next;
+        ResourceToken* token = job->token;
+        int match = token && ((token->scope && strcmp(token->scope, scope) == 0)
+            || (token->scene && strcmp(token->scene, scope) == 0));
+        job->next = NULL;
+        if (match)
+        {
+            token->worker_started = 0;
+            if (drop_tail)
+                drop_tail->next = job;
+            else
+                drop_head = job;
+            drop_tail = job;
+            dropped++;
+        }
+        else
+        {
+            if (keep_tail)
+                keep_tail->next = job;
+            else
+                keep_head = job;
+            keep_tail = job;
+        }
+        job = next;
+    }
+    g_resource.worker_head = keep_head;
+    g_resource.worker_tail = keep_tail;
+    SDL_UnlockMutex(g_resource.worker_mutex);
+    resource_worker_job_list_free(drop_head);
+    return dropped;
 }
 
 static int resource_worker_loop(void* ptr)
@@ -1347,8 +1535,9 @@ static int resource_try_native_frame(ResourceToken* token)
             return 0;
         if (resource_worker_submit(token))
         {
-            token->worker_started = 1;
-            return 0;
+            if (!resource_is_terminal(token->status))
+                token->worker_started = 1;
+            return resource_is_terminal(token->status) ? 1 : 0;
         }
         resource_finish_native_failed(token, "worker init failed");
         return 1;
@@ -1389,42 +1578,85 @@ static int resource_try_native_frame(ResourceToken* token)
     return 1;
 }
 
+static int resource_native_frame_candidate(const ResourceToken* token)
+{
+    return token
+        && !resource_is_shell_type(token->resource_type)
+        && token->native_kind != RESOURCE_NATIVE_NONE
+        && token->status == RESOURCE_STATUS_QUEUED
+        && !(token->native_kind == RESOURCE_NATIVE_TCP && token->worker_started);
+}
+
+static void resource_insert_native_candidate(ResourceToken** slots,
+    unsigned int* count, unsigned int cap, ResourceToken* token)
+{
+    unsigned int pos;
+    if (!slots || !count || !token || cap == 0)
+        return;
+    if (*count < cap)
+    {
+        pos = *count;
+        (*count)++;
+    }
+    else
+    {
+        if (token->id >= slots[*count - 1]->id)
+            return;
+        pos = *count - 1;
+    }
+    while (pos > 0 && slots[pos - 1]->id > token->id)
+    {
+        slots[pos] = slots[pos - 1];
+        pos--;
+    }
+    slots[pos] = token;
+}
+
 static unsigned int resource_update_native_frames(unsigned int max_ops)
 {
+    ResourceToken* after_cursor[8];
+    ResourceToken* wrap_cursor[8];
+    ResourceToken* p;
+    unsigned int after_count = 0;
+    unsigned int wrap_count = 0;
+    unsigned int i;
     unsigned int ops = 0;
     if (max_ops == 0)
         max_ops = 8;
-    while (ops < max_ops)
+    if (max_ops > 8)
+        max_ops = 8;
+
+    p = g_resource.tokens;
+    while (p)
     {
-        ResourceToken* p = g_resource.tokens;
-        ResourceToken* best = NULL;
-        ResourceToken* wrap = NULL;
-        while (p)
+        if (resource_native_frame_candidate(p))
         {
-            if (!resource_is_shell_type(p->resource_type)
-                && p->native_kind != RESOURCE_NATIVE_NONE
-                && p->status == RESOURCE_STATUS_QUEUED
-                && !(p->native_kind == RESOURCE_NATIVE_TCP && p->worker_started))
-            {
-                if (p->id > g_resource.native_cursor_id)
-                {
-                    if (!best || p->id < best->id)
-                        best = p;
-                }
-                else if (!wrap || p->id < wrap->id)
-                {
-                    wrap = p;
-                }
-            }
-            p = p->next;
+            if (p->id > g_resource.native_cursor_id)
+                resource_insert_native_candidate(after_cursor, &after_count, max_ops, p);
+            else
+                resource_insert_native_candidate(wrap_cursor, &wrap_count, max_ops, p);
         }
-        if (!best)
-            best = wrap;
-        if (!best)
-            break;
-        g_resource.native_cursor_id = best->id;
-        resource_try_native_frame(best);
-        ops++;
+        p = p->next;
+    }
+    for (i = 0; i < after_count && ops < max_ops; i++)
+    {
+        ResourceToken* token = after_cursor[i];
+        if (resource_native_frame_candidate(token))
+        {
+            g_resource.native_cursor_id = token->id;
+            resource_try_native_frame(token);
+            ops++;
+        }
+    }
+    for (i = 0; i < wrap_count && ops < max_ops; i++)
+    {
+        ResourceToken* token = wrap_cursor[i];
+        if (resource_native_frame_candidate(token))
+        {
+            g_resource.native_cursor_id = token->id;
+            resource_try_native_frame(token);
+            ops++;
+        }
     }
     g_resource.native_retried += ops;
     return ops;
@@ -1433,6 +1665,8 @@ static unsigned int resource_update_native_frames(unsigned int max_ops)
 static void resource_update_downloads(lua_State* L)
 {
     ResourceToken* p = g_resource.tokens;
+    unsigned int max_active = resource_max_active();
+    unsigned int low_active_max = resource_low_active_max();
     unsigned int active = 0;
     unsigned int low_active = 0;
     while (p)
@@ -1442,11 +1676,16 @@ static void resource_update_downloads(lua_State* L)
             resource_cancel_download(L, p);
         else
             resource_check_active_download(L, p);
+        if (!p->cancelled && p->download_ref != LUA_NOREF)
+        {
+            active++;
+            if (p->priority == RESOURCE_PRIORITY_PREHEAT)
+                low_active++;
+        }
         p = next;
     }
 
-    resource_count_active(&active, &low_active);
-    while (active < resource_max_active())
+    while (active < max_active)
     {
         ResourceToken* token = resource_pick_queued(RESOURCE_PRIORITY_NORMAL);
         if (!token)
@@ -1457,10 +1696,11 @@ static void resource_update_downloads(lua_State* L)
             continue;
         }
         active++;
+        if (token->priority == RESOURCE_PRIORITY_PREHEAT)
+            low_active++;
     }
 
-    resource_count_active(&active, &low_active);
-    while (active < resource_max_active() && low_active < resource_low_active_max())
+    while (active < max_active && low_active < low_active_max)
     {
         ResourceToken* token = resource_pick_queued(RESOURCE_PRIORITY_PREHEAT);
         if (!token)
@@ -1489,6 +1729,7 @@ static void resource_update_all(lua_State* L, unsigned int native_ops)
     resource_update_shell_results(native_ops);
     resource_update_native_frames(native_ops);
     resource_update_downloads(L);
+    resource_reap_finished(L);
 }
 
 static ResourceToken* resource_find_token(unsigned int id)
@@ -1965,7 +2206,9 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
     {
         g_resource.degraded++;
         resource_store_failure(token, "cold download disabled");
-        resource_push_event(token->id, RESOURCE_STATUS_DEGRADED, token->resource_id, "cold download disabled");
+        token->terminal_tick = g_resource.poll_tick;
+        token->event_pending = resource_push_event(token, RESOURCE_STATUS_DEGRADED,
+            token->resource_id, "cold download disabled") ? 1u : 0u;
     }
     else if (token->priority == RESOURCE_PRIORITY_PREHEAT)
     {
@@ -2174,7 +2417,8 @@ static int resource_submit_native_producer(ResourceToken* token)
         }
         if (resource_worker_submit(token))
         {
-            token->worker_started = 1;
+            if (!resource_is_terminal(token->status))
+                token->worker_started = 1;
             token->shell_started = resource_is_tcp_shell(token);
             return 1;
         }
@@ -2272,6 +2516,8 @@ static int resource_lua_poll(lua_State* L)
         }
         lua_rawseti(L, -2, i++);
 
+        if (ev->token)
+            ev->token->event_pending = 0;
         free(ev->resource_id);
         free(ev->message);
         free(ev);
@@ -2279,6 +2525,7 @@ static int resource_lua_poll(lua_State* L)
     }
     g_resource.events_head = NULL;
     g_resource.events_tail = NULL;
+    resource_reap_finished(L);
     return 1;
 }
 
@@ -2347,6 +2594,7 @@ static int resource_lua_cancel_scope(lua_State* L)
     const char* scope = luaL_optstring(L, 1, "");
     ResourceToken* token = g_resource.tokens;
     unsigned int count = 0;
+    unsigned int worker_dropped = resource_worker_cancel_scope(scope);
     while (token)
     {
         if (!resource_is_terminal(token->status) && !token->cancelled
@@ -2364,7 +2612,7 @@ static int resource_lua_cancel_scope(lua_State* L)
         }
         token = token->next;
     }
-    lua_pushinteger(L, (lua_Integer)count);
+    lua_pushinteger(L, (lua_Integer)(count + worker_dropped));
     return 1;
 }
 
@@ -2372,11 +2620,18 @@ static int resource_push_stats(lua_State* L)
 {
     unsigned int active = 0;
     unsigned int low_active = 0;
+    unsigned int tokens_alive = 0;
+    unsigned int tokens_terminal = 0;
+    unsigned int events_pending = 0;
     unsigned int worker_pending = 0;
     unsigned int worker_done = 0;
     ResourceToken* token = g_resource.tokens;
+    ResourceEvent* ev;
     while (token)
     {
+        tokens_alive++;
+        if (resource_is_terminal(token->status))
+            tokens_terminal++;
         if (!token->cancelled && token->download_ref != LUA_NOREF)
         {
             active++;
@@ -2384,6 +2639,12 @@ static int resource_push_stats(lua_State* L)
                 low_active++;
         }
         token = token->next;
+    }
+    ev = g_resource.events_head;
+    while (ev)
+    {
+        events_pending++;
+        ev = ev->next;
     }
     resource_worker_queue_counts(&worker_pending, &worker_done);
 
@@ -2448,6 +2709,14 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "frame_ready");
     lua_pushinteger(L, (lua_Integer)g_resource.frame_failed);
     lua_setfield(L, -2, "frame_failed");
+    lua_pushinteger(L, (lua_Integer)tokens_alive);
+    lua_setfield(L, -2, "tokens_alive");
+    lua_pushinteger(L, (lua_Integer)tokens_terminal);
+    lua_setfield(L, -2, "tokens_terminal");
+    lua_pushinteger(L, (lua_Integer)g_resource.tokens_freed);
+    lua_setfield(L, -2, "tokens_freed");
+    lua_pushinteger(L, (lua_Integer)events_pending);
+    lua_setfield(L, -2, "events_pending");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_active);
     lua_setfield(L, -2, "worker_active");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_thread_count);
@@ -2487,6 +2756,8 @@ static int resource_lua_update(lua_State* L)
             max_ops = (unsigned int)n;
     }
     resource_update_all(L, max_ops);
+    resource_drop_update_events();
+    resource_reap_finished(L);
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -2521,10 +2792,18 @@ static int resource_lua_get_ready(lua_State* L)
     if (resource_is_tcp_shell(token) && token->result_native)
     {
         TCP_UserData* tcp = (TCP_UserData*)token->result_native;
+        int nret;
         token->result_native = NULL;
-        return TCP_NativePushParsed(L, tcp);
+        token->result_ready = 0;
+        token->result_success = 0;
+        nret = TCP_NativePushParsed(L, tcp);
+        resource_drop_events(token->id);
+        resource_reap_finished(L);
+        return nret;
     }
     resource_push_token_table(L, token);
+    resource_drop_events(token->id);
+    resource_reap_finished(L);
     return 1;
 }
 
