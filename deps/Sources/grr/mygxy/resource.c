@@ -1188,6 +1188,7 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
     unsigned int ops = 0;
     ResourceWorkerJob* job;
     ResourceToken* token;
+    char decode_err[160];
     if (!g_resource.worker_mutex)
         return 0;
     if (max_ops == 0)
@@ -1213,13 +1214,6 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
         token = job->token;
         if (token)
             token->worker_started = 0;
-        if (job->warm_requested)
-        {
-            if (job->warm_success)
-                g_resource.shell_warm_ready++;
-            else
-                g_resource.shell_warm_failed++;
-        }
         if (!token || token->cancelled || resource_is_terminal(token->status))
         {
             TCP_NativeFree(job->result_tcp);
@@ -1227,7 +1221,11 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
         }
         else if (job->is_tcp_frame)
         {
+            decode_err[0] = '\0';
             if (job->result_ready && job->result_success
+                && TCP_NativeDecodeFrameWithPalette((TCP_UserData*)token->native_ud, job->frame_id,
+                    job->pal_snapshot, job->pal_count, job->pal_version,
+                    &job->result_frame, decode_err, sizeof(decode_err))
                 && TCP_NativeStoreDecodedFrame((TCP_UserData*)token->native_ud, &job->result_frame))
             {
                 resource_finish_native_ready(token);
@@ -1235,14 +1233,28 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
             }
             else
             {
-                resource_finish_native_failed(token, job->result_error[0] ? job->result_error : "frame decode failed");
+                resource_finish_native_failed(token, decode_err[0] ? decode_err
+                    : (job->result_error[0] ? job->result_error : "frame decode failed"));
                 g_resource.frame_failed++;
             }
         }
         else if (job->result_ready && job->result_success && job->result_tcp)
         {
-            if (job->warm_requested && job->warm_success)
-                TCP_NativeStoreDecodedFrame(job->result_tcp, &job->result_frame);
+            if (job->warm_requested)
+            {
+                decode_err[0] = '\0';
+                if (TCP_NativeDecodeGroupFrame(job->result_tcp, job->shell_group ? job->shell_group : 1,
+                        job->shell_frame, &job->result_frame, decode_err, sizeof(decode_err))
+                    && TCP_NativeStoreDecodedFrame(job->result_tcp, &job->result_frame))
+                {
+                    job->warm_success = 1;
+                    g_resource.shell_warm_ready++;
+                }
+                else
+                {
+                    g_resource.shell_warm_failed++;
+                }
+            }
             resource_finish_shell_ready(token, job->result_tcp);
             job->result_tcp = NULL;
         }
@@ -1341,7 +1353,6 @@ static int resource_worker_loop(void* ptr)
         unsigned char* data;
         size_t size;
         TCP_UserData* tcp;
-        char warm_err[160];
         SDL_LockMutex(g_resource.worker_mutex);
         while (!g_resource.worker_stop && !g_resource.worker_head)
             SDL_CondWait(g_resource.worker_cond, g_resource.worker_mutex);
@@ -1403,15 +1414,7 @@ static int resource_worker_loop(void* ptr)
                 else
                 {
                     if (job->shell_frame > 0)
-                    {
-                        warm_err[0] = '\0';
                         job->warm_requested = 1;
-                        if (TCP_NativeDecodeGroupFrame(tcp, job->shell_group ? job->shell_group : 1,
-                                job->shell_frame, &job->result_frame, warm_err, sizeof(warm_err)))
-                        {
-                            job->warm_success = 1;
-                        }
-                    }
                     job->result_ready = 1;
                     job->result_success = 1;
                     job->result_tcp = tcp;
@@ -1420,19 +1423,8 @@ static int resource_worker_loop(void* ptr)
         }
         else if (job->is_tcp_frame)
         {
-            SDL_memset(err, 0, sizeof(err));
-            if (TCP_NativeDecodeFrameWithPalette(job->tcp_ud, job->frame_id, job->pal_snapshot,
-                    job->pal_count, job->pal_version, &job->result_frame, err, sizeof(err)))
-            {
-                job->result_ready = 1;
-                job->result_success = 1;
-            }
-            else
-            {
-                job->result_ready = 1;
-                job->result_success = 0;
-                SDL_snprintf(job->result_error, sizeof(job->result_error), "%s", err[0] ? err : "frame_decode failed");
-            }
+            job->result_ready = 1;
+            job->result_success = 1;
         }
         else
         {

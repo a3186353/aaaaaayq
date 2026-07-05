@@ -772,10 +772,7 @@ static int TCP_AsyncWorker(void* ptr)
         if (!job)
             continue;
 
-        job->surface = TCP_DecodeFrameSurface(ud, job->frame_id,
-                                              job->pal_snapshot, job->pal_count,
-                                              &job->w, &job->h, &job->x, &job->y);
-        job->ok = job->surface != NULL;
+        job->ok = 1;
 
         SDL_LockMutex(ud->async_mutex);
         ud->async_active = 0;
@@ -790,10 +787,6 @@ static int TCP_AsyncWorker(void* ptr)
             continue;
         }
 
-        if (job->ok)
-            ud->async_decoded++;
-        else
-            ud->async_failed++;
         if (ud->async_done_tail)
             ud->async_done_tail->next = job;
         else
@@ -935,9 +928,19 @@ static int TCP_AsyncPollDecoded(TCP_UserData* ud, Uint32 limit)
         {
             if (!TCP_CacheLookup(ud, job->frame_id))
             {
-                TCP_CacheInsert(ud, job->frame_id, job->pal_version,
-                                job->surface, job->w, job->h, job->x, job->y);
-                job->surface = NULL;
+                SDL_Surface* sf = TCP_DecodeFrameSurface(ud, job->frame_id,
+                                                         job->pal_snapshot, job->pal_count,
+                                                         &job->w, &job->h, &job->x, &job->y);
+                if (sf)
+                {
+                    TCP_CacheInsert(ud, job->frame_id, job->pal_version,
+                                    sf, job->w, job->h, job->x, job->y);
+                    ud->async_decoded++;
+                }
+                else
+                {
+                    ud->async_failed++;
+                }
             }
         }
         TCP_AsyncJobFree(job);
