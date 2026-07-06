@@ -1451,28 +1451,6 @@ static int resource_worker_submit(ResourceToken* token)
         if (!g_resource.worker_mutex)
             return 0;
     }
-    if (!g_resource.worker_cond)
-    {
-        g_resource.worker_cond = SDL_CreateCond();
-        if (!g_resource.worker_cond)
-            return 0;
-    }
-    started = g_resource.worker_thread_count;
-    while (started < resource_worker_target_threads())
-    {
-        char name[32];
-        SDL_snprintf(name, sizeof(name), "resource_worker_%u", started + 1);
-        g_resource.worker_stop = 0;
-        g_resource.worker_threads[started] = SDL_CreateThread(resource_worker_loop, name, NULL);
-        if (!g_resource.worker_threads[started])
-        {
-            if (started == 0)
-                return 0;
-            break;
-        }
-        started++;
-    }
-    g_resource.worker_thread_count = started;
 
     job = (ResourceWorkerJob*)calloc(1, sizeof(ResourceWorkerJob));
     if (!job)
@@ -1508,7 +1486,48 @@ static int resource_worker_submit(ResourceToken* token)
             return 0;
         }
         SDL_memcpy(job->pal_snapshot, tcp->pal_dyn ? tcp->pal_dyn : tcp->pal, sizeof(Uint32) * job->pal_count);
+        job->result_ready = 1;
+        job->result_success = 1;
+        SDL_LockMutex(g_resource.worker_mutex);
+        if (g_resource.worker_done_tail)
+            g_resource.worker_done_tail->next = job;
+        else
+            g_resource.worker_done_head = job;
+        g_resource.worker_done_tail = job;
+        job->next = NULL;
+        SDL_UnlockMutex(g_resource.worker_mutex);
+        g_resource.frame_submitted++;
+        return 1;
     }
+
+    if (!g_resource.worker_cond)
+    {
+        g_resource.worker_cond = SDL_CreateCond();
+        if (!g_resource.worker_cond)
+        {
+            resource_worker_job_free(job);
+            return 0;
+        }
+    }
+    started = g_resource.worker_thread_count;
+    while (started < resource_worker_target_threads())
+    {
+        char name[32];
+        SDL_snprintf(name, sizeof(name), "resource_worker_%u", started + 1);
+        g_resource.worker_stop = 0;
+        g_resource.worker_threads[started] = SDL_CreateThread(resource_worker_loop, name, NULL);
+        if (!g_resource.worker_threads[started])
+        {
+            if (started == 0)
+            {
+                resource_worker_job_free(job);
+                return 0;
+            }
+            break;
+        }
+        started++;
+    }
+    g_resource.worker_thread_count = started;
 
     SDL_LockMutex(g_resource.worker_mutex);
     resource_worker_enqueue(job);

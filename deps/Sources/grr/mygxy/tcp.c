@@ -798,7 +798,7 @@ static int TCP_AsyncWorker(void* ptr)
     return 0;
 }
 
-static int TCP_AsyncEnsure(TCP_UserData* ud)
+static int TCP_AsyncEnsureState(TCP_UserData* ud)
 {
     if (!ud)
         return 0;
@@ -808,6 +808,13 @@ static int TCP_AsyncEnsure(TCP_UserData* ud)
         if (!ud->async_mutex)
             return 0;
     }
+    return 1;
+}
+
+static int TCP_AsyncEnsure(TCP_UserData* ud)
+{
+    if (!TCP_AsyncEnsureState(ud))
+        return 0;
     if (!ud->async_cond)
     {
         ud->async_cond = SDL_CreateCond();
@@ -2020,7 +2027,7 @@ static int TCP_RequestFrame(lua_State* L)
         return 2;
     }
 
-    if (!TCP_AsyncEnsure(ud))
+    if (!TCP_AsyncEnsureState(ud))
     {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "async init failed");
@@ -2049,7 +2056,7 @@ static int TCP_RequestFrame(lua_State* L)
         lua_pushstring(L, "pending");
         return 2;
     }
-    if (ud->async_queued >= TCP_ASYNC_QUEUE_CAP)
+    if (ud->async_queued + ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
     {
         SDL_UnlockMutex(ud->async_mutex);
         SDL_free(pal_snapshot);
@@ -2072,14 +2079,13 @@ static int TCP_RequestFrame(lua_State* L)
     job->generation = ud->async_generation;
     job->pal_version = pal_version;
     job->pal_count = pal_count;
-    if (ud->async_queue_tail)
-        ud->async_queue_tail->next = job;
+    if (ud->async_done_tail)
+        ud->async_done_tail->next = job;
     else
-        ud->async_queue_head = job;
-    ud->async_queue_tail = job;
-    ud->async_queued++;
+        ud->async_done_head = job;
+    ud->async_done_tail = job;
+    ud->async_ready++;
     ud->async_submitted++;
-    SDL_CondSignal(ud->async_cond);
     SDL_UnlockMutex(ud->async_mutex);
 
     lua_pushboolean(L, 0);
@@ -2120,7 +2126,7 @@ int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
         return MYGXY_ASYNC_FRAME_READY;
     }
 
-    if (!TCP_AsyncEnsure(ud))
+    if (!TCP_AsyncEnsureState(ud))
     {
         if (status) *status = "async init failed";
         return MYGXY_ASYNC_FRAME_ERROR;
@@ -2146,7 +2152,7 @@ int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
         if (status) *status = "pending";
         return MYGXY_ASYNC_FRAME_PENDING;
     }
-    if (ud->async_queued >= TCP_ASYNC_QUEUE_CAP)
+    if (ud->async_queued + ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
     {
         SDL_UnlockMutex(ud->async_mutex);
         SDL_free(pal_snapshot);
@@ -2167,14 +2173,13 @@ int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
     job->generation = ud->async_generation;
     job->pal_version = pal_version;
     job->pal_count = pal_count;
-    if (ud->async_queue_tail)
-        ud->async_queue_tail->next = job;
+    if (ud->async_done_tail)
+        ud->async_done_tail->next = job;
     else
-        ud->async_queue_head = job;
-    ud->async_queue_tail = job;
-    ud->async_queued++;
+        ud->async_done_head = job;
+    ud->async_done_tail = job;
+    ud->async_ready++;
     ud->async_submitted++;
-    SDL_CondSignal(ud->async_cond);
     SDL_UnlockMutex(ud->async_mutex);
 
     if (status) *status = "queued";
