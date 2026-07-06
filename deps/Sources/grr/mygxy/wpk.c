@@ -1205,7 +1205,7 @@ static Sint64 WPK_GetDataPackSize(WPK_UserData* ud, Uint32 wpkid)
 
     SDL_RWops* fp = WPK_OpenWriteFile(ud, wpkid);
     if (!fp)
-        return 0;
+        return -1;
     Sint64 size = SDL_RWseek(fp, 0, RW_SEEK_END);
     return size > 0 ? size : 0;
 }
@@ -1257,18 +1257,10 @@ static int WPK_AppendDataPack(WPK_UserData* ud, Uint32 wpkid, const void* data, 
 
 static Uint32 WPK_SelectWritePack(WPK_UserData* ud, size_t size)
 {
-    Uint32 start = 0;
     if (!ud || size > (size_t)WPK_WRITE_MAX_PACK_BYTES)
         return 255u;
 
-    for (Uint32 i = 0; i < ud->number; i++)
-    {
-        Sint32 swpkid = WPK_WpkIdAsS32(ud->list[i].wpkid);
-        if (swpkid >= 0 && (Uint32)swpkid > start && (Uint32)swpkid < 255u)
-            start = (Uint32)swpkid;
-    }
-
-    for (Uint32 wpkid = start; wpkid < 255u; wpkid++)
+    for (Uint32 wpkid = 0; wpkid < 255u; wpkid++)
     {
         Sint64 packSize = WPK_GetDataPackSize(ud, wpkid);
         if (packSize >= 0 && packSize + (Sint64)size <= WPK_WRITE_MAX_PACK_BYTES)
