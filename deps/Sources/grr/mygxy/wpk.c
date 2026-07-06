@@ -3407,6 +3407,57 @@ static int WPK_GetData(lua_State* L)
     return 0;
 }
 
+static int WPK_DecodeBuffer(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    const char* md5 = luaL_checkstring(L, 2);
+    size_t inSize = 0;
+    const char* raw = luaL_checklstring(L, 3, &inSize);
+    Uint32 hash = 0;
+    char md5Lower[33];
+    WPK_FileInfo fi;
+    Uint8* outData = NULL;
+    size_t outSize = 0;
+    char err[128] = {0};
+    int ok;
+
+    if (!WPK_NormalizeMd5Hex32(md5Lower, md5) || (!raw && inSize > 0) || inSize > (size_t)0xFFFFFFFFu)
+        return 0;
+    if (!lua_isnoneornil(L, 4))
+        hash = (Uint32)luaL_checkinteger(L, 4);
+
+    SDL_memset(&fi, 0, sizeof(fi));
+    SDL_memcpy(fi.md5, md5Lower, 33);
+    fi.hash = hash;
+    fi.wpkid = (Uint32)(Sint32)-1;
+    fi.offset = 0;
+    fi.size = (Uint32)inSize;
+
+    if (!WPK_LockNativeState(ud))
+    {
+        g_wpk_stats.getdata_failures++;
+        return 0;
+    }
+    if (WPK_DecodedCacheCopy(ud, 0xFFFFFFFFu, &fi, &outData, &outSize))
+    {
+        WPK_UnlockNativeState(ud);
+        lua_pushlstring(L, (const char*)outData, outSize);
+        SDL_free(outData);
+        return 1;
+    }
+    ok = WPK_NativeDecodeBuffer(ud, 0xFFFFFFFFu, &fi, (const Uint8*)raw, inSize, &outData, &outSize, err, sizeof(err));
+    WPK_UnlockNativeState(ud);
+    if (!ok)
+    {
+        g_wpk_stats.getdata_failures++;
+        return 0;
+    }
+
+    lua_pushlstring(L, (const char*)outData, outSize);
+    SDL_free(outData);
+    return 1;
+}
+
 int WPK_NativeReadData(WPK_UserData* ud, unsigned int id, unsigned char** outData, size_t* outSize,
                        char* err, size_t errSize)
 {
@@ -4676,6 +4727,7 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"__gc", WPK_GC},
         {"__close", WPK_GC},
         {"GetData", WPK_GetData},
+        {"DecodeBuffer", WPK_DecodeBuffer},
         {"GetList", WPK_GetList},
         {"GetInfoByMd5", WPK_GetInfoByMd5},
         {"GetInfoByHash", WPK_GetInfoByHash},
