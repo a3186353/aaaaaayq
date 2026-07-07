@@ -126,7 +126,53 @@ static Uint32 JY_Percentile(Uint32* values, int count, int pct)
     return values[idx - 1];
 }
 
-static int JY_PushTexture(lua_State* L, SDL_Texture* tex)
+static SDL_Surface* JY_SurfaceAlphaToSurface(SDL_Surface* sf)
+{
+    if (!sf)
+        return NULL;
+
+    SDL_Surface* nsf = SDL_CreateRGBSurfaceWithFormat(0, sf->w, sf->h, 8, SDL_PIXELFORMAT_INDEX8);
+    if (!nsf)
+        return NULL;
+
+    Uint8 r, g, b, a;
+    Uint8* rp = (Uint8*)sf->pixels;
+    Uint8* wp = (Uint8*)nsf->pixels;
+    int bpp = sf->format->BytesPerPixel;
+
+    for (int h = 0; h < sf->h; h++)
+    {
+        Uint8* lrp = rp;
+        Uint8* lwp = wp;
+        for (int w = 0; w < sf->w; w++)
+        {
+            switch (bpp)
+            {
+            case 1:
+                *lwp = *lrp;
+                break;
+            case 2:
+                SDL_GetRGBA(*(Uint16*)lrp, sf->format, &r, &g, &b, &a);
+                *lwp = a;
+                break;
+            case 4:
+                SDL_GetRGBA(*(Uint32*)lrp, sf->format, &r, &g, &b, &a);
+                *lwp = a;
+                break;
+            default:
+                *lwp = 255;
+                break;
+            }
+            lrp += bpp;
+            lwp++;
+        }
+        rp += sf->pitch;
+        wp += nsf->pitch;
+    }
+    return nsf;
+}
+
+static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src)
 {
     JY_GGETexture* gt;
     SDL_Texture** ud;
@@ -141,6 +187,7 @@ static int JY_PushTexture(lua_State* L, SDL_Texture* tex)
     ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
     *ud = tex;
     gt->refcount = 1;
+    gt->sf = JY_SurfaceAlphaToSurface(alpha_src);
     SDL_SetTextureUserData(tex, gt);
     luaL_setmetatable(L, "SDL_Texture");
     return 1;
@@ -1041,14 +1088,20 @@ static int JY_GetFrameTexture(lua_State* L)
 
     start_us = JY_NowUS();
     tex = SDL_CreateTextureFromSurface(rd, sf);
-    SDL_FreeSurface(sf);
     if (!tex)
+    {
+        SDL_FreeSurface(sf);
         return 0;
+    }
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
     JY_RecordUpload(JY_NowUS() - start_us);
 
-    if (!JY_PushTexture(L, tex))
+    if (!JY_PushTexture(L, tex, sf))
+    {
+        SDL_FreeSurface(sf);
         return 0;
+    }
+    SDL_FreeSurface(sf);
 
     lua_createtable(L, 0, 4);
     lua_pushinteger(L, (lua_Integer)f->sh);

@@ -861,6 +861,41 @@ static int LUA_RenderPresent(lua_State* L)
     return 0;
 }
 
+static int LUA_TextureIndex(lua_State* L)
+{
+    if (lua_getmetatable(L, 1))
+    {
+        lua_pushvalue(L, 2);
+        lua_rawget(L, -2);
+        if (!lua_isnil(L, -1))
+            return 1;
+        lua_pop(L, 2);
+    }
+
+    if (lua_getiuservalue(L, 1, 1) == LUA_TTABLE)
+    {
+        lua_pushvalue(L, 2);
+        lua_rawget(L, -2);
+        return 1;
+    }
+    return 1;
+}
+
+static int LUA_TextureNewIndex(lua_State* L)
+{
+    if (lua_getiuservalue(L, 1, 1) != LUA_TTABLE)
+    {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setiuservalue(L, 1, 1);
+    }
+    lua_pushvalue(L, 2);
+    lua_pushvalue(L, 3);
+    lua_rawset(L, -3);
+    return 0;
+}
+
 static int LUA_DestroyTexture(lua_State* L)
 {
     SDL_Texture** tex = (SDL_Texture**)luaL_checkudata(L, 1, "SDL_Texture");
@@ -1010,7 +1045,8 @@ static const luaL_Reg sdl_funcs[] = {
 
 static const luaL_Reg texture_funcs[] = {
     {"__gc", LUA_DestroyTexture},
-    {"__index", NULL},
+    {"__index", LUA_TextureIndex},
+    {"__newindex", LUA_TextureNewIndex},
     {"QueryTexture", LUA_QueryTexture},
     {"SetTextureColorMod", LUA_SetTextureColorMod},
     {"GetTextureColorMod", LUA_GetTextureColorMod},
@@ -1046,8 +1082,6 @@ int bind_renderer(lua_State* L)
 
     luaL_getmetatable(L, "SDL_Texture");
     luaL_setfuncs(L, texture_funcs, 0);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
     lua_pop(L, 1);
 
     luaL_getmetatable(L, "SDL_Renderer");
