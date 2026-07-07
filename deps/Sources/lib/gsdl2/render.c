@@ -1042,6 +1042,8 @@ static const luaL_Reg surface_funcs[] = {
 
 int bind_renderer(lua_State* L)
 {
+    GGE_RenderStatsEnsure();
+
     luaL_getmetatable(L, "SDL_Texture");
     luaL_setfuncs(L, texture_funcs, 0);
     lua_pushvalue(L, -1);

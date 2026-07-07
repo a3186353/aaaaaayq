@@ -5121,6 +5121,8 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"GetStats", WPK_GetStats},
         {NULL, NULL},
     };
+    WPK_PerfEnsure();
+
     luaL_newmetatable(L, WPK_NAME);
     luaL_setfuncs(L, funcs, 0);
     lua_pushvalue(L, -1);
@@ -5132,6 +5134,8 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
 
 MYGXY_API int luaopen_mygxy_wpk_thd(lua_State* L)
 {
+    WPK_PerfEnsure();
+
     lua_pushcfunction(L, THD_Parse);
     return 1;
 }

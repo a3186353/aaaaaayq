@@ -3597,6 +3597,7 @@ MYGXY_API int luaopen_mygxy_map(lua_State* L)
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     _map_ensure_zone();
 #endif
+    MAP_PerfEnsure();
 
     luaL_newmetatable(L, MAP_NAME);
     luaL_setfuncs(L, funcs, 0);
