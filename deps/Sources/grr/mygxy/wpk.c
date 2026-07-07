@@ -1,5 +1,6 @@
 #include "sdl_proxy.h"
 #include "wpk.h"
+#include <stdlib.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -334,6 +335,18 @@ typedef struct
 
 typedef struct
 {
+    char md5[33];
+    Uint32 index;
+} WPK_Md5LookupEntry;
+
+typedef struct
+{
+    Uint32 hash;
+    Uint32 index;
+} WPK_HashLookupEntry;
+
+typedef struct
+{
     Uint8 RoundKey[176];
 } WPK_Aes128Ctx;
 
@@ -642,6 +655,10 @@ struct WPK_UserData
 {
     Uint32 number;
     WPK_FileInfo* list;
+    WPK_Md5LookupEntry* md5_lookup;
+    WPK_HashLookupEntry* hash_lookup;
+    Uint32 lookup_count;
+    Uint8 lookup_dirty;
 
     int list_ref;
 
@@ -879,7 +896,110 @@ static int WPK_NormalizeMd5Hex32(char outLower33[33], const char* md5)
     return 1;
 }
 
-static int WPK_FindByMd5(const WPK_UserData* ud, const char md5Lower33[33])
+static int WPK_CompareMd5Lookup(const void* a, const void* b)
+{
+    const WPK_Md5LookupEntry* la = (const WPK_Md5LookupEntry*)a;
+    const WPK_Md5LookupEntry* lb = (const WPK_Md5LookupEntry*)b;
+    int cmp = SDL_memcmp(la->md5, lb->md5, 32);
+    if (cmp != 0)
+        return cmp;
+    if (la->index < lb->index)
+        return -1;
+    if (la->index > lb->index)
+        return 1;
+    return 0;
+}
+
+static int WPK_CompareHashLookup(const void* a, const void* b)
+{
+    const WPK_HashLookupEntry* la = (const WPK_HashLookupEntry*)a;
+    const WPK_HashLookupEntry* lb = (const WPK_HashLookupEntry*)b;
+    if (la->hash < lb->hash)
+        return -1;
+    if (la->hash > lb->hash)
+        return 1;
+    if (la->index < lb->index)
+        return -1;
+    if (la->index > lb->index)
+        return 1;
+    return 0;
+}
+
+static void WPK_ClearLookupIndexes(WPK_UserData* ud)
+{
+    if (!ud)
+        return;
+    if (ud->md5_lookup)
+        SDL_free(ud->md5_lookup);
+    if (ud->hash_lookup)
+        SDL_free(ud->hash_lookup);
+    ud->md5_lookup = NULL;
+    ud->hash_lookup = NULL;
+    ud->lookup_count = 0;
+    ud->lookup_dirty = 1;
+}
+
+static void WPK_MarkLookupDirty(WPK_UserData* ud)
+{
+    if (ud)
+        ud->lookup_dirty = 1;
+}
+
+static int WPK_RebuildLookupIndexes(WPK_UserData* ud)
+{
+    if (!ud)
+        return 0;
+
+    if (!ud->list || ud->number == 0)
+    {
+        WPK_ClearLookupIndexes(ud);
+        ud->lookup_dirty = 0;
+        return 1;
+    }
+
+    WPK_Md5LookupEntry* md5_lookup = (WPK_Md5LookupEntry*)SDL_malloc(sizeof(WPK_Md5LookupEntry) * ud->number);
+    WPK_HashLookupEntry* hash_lookup = (WPK_HashLookupEntry*)SDL_malloc(sizeof(WPK_HashLookupEntry) * ud->number);
+    if (!md5_lookup || !hash_lookup)
+    {
+        if (md5_lookup)
+            SDL_free(md5_lookup);
+        if (hash_lookup)
+            SDL_free(hash_lookup);
+        WPK_ClearLookupIndexes(ud);
+        return 0;
+    }
+
+    for (Uint32 i = 0; i < ud->number; i++)
+    {
+        SDL_memcpy(md5_lookup[i].md5, ud->list[i].md5, 33);
+        md5_lookup[i].index = i;
+        hash_lookup[i].hash = ud->list[i].hash;
+        hash_lookup[i].index = i;
+    }
+    qsort(md5_lookup, ud->number, sizeof(WPK_Md5LookupEntry), WPK_CompareMd5Lookup);
+    qsort(hash_lookup, ud->number, sizeof(WPK_HashLookupEntry), WPK_CompareHashLookup);
+
+    if (ud->md5_lookup)
+        SDL_free(ud->md5_lookup);
+    if (ud->hash_lookup)
+        SDL_free(ud->hash_lookup);
+    ud->md5_lookup = md5_lookup;
+    ud->hash_lookup = hash_lookup;
+    ud->lookup_count = ud->number;
+    ud->lookup_dirty = 0;
+    return 1;
+}
+
+static int WPK_EnsureLookupIndexes(WPK_UserData* ud)
+{
+    if (!ud)
+        return 0;
+    if (!ud->lookup_dirty && ud->lookup_count == ud->number && ud->md5_lookup && ud->hash_lookup)
+        return 1;
+    return WPK_RebuildLookupIndexes(ud);
+}
+
+static int WPK_FindByMd5Linear(const WPK_UserData* ud, const char md5Lower33[33])
 {
     if (!ud || !ud->list || ud->number == 0 || !md5Lower33)
         return -1;
@@ -889,6 +1009,63 @@ static int WPK_FindByMd5(const WPK_UserData* ud, const char md5Lower33[33])
             return (int)i;
     }
     return -1;
+}
+
+static int WPK_FindByMd5(WPK_UserData* ud, const char md5Lower33[33])
+{
+    if (!ud || !md5Lower33)
+        return -1;
+    if (WPK_EnsureLookupIndexes(ud))
+    {
+        Uint32 lo = 0;
+        Uint32 hi = ud->lookup_count;
+        while (lo < hi)
+        {
+            Uint32 mid = lo + (hi - lo) / 2;
+            int cmp = SDL_memcmp(ud->md5_lookup[mid].md5, md5Lower33, 32);
+            if (cmp < 0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo < ud->lookup_count && SDL_memcmp(ud->md5_lookup[lo].md5, md5Lower33, 32) == 0)
+            return (int)ud->md5_lookup[lo].index;
+    }
+    return WPK_FindByMd5Linear(ud, md5Lower33);
+}
+
+static int WPK_FindByHashLinear(const WPK_UserData* ud, Uint32 hash)
+{
+    if (!ud || !ud->list || ud->number == 0)
+        return -1;
+    for (Uint32 i = 0; i < ud->number; i++)
+    {
+        if (ud->list[i].hash == hash)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int WPK_FindByHash(WPK_UserData* ud, Uint32 hash)
+{
+    if (!ud)
+        return -1;
+    if (WPK_EnsureLookupIndexes(ud))
+    {
+        Uint32 lo = 0;
+        Uint32 hi = ud->lookup_count;
+        while (lo < hi)
+        {
+            Uint32 mid = lo + (hi - lo) / 2;
+            if (ud->hash_lookup[mid].hash < hash)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo < ud->lookup_count && ud->hash_lookup[lo].hash == hash)
+            return (int)ud->hash_lookup[lo].index;
+    }
+    return WPK_FindByHashLinear(ud, hash);
 }
 
 static void WPK_RevXor5AInplace(Uint8* data, size_t n)
@@ -3601,6 +3778,29 @@ int WPK_NativeReadData(WPK_UserData* ud, unsigned int id, unsigned char** outDat
     return ok;
 }
 
+static void WPK_PushInfoTable(lua_State* L, WPK_UserData* ud, const WPK_FileInfo* info, int idx)
+{
+    lua_createtable(L, 0, 9);
+    lua_pushinteger(L, (lua_Integer)(idx + 1));
+    lua_setfield(L, -2, "id");
+    lua_pushlstring(L, info->md5, 32);
+    lua_setfield(L, -2, "md5");
+    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(info->wpkid));
+    lua_setfield(L, -2, "wpkid");
+    lua_pushinteger(L, (lua_Integer)info->offset);
+    lua_setfield(L, -2, "offset");
+    lua_pushinteger(L, (lua_Integer)info->size);
+    lua_setfield(L, -2, "size");
+    lua_pushinteger(L, (lua_Integer)info->file_index);
+    lua_setfield(L, -2, "fileindex");
+    lua_pushinteger(L, (lua_Integer)info->hash);
+    lua_setfield(L, -2, "hash");
+    lua_pushvalue(L, 1);
+    lua_setfield(L, -2, "wpk");
+    lua_pushstring(L, ud->idx_path);
+    lua_setfield(L, -2, "path");
+}
+
 static int WPK_GetInfoByMd5(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -3619,24 +3819,7 @@ static int WPK_GetInfoByMd5(lua_State* L)
     info = ud->list[idx];
     WPK_UnlockNativeState(ud);
 
-    lua_createtable(L, 0, 8);
-    lua_pushinteger(L, (lua_Integer)(idx + 1));
-    lua_setfield(L, -2, "id");
-    lua_pushlstring(L, info.md5, 32);
-    lua_setfield(L, -2, "md5");
-    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(info.wpkid));
-    lua_setfield(L, -2, "wpkid");
-    lua_pushinteger(L, (lua_Integer)info.offset);
-    lua_setfield(L, -2, "offset");
-    lua_pushinteger(L, (lua_Integer)info.size);
-    lua_setfield(L, -2, "size");
-    lua_pushinteger(L, (lua_Integer)info.file_index);
-    lua_setfield(L, -2, "fileindex");
-    lua_pushvalue(L, 1);
-    lua_setfield(L, -2, "wpk");
-    lua_pushstring(L, ud->idx_path);
-    lua_setfield(L, -2, "path");
-
+    WPK_PushInfoTable(L, ud, &info, idx);
     return 1;
 }
 
@@ -3648,38 +3831,55 @@ static int WPK_GetInfoByHash(lua_State* L)
 
     int idx = -1;
     WPK_LOCK_OR_RETURN(ud, 0);
-    for (Uint32 i = 0; i < ud->number; i++)
-    {
-        if (ud->list[i].hash == hash)
-        {
-            idx = (int)i;
-            break;
-        }
-    }
-
+    idx = WPK_FindByHash(ud, hash);
     if (idx < 0)
         WPK_UNLOCK_RETURN(ud, 0);
     info = ud->list[idx];
     WPK_UnlockNativeState(ud);
 
-    lua_createtable(L, 0, 8);
-    lua_pushinteger(L, (lua_Integer)(idx + 1));
-    lua_setfield(L, -2, "id");
-    lua_pushlstring(L, info.md5, 32);
-    lua_setfield(L, -2, "md5");
-    lua_pushinteger(L, (lua_Integer)WPK_WpkIdAsS32(info.wpkid));
-    lua_setfield(L, -2, "wpkid");
-    lua_pushinteger(L, (lua_Integer)info.offset);
-    lua_setfield(L, -2, "offset");
-    lua_pushinteger(L, (lua_Integer)info.size);
-    lua_setfield(L, -2, "size");
-    lua_pushinteger(L, (lua_Integer)info.file_index);
-    lua_setfield(L, -2, "fileindex");
-    lua_pushvalue(L, 1);
-    lua_setfield(L, -2, "wpk");
-    lua_pushstring(L, ud->idx_path);
-    lua_setfield(L, -2, "path");
+    WPK_PushInfoTable(L, ud, &info, idx);
+    return 1;
+}
 
+static int WPK_GetInfoByHashBatch(lua_State* L)
+{
+    WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    lua_createtable(L, 0, (int)ud->number);
+    WPK_LOCK_OR_RETURN(ud, 1);
+
+    lua_pushnil(L);
+    while (lua_next(L, 2) != 0)
+    {
+        Uint32 hash = 0;
+        int has_hash = 0;
+        if (lua_isinteger(L, -1) || lua_isnumber(L, -1))
+        {
+            hash = (Uint32)lua_tointeger(L, -1);
+            has_hash = 1;
+        }
+        else if (lua_isinteger(L, -2) || lua_isnumber(L, -2))
+        {
+            hash = (Uint32)lua_tointeger(L, -2);
+            has_hash = 1;
+        }
+
+        if (has_hash)
+        {
+            int idx = WPK_FindByHash(ud, hash);
+            if (idx >= 0)
+            {
+                WPK_FileInfo info = ud->list[idx];
+                lua_pushinteger(L, (lua_Integer)hash);
+                WPK_PushInfoTable(L, ud, &info, idx);
+                lua_settable(L, 3);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    WPK_UnlockNativeState(ud);
     return 1;
 }
 
@@ -3791,6 +3991,7 @@ static int WPK_Upsert(lua_State* L)
     if (swpkid >= 0)
         WPK_EnsureWpkFiles(ud, (Uint32)swpkid);
 
+    WPK_MarkLookupDirty(ud);
     WPK_DecodedCacheClear(ud);
     WPK_InvalidateListCache(L, ud);
     WPK_UnlockNativeState(ud);
@@ -3816,6 +4017,7 @@ static int WPK_SetHash(lua_State* L)
         WPK_UNLOCK_RETURN(ud, 0);
 
     ud->list[idx].hash = hash;
+    WPK_MarkLookupDirty(ud);
     WPK_DecodedCacheClear(ud);
     WPK_UnlockNativeState(ud);
     lua_pushinteger(L, (lua_Integer)(idx + 1));
@@ -3930,17 +4132,28 @@ static int WPK_FlushWriteQueue(lua_State* L)
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     int limit = (int)luaL_optinteger(L, 2, 1);
     int force = lua_toboolean(L, 3);
+    Uint64 byte_limit = 0;
+    Uint64 processed_bytes = 0;
     int processed = 0;
     int failed = 0;
     if (force || limit <= 0)
         limit = 0x7fffffff;
+    if (!force && !lua_isnoneornil(L, 4))
+    {
+        lua_Integer n = luaL_checkinteger(L, 4);
+        if (n > 0)
+            byte_limit = (Uint64)n;
+    }
 
     while (ud->write_head && processed < limit)
     {
         WPK_WriteTask* task = ud->write_head;
+        Uint64 task_size = (Uint64)task->size;
         Uint32 wpkid;
         Uint32 offset = 0;
         int ok = 0;
+        if (!force && byte_limit > 0 && processed > 0 && processed_bytes + task_size > byte_limit)
+            break;
 
         ud->write_head = task->next;
         if (!ud->write_head)
@@ -3986,6 +4199,9 @@ static int WPK_FlushWriteQueue(lua_State* L)
             WPK_FreeWriteTask(task);
         }
         processed++;
+        processed_bytes += task_size;
+        if (!force && byte_limit > 0 && processed_bytes >= byte_limit)
+            break;
     }
 
     lua_createtable(L, 0, 4);
@@ -4212,6 +4428,7 @@ static int WPK_GC(lua_State* L)
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     WPK_ClearWriteQueue(ud);
     WPK_DecodedCacheClear(ud);
+    WPK_ClearLookupIndexes(ud);
     if (ud->list_ref > 0)
     {
         luaL_unref(L, LUA_REGISTRYINDEX, ud->list_ref);
@@ -4495,6 +4712,8 @@ static int WPK_NEW(lua_State* L)
             return 0;
         }
         SDL_memset(ud->wpk_files, 0, sizeof(SDL_RWops*) * ud->wpk_files_count);
+        ud->lookup_dirty = 1;
+        WPK_RebuildLookupIndexes(ud);
 
         lua_pushinteger(L, (lua_Integer)ud->number);
         return 2;
@@ -4596,6 +4815,8 @@ static int WPK_NEW(lua_State* L)
         return 0;
     }
     SDL_memset(ud->wpk_files, 0, sizeof(SDL_RWops*) * ud->wpk_files_count);
+    ud->lookup_dirty = 1;
+    WPK_RebuildLookupIndexes(ud);
 
     lua_pushinteger(L, (lua_Integer)ud->number);
     return 2;
@@ -4731,6 +4952,7 @@ MYGXY_API int luaopen_mygxy_wpk(lua_State* L)
         {"GetList", WPK_GetList},
         {"GetInfoByMd5", WPK_GetInfoByMd5},
         {"GetInfoByHash", WPK_GetInfoByHash},
+        {"GetInfoByHashBatch", WPK_GetInfoByHashBatch},
         {"Upsert", WPK_Upsert},
         {"SetHash", WPK_SetHash},
         {"QueueWrite", WPK_QueueWrite},
