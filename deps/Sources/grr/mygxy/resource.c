@@ -46,6 +46,8 @@
 #define RESOURCE_WORKER_THREADS 3
 #define RESOURCE_DEFAULT_WORKER_THREADS 3
 #define RESOURCE_RESULT_TTL_TICKS 600
+#define RESOURCE_EVENT_QUEUE_CAP 512
+#define RESOURCE_WORKER_DONE_CAP 256
 
 typedef enum ResourceNativeKind
 {
@@ -190,6 +192,8 @@ typedef struct ResourceState
     unsigned int native_ready;
     unsigned int native_failed;
     unsigned int native_queue_full;
+    unsigned int event_queue_full;
+    unsigned int worker_done_queue_full;
     unsigned int native_retried;
     unsigned int shell_submitted;
     unsigned int shell_ready;
@@ -226,6 +230,7 @@ static ResourceState g_resource = {0};
 static int resource_is_tcp_shell(const ResourceToken* token);
 static int resource_submit_native_producer(ResourceToken* token);
 static void resource_worker_promote_token(ResourceToken* token);
+static void resource_worker_job_free(ResourceWorkerJob* job);
 
 static char* resource_strdup(const char* s)
 {
@@ -436,11 +441,55 @@ static ResourceToken* resource_find_token_ptr(unsigned int id)
     return NULL;
 }
 
+static unsigned int resource_event_queue_count(void)
+{
+    ResourceEvent* ev = g_resource.events_head;
+    unsigned int count = 0;
+    while (ev)
+    {
+        count++;
+        ev = ev->next;
+    }
+    return count;
+}
+
+static void resource_event_free(ResourceEvent* ev)
+{
+    if (!ev)
+        return;
+    free(ev->resource_id);
+    free(ev->message);
+    free(ev);
+}
+
+static int resource_drop_oldest_event(void)
+{
+    ResourceEvent* ev = g_resource.events_head;
+    ResourceToken* token;
+    if (!ev)
+        return 0;
+    g_resource.events_head = ev->next;
+    if (g_resource.events_tail == ev)
+        g_resource.events_tail = NULL;
+    token = ev->token ? ev->token : resource_find_token_ptr(ev->token_id);
+    if (token)
+        token->event_pending = 0;
+    ev->next = NULL;
+    resource_event_free(ev);
+    g_resource.event_queue_full++;
+    return 1;
+}
+
 static int resource_push_event(ResourceToken* token, ResourceStatus status, const char* resource_id, const char* message)
 {
     ResourceEvent* ev = (ResourceEvent*)calloc(1, sizeof(ResourceEvent));
     if (!ev)
         return 0;
+    while (resource_event_queue_count() >= RESOURCE_EVENT_QUEUE_CAP)
+    {
+        if (!resource_drop_oldest_event())
+            break;
+    }
     ev->token_id = token ? token->id : 0;
     ev->token = token;
     ev->status = status;
@@ -1050,11 +1099,41 @@ static void resource_finish_shell_failed(ResourceToken* token, const char* messa
     g_resource.shell_failed++;
 }
 
+static unsigned int resource_worker_done_count_locked(void)
+{
+    ResourceWorkerJob* p = g_resource.worker_done_head;
+    unsigned int count = 0;
+    while (p)
+    {
+        count++;
+        p = p->next;
+    }
+    return count;
+}
+
 static void resource_worker_push_done(ResourceWorkerJob* job)
 {
+    ResourceWorkerJob* drop_job = NULL;
     if (!job)
         return;
     SDL_LockMutex(g_resource.worker_mutex);
+    while (!g_resource.worker_stop && resource_worker_done_count_locked() >= RESOURCE_WORKER_DONE_CAP)
+    {
+        g_resource.worker_done_queue_full++;
+        if (g_resource.worker_cond)
+            SDL_CondWaitTimeout(g_resource.worker_cond, g_resource.worker_mutex, 10);
+        else
+            break;
+    }
+    if (g_resource.worker_stop)
+    {
+        if (g_resource.worker_active > 0)
+            g_resource.worker_active--;
+        drop_job = job;
+        SDL_UnlockMutex(g_resource.worker_mutex);
+        resource_worker_job_free(drop_job);
+        return;
+    }
     if (g_resource.worker_done_tail)
         g_resource.worker_done_tail->next = job;
     else
@@ -1205,6 +1284,8 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
             if (!g_resource.worker_done_head)
                 g_resource.worker_done_tail = NULL;
             job->next = NULL;
+            if (g_resource.worker_cond)
+                SDL_CondSignal(g_resource.worker_cond);
         }
         SDL_UnlockMutex(g_resource.worker_mutex);
 
@@ -2514,7 +2595,13 @@ static int resource_lua_poll(lua_State* L)
     ResourceEvent* next;
     unsigned int max_ops = 8;
     unsigned int worker_done_ops = 0;
-    if (lua_isnumber(L, 3))
+    if (lua_isnumber(L, 1))
+    {
+        lua_Number n = lua_tonumber(L, 1);
+        if (n >= 1)
+            max_ops = (unsigned int)n;
+    }
+    else if (lua_isnumber(L, 3))
         max_ops = (unsigned int)lua_tointeger(L, 3);
     else if (lua_isnumber(L, 2))
     {
@@ -2684,7 +2771,7 @@ static int resource_push_stats(lua_State* L)
     }
     resource_worker_queue_counts(&worker_pending, &worker_done);
 
-    lua_createtable(L, 0, 24);
+    lua_createtable(L, 0, 48);
     lua_pushboolean(L, 1);
     lua_setfield(L, -2, "native");
     lua_pushinteger(L, (lua_Integer)g_resource.created);
@@ -2727,6 +2814,10 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "native_failed");
     lua_pushinteger(L, (lua_Integer)g_resource.native_queue_full);
     lua_setfield(L, -2, "native_queue_full");
+    lua_pushinteger(L, (lua_Integer)g_resource.event_queue_full);
+    lua_setfield(L, -2, "event_queue_full");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_done_queue_full);
+    lua_setfield(L, -2, "worker_done_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.native_retried);
     lua_setfield(L, -2, "native_retried");
     lua_pushinteger(L, (lua_Integer)g_resource.shell_submitted);

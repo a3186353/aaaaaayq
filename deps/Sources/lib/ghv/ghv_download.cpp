@@ -2,29 +2,33 @@
  * ghv_download.cpp - HTTP file download Lua binding
  * Exports: luaopen_ghv_download
  *
- * Replacement for ghpsocket.download
- * Uses libhv AsyncHttpClient for async downloads
+ * Replacement for ghpsocket.download.
+ * Uses a bounded worker pool around libhv's synchronous HttpClient so slow CDN
+ * sources cannot create one OS thread per Lua download object.
  *
  * Usage in Lua:
  *   local download = require('ghv.download')
  *   local dl = download(url, [filepath], [range])
- *   -- In game loop, poll:
  *   local cur, total, status = dl:GetState()
- *   -- After download to memory:
  *   local data = dl:GetData()
  *   local md5 = dl:GetMD5()
- *   -- Cancel
  *   dl:Cancel()
  */
 #include "ghv_common.h"
 #include "HttpClient.h"
 #include "hbase.h"
 
-#include <cstring>
-#include <fstream>
+#include <algorithm>
 #include <atomic>
-#include <thread>
+#include <cerrno>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 #ifndef GHV_NO_CRYPTO
 #include <openssl/evp.h>
@@ -32,175 +36,395 @@
 
 #define GHV_DOWNLOAD_META "GHV_Download"
 
-struct LuaDownload {
-    struct CoreState {
-        std::string url;
-        std::string filepath;   // empty = download to memory
-        std::string range;
-        int         timeout{60};
+#define GHV_DOWNLOAD_MAX_ACTIVE 6
+#define GHV_DOWNLOAD_QUEUE_CAP 128
+#define GHV_DOWNLOAD_STATUS_DOWNLOADING 1
+#define GHV_DOWNLOAD_STATUS_DONE 100
+#define GHV_DOWNLOAD_STATUS_CANCELLED -10001
+#define GHV_DOWNLOAD_STATUS_QUEUE_FULL -10002
 
-        std::atomic<int64_t> current_size{0};
-        std::atomic<int64_t> total_size{0};
-        std::atomic<int>     status{0};
-        std::atomic<bool>    cancelled{false};
+struct DownloadCoreState {
+    std::string url;
+    std::string filepath;   // empty = download to memory
+    std::string range;
+    int         timeout{60};
 
-        std::string          memory_data;
-        std::string          md5_hex;
-        std::mutex           data_mutex;
-    };
+    std::atomic<int64_t> current_size{0};
+    std::atomic<int64_t> total_size{0};
+    std::atomic<int>     status{0};
+    std::atomic<bool>    cancelled{false};
+    std::atomic<bool>    cancel_recorded{false};
+    std::atomic<bool>    queued{false};
 
-    std::shared_ptr<CoreState> core;
-    std::thread          worker;
+    std::string          memory_data;
+    std::string          md5_hex;
+    std::mutex           data_mutex;
+};
 
-    LuaDownload() : core(std::make_shared<CoreState>()) {}
+static void download_do_download(std::shared_ptr<DownloadCoreState> state);
 
-    ~LuaDownload() {
-        core->cancelled = true;
-        if (worker.joinable()) {
-            if (core->status.load() == 100 || core->status.load() < 0) {
-                worker.join();
-            } else {
-                // hv::HttpClient::send 同步阻塞中, cancelled 标志只能在 http_cb
-                // 回调里检查 — TLS 握手 / body 接收阶段时根本到不了回调.
-                // 短等 100ms 后 detach: timeout 已收紧到 60s, detached worker 最多
-                // 再活 60s 就自然退出, 不会无限堆积线程.
-                for (int i = 0; i < 10; ++i) {
-                    if (core->status.load() == 100 || core->status.load() < 0) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-                if (core->status.load() == 100 || core->status.load() < 0) {
-                    worker.join();
-                } else {
-                    worker.detach();
-                }
+static FILE* download_open_file(const std::string& filepath, const char* mode)
+{
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0);
+    if (wlen <= 0)
+        return nullptr;
+    std::wstring wpath(wlen, 0);
+    MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &wpath[0], wlen);
+    int mlen = MultiByteToWideChar(CP_UTF8, 0, mode, -1, NULL, 0);
+    if (mlen <= 0)
+        return nullptr;
+    std::wstring wmode(mlen, 0);
+    MultiByteToWideChar(CP_UTF8, 0, mode, -1, &wmode[0], mlen);
+    return _wfopen(wpath.c_str(), wmode.c_str());
+#else
+    return fopen(filepath.c_str(), mode);
+#endif
+}
+
+static void download_remove_file(const std::string& filepath)
+{
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0);
+    if (wlen > 0) {
+        std::wstring wpath(wlen, 0);
+        MultiByteToWideChar(CP_UTF8, 0, filepath.c_str(), -1, &wpath[0], wlen);
+        _wremove(wpath.c_str());
+    }
+#else
+    remove(filepath.c_str());
+#endif
+}
+
+static void download_set_content_length(std::shared_ptr<DownloadCoreState> state, const std::string& value)
+{
+    if (value.empty())
+        return;
+    try {
+        state->total_size = std::stoll(value);
+    } catch (...) {
+        state->total_size = 0;
+    }
+}
+
+static void download_clear_memory(std::shared_ptr<DownloadCoreState> state)
+{
+    std::lock_guard<std::mutex> lock(state->data_mutex);
+    std::string().swap(state->memory_data);
+}
+
+static int download_final_error(int ret, int status_code)
+{
+    if (ret != 0)
+        return ret < 0 ? ret : -ret;
+    return status_code > 0 ? -status_code : -1;
+}
+
+static bool download_is_timeout_status(int status)
+{
+    return status == -ETIMEDOUT || status == -1100 || status == -10060;
+}
+
+class DownloadManager {
+public:
+    bool enqueue(const std::shared_ptr<DownloadCoreState>& state)
+    {
+        ensure_started();
+        std::lock_guard<std::mutex> lock(mutex_);
+        submitted_++;
+        if (stopping_ || state->cancelled.load()) {
+            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+            record_cancelled_locked(state);
+            return false;
+        }
+        if (queue_.size() >= GHV_DOWNLOAD_QUEUE_CAP) {
+            queue_full_++;
+            state->status = GHV_DOWNLOAD_STATUS_QUEUE_FULL;
+            return false;
+        }
+        state->status = GHV_DOWNLOAD_STATUS_DOWNLOADING;
+        state->queued = true;
+        queue_.push_back(state);
+        queued_total_++;
+        cv_.notify_one();
+        return true;
+    }
+
+    void cancel(const std::shared_ptr<DownloadCoreState>& state)
+    {
+        if (!state)
+            return;
+        int status = state->status.load();
+        if (status == GHV_DOWNLOAD_STATUS_DONE || status < 0)
+            return;
+        state->cancelled = true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+            if (it->get() == state.get()) {
+                queue_.erase(it);
+                state->queued = false;
+                state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+                record_cancelled_locked(state);
+                cv_.notify_all();
+                return;
             }
         }
+        record_cancelled_locked(state);
+    }
+
+    void push_stats(lua_State* L)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lua_createtable(L, 0, 11);
+        lua_pushinteger(L, (lua_Integer)active_);
+        lua_setfield(L, -2, "active");
+        lua_pushinteger(L, (lua_Integer)queue_.size());
+        lua_setfield(L, -2, "pending");
+        lua_pushinteger(L, (lua_Integer)workers_.size());
+        lua_setfield(L, -2, "thread_count");
+        lua_pushinteger(L, (lua_Integer)GHV_DOWNLOAD_MAX_ACTIVE);
+        lua_setfield(L, -2, "max_active");
+        lua_pushinteger(L, (lua_Integer)GHV_DOWNLOAD_QUEUE_CAP);
+        lua_setfield(L, -2, "queue_cap");
+        lua_pushinteger(L, (lua_Integer)submitted_.load());
+        lua_setfield(L, -2, "submitted");
+        lua_pushinteger(L, (lua_Integer)started_.load());
+        lua_setfield(L, -2, "started");
+        lua_pushinteger(L, (lua_Integer)queued_total_.load());
+        lua_setfield(L, -2, "queued_total");
+        lua_pushinteger(L, (lua_Integer)completed_.load());
+        lua_setfield(L, -2, "completed");
+        lua_pushinteger(L, (lua_Integer)cancelled_.load());
+        lua_setfield(L, -2, "cancelled");
+        lua_pushinteger(L, (lua_Integer)queue_full_.load());
+        lua_setfield(L, -2, "queue_full");
+        lua_pushinteger(L, (lua_Integer)timeout_.load());
+        lua_setfield(L, -2, "timeout");
+    }
+
+    ~DownloadManager()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            for (auto& state : queue_) {
+                if (state) {
+                    state->queued = false;
+                    state->cancelled = true;
+                    state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+                    record_cancelled_locked(state);
+                }
+            }
+            queue_.clear();
+        }
+        cv_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable())
+                worker.join();
+        }
+    }
+
+private:
+    void ensure_started()
+    {
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_pool_) {
+                started_pool_ = true;
+                start = true;
+            }
+        }
+        if (!start)
+            return;
+        for (int i = 0; i < GHV_DOWNLOAD_MAX_ACTIVE; ++i) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            workers_.emplace_back([this]() { worker_loop(); });
+        }
+    }
+
+    void record_cancelled_locked(const std::shared_ptr<DownloadCoreState>& state)
+    {
+        bool expected = false;
+        if (state && state->cancel_recorded.compare_exchange_strong(expected, true))
+            cancelled_++;
+    }
+
+    void worker_loop()
+    {
+        for (;;) {
+            std::shared_ptr<DownloadCoreState> state;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() { return stopping_ || !queue_.empty(); });
+                if (stopping_ && queue_.empty())
+                    return;
+                state = queue_.front();
+                queue_.pop_front();
+                if (state)
+                    state->queued = false;
+                active_++;
+                started_++;
+            }
+
+            if (!state || state->cancelled.load()) {
+                if (state) {
+                    state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    record_cancelled_locked(state);
+                }
+                finish_one(state);
+                continue;
+            }
+
+            download_do_download(state);
+            finish_one(state);
+        }
+    }
+
+    void finish_one(const std::shared_ptr<DownloadCoreState>& state)
+    {
+        int status = state ? state->status.load() : 0;
+        if (download_is_timeout_status(status))
+            timeout_++;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (active_ > 0)
+                active_--;
+            completed_++;
+        }
+        cv_.notify_all();
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<std::shared_ptr<DownloadCoreState>> queue_;
+    std::vector<std::thread> workers_;
+    bool started_pool_{false};
+    bool stopping_{false};
+    unsigned int active_{0};
+    std::atomic<unsigned int> submitted_{0};
+    std::atomic<unsigned int> queued_total_{0};
+    std::atomic<unsigned int> started_{0};
+    std::atomic<unsigned int> completed_{0};
+    std::atomic<unsigned int> cancelled_{0};
+    std::atomic<unsigned int> queue_full_{0};
+    std::atomic<unsigned int> timeout_{0};
+};
+
+static DownloadManager& download_manager()
+{
+    static DownloadManager manager;
+    return manager;
+}
+
+static void download_do_download(std::shared_ptr<DownloadCoreState> state)
+{
+    if (!state || state->cancelled.load()) {
+        if (state)
+            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+        return;
+    }
+
+    HttpRequest req;
+    req.method = HTTP_GET;
+    req.url = state->url;
+    req.timeout = state->timeout;
+
+    if (!state->range.empty()) {
+        req.headers["Range"] = "bytes=" + state->range;
+    }
+
+    HttpResponse resp;
+    hv::HttpClient client;
+
+    if (!state->filepath.empty()) {
+        bool append_mode = !state->range.empty();
+        FILE* fp = download_open_file(state->filepath, append_mode ? "ab" : "wb");
+        if (!fp) {
+            state->status = -1;
+            return;
+        }
+
+        resp.http_cb = [state, &fp, append_mode](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
+            if (state->cancelled.load()) return;
+            if (state_h == HP_HEADERS_COMPLETE) {
+                if (append_mode && msg->GetHeader("Content-Range").empty()) {
+                    if (fp) {
+                        fclose(fp);
+                        fp = download_open_file(state->filepath, "wb");
+                    }
+                }
+                download_set_content_length(state, msg->GetHeader("Content-Length"));
+            } else if (state_h == HP_BODY) {
+                if (data && size > 0 && fp) {
+                    fwrite(data, 1, size, fp);
+                    state->current_size += size;
+                }
+            }
+        };
+
+        int ret = client.send(&req, &resp);
+        if (fp) fclose(fp);
+
+        if (state->cancelled.load()) {
+            download_remove_file(state->filepath);
+            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+        } else if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
+            download_remove_file(state->filepath);
+            state->status = download_final_error(ret, resp.status_code);
+        } else {
+            state->status = GHV_DOWNLOAD_STATUS_DONE;
+        }
+    } else {
+        resp.http_cb = [state](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
+            if (state->cancelled.load()) return;
+            if (state_h == HP_HEADERS_COMPLETE) {
+                download_set_content_length(state, msg->GetHeader("Content-Length"));
+                if (state->total_size.load() > 0) {
+                    std::lock_guard<std::mutex> lock(state->data_mutex);
+                    state->memory_data.reserve(static_cast<size_t>(state->total_size.load()));
+                }
+            } else if (state_h == HP_BODY) {
+                if (data && size > 0) {
+                    std::lock_guard<std::mutex> lock(state->data_mutex);
+                    state->memory_data.append(data, size);
+                    state->current_size += size;
+                }
+            }
+        };
+
+        int ret = client.send(&req, &resp);
+
+        if (state->cancelled.load()) {
+            download_clear_memory(state);
+            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+        } else if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
+            download_clear_memory(state);
+            state->status = download_final_error(ret, resp.status_code);
+        } else {
+            if (state->memory_data.empty() && !resp.body.empty()) {
+                std::lock_guard<std::mutex> lock(state->data_mutex);
+                state->memory_data = resp.body;
+                state->current_size = state->memory_data.size();
+                state->total_size = state->memory_data.size();
+            }
+            state->status = GHV_DOWNLOAD_STATUS_DONE;
+        }
+    }
+}
+
+struct LuaDownload {
+    std::shared_ptr<DownloadCoreState> core;
+
+    LuaDownload() : core(std::make_shared<DownloadCoreState>()) {}
+
+    ~LuaDownload() {
+        download_manager().cancel(core);
     }
 
     void start() {
-        core->status = 1; // downloading
-        auto st = core;
-        worker = std::thread([st]() {
-            doDownload(st);
-        });
-    }
-
-    static void doDownload(std::shared_ptr<CoreState> state) {
-        HttpRequest req;
-        req.method = HTTP_GET;
-        req.url = state->url;
-        req.timeout = state->timeout;
-
-        if (!state->range.empty()) {
-            req.headers["Range"] = "bytes=" + state->range;
-        }
-
-        HttpResponse resp;
-        hv::HttpClient client;
-
-        if (!state->filepath.empty()) {
-            // Download to file
-            bool append_mode = !state->range.empty();
-            FILE* fp = nullptr;
-#ifdef _WIN32
-            int wlen = MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, NULL, 0);
-            if (wlen > 0) {
-                std::wstring wpath(wlen, 0);
-                MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, &wpath[0], wlen);
-                fp = _wfopen(wpath.c_str(), append_mode ? L"ab" : L"wb");
-            }
-#else
-            fp = fopen(state->filepath.c_str(), append_mode ? "ab" : "wb");
-#endif
-            if (!fp) {
-                state->status = -1;
-                return;
-            }
-
-            resp.http_cb = [state, &fp, append_mode](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
-                if (state->cancelled.load()) return;
-                if (state_h == HP_HEADERS_COMPLETE) {
-                    if (append_mode && msg->GetHeader("Content-Range").empty()) {
-                        if (fp) {
-                            fclose(fp);
-#ifdef _WIN32
-                            int twl = MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, NULL, 0);
-                            if (twl > 0) {
-                                std::wstring twp(twl, 0);
-                                MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, &twp[0], twl);
-                                fp = _wfopen(twp.c_str(), L"wb");
-                            }
-#else
-                            fp = fopen(state->filepath.c_str(), "wb");
-#endif
-                        }
-                    }
-                    std::string cl = msg->GetHeader("Content-Length");
-                    if (!cl.empty()) {
-                        state->total_size = std::stoll(cl);
-                    }
-                } else if (state_h == HP_BODY) {
-                    if (data && size > 0 && fp) {
-                        fwrite(data, 1, size, fp);
-                        state->current_size += size;
-                    }
-                } else if (state_h == HP_MESSAGE_COMPLETE) {
-                    // done
-                }
-            };
-
-            int ret = client.send(&req, &resp);
-            if (fp) fclose(fp);
-
-            if (state->cancelled.load() || ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
-#ifdef _WIN32
-                int rwl = MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, NULL, 0);
-                if (rwl > 0) {
-                    std::wstring rwp(rwl, 0);
-                    MultiByteToWideChar(CP_UTF8, 0, state->filepath.c_str(), -1, &rwp[0], rwl);
-                    _wremove(rwp.c_str());
-                }
-#else
-                remove(state->filepath.c_str());
-#endif
-                state->status = -(ret != 0 ? ret : resp.status_code);
-            } else {
-                state->status = 100;
-            }
-        } else {
-            // Download to memory
-            resp.http_cb = [state](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
-                if (state->cancelled.load()) return;
-                if (state_h == HP_HEADERS_COMPLETE) {
-                    std::string cl = msg->GetHeader("Content-Length");
-                    if (!cl.empty()) {
-                        state->total_size = std::stoll(cl);
-                        std::lock_guard<std::mutex> lock(state->data_mutex);
-                        state->memory_data.reserve(static_cast<size_t>(state->total_size.load()));
-                    }
-                } else if (state_h == HP_BODY) {
-                    if (data && size > 0) {
-                        std::lock_guard<std::mutex> lock(state->data_mutex);
-                        state->memory_data.append(data, size);
-                        state->current_size += size;
-                    }
-                }
-            };
-
-            int ret = client.send(&req, &resp);
-
-            if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
-                state->status = -(ret != 0 ? ret : resp.status_code);
-            } else {
-                if (state->memory_data.empty() && !resp.body.empty()) {
-                    std::lock_guard<std::mutex> lock(state->data_mutex);
-                    state->memory_data = resp.body;
-                    state->current_size = state->memory_data.size();
-                    state->total_size = state->memory_data.size();
-                }
-                state->status = 100;
-            }
-        }
+        download_manager().enqueue(core);
     }
 };
 
@@ -226,21 +450,11 @@ static int l_download_get_data(lua_State* L) {
 static int l_download_get_md5(lua_State* L) {
     LuaDownload* self = check_download(L);
 #ifndef GHV_NO_CRYPTO
-    if (self->core->md5_hex.empty() && self->core->status == 100) {
+    if (self->core->md5_hex.empty() && self->core->status == GHV_DOWNLOAD_STATUS_DONE) {
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
         if (ctx && EVP_DigestInit_ex(ctx, EVP_md5(), NULL)) {
             if (!self->core->filepath.empty()) {
-                FILE* f = nullptr;
-#ifdef _WIN32
-                int md5wl = MultiByteToWideChar(CP_UTF8, 0, self->core->filepath.c_str(), -1, NULL, 0);
-                if (md5wl > 0) {
-                    std::wstring md5wp(md5wl, 0);
-                    MultiByteToWideChar(CP_UTF8, 0, self->core->filepath.c_str(), -1, &md5wp[0], md5wl);
-                    f = _wfopen(md5wp.c_str(), L"rb");
-                }
-#else
-                f = fopen(self->core->filepath.c_str(), "rb");
-#endif
+                FILE* f = download_open_file(self->core->filepath, "rb");
                 if (f) {
                     unsigned char buf[8192];
                     size_t n;
@@ -272,8 +486,13 @@ static int l_download_get_md5(lua_State* L) {
 
 static int l_download_cancel(lua_State* L) {
     LuaDownload* self = check_download(L);
-    self->core->cancelled = true;
+    download_manager().cancel(self->core);
     return 0;
+}
+
+static int l_download_stats(lua_State* L) {
+    download_manager().push_stats(L);
+    return 1;
 }
 
 static int l_download_gc(lua_State* L) {
@@ -307,12 +526,14 @@ static int l_download_new(lua_State* L) {
 
 GHV_EXPORT int luaopen_ghv_download(lua_State* L)
 {
-    ghv_init_libhv_log(L);  // 非调试模式下禁用 libhv hlog 落盘
+    ghv_init_libhv_log(L);
     luaL_Reg methods[] = {
         {"GetState", l_download_get_state},
         {"GetData",  l_download_get_data},
         {"GetMD5",   l_download_get_md5},
         {"Cancel",   l_download_cancel},
+        {"Stats",    l_download_stats},
+        {"GetStats", l_download_stats},
         {NULL, NULL},
     };
 
