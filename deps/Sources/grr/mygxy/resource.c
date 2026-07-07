@@ -47,6 +47,7 @@
 #define RESOURCE_DEFAULT_WORKER_THREADS 3
 #define RESOURCE_RESULT_TTL_TICKS 600
 #define RESOURCE_EVENT_QUEUE_CAP 512
+#define RESOURCE_WORKER_PENDING_CAP 256
 #define RESOURCE_WORKER_DONE_CAP 256
 
 typedef enum ResourceNativeKind
@@ -193,6 +194,7 @@ typedef struct ResourceState
     unsigned int native_failed;
     unsigned int native_queue_full;
     unsigned int event_queue_full;
+    unsigned int worker_queue_full;
     unsigned int worker_done_queue_full;
     unsigned int native_retried;
     unsigned int shell_submitted;
@@ -1111,15 +1113,21 @@ static unsigned int resource_worker_done_count_locked(void)
     return count;
 }
 
-static void resource_worker_push_done(ResourceWorkerJob* job)
+static int resource_worker_push_done_ex(ResourceWorkerJob* job, int counted_active, int wait_if_full)
 {
     ResourceWorkerJob* drop_job = NULL;
     if (!job)
-        return;
+        return 0;
     SDL_LockMutex(g_resource.worker_mutex);
     while (!g_resource.worker_stop && resource_worker_done_count_locked() >= RESOURCE_WORKER_DONE_CAP)
     {
         g_resource.worker_done_queue_full++;
+        if (!wait_if_full)
+        {
+            SDL_UnlockMutex(g_resource.worker_mutex);
+            resource_worker_job_free(job);
+            return 0;
+        }
         if (g_resource.worker_cond)
             SDL_CondWaitTimeout(g_resource.worker_cond, g_resource.worker_mutex, 10);
         else
@@ -1127,12 +1135,12 @@ static void resource_worker_push_done(ResourceWorkerJob* job)
     }
     if (g_resource.worker_stop)
     {
-        if (g_resource.worker_active > 0)
+        if (counted_active && g_resource.worker_active > 0)
             g_resource.worker_active--;
         drop_job = job;
         SDL_UnlockMutex(g_resource.worker_mutex);
         resource_worker_job_free(drop_job);
-        return;
+        return 0;
     }
     if (g_resource.worker_done_tail)
         g_resource.worker_done_tail->next = job;
@@ -1140,9 +1148,15 @@ static void resource_worker_push_done(ResourceWorkerJob* job)
         g_resource.worker_done_head = job;
     g_resource.worker_done_tail = job;
     job->next = NULL;
-    if (g_resource.worker_active > 0)
+    if (counted_active && g_resource.worker_active > 0)
         g_resource.worker_active--;
     SDL_UnlockMutex(g_resource.worker_mutex);
+    return 1;
+}
+
+static void resource_worker_push_done(ResourceWorkerJob* job)
+{
+    resource_worker_push_done_ex(job, 1, 1);
 }
 
 static void resource_worker_job_free(ResourceWorkerJob* job)
@@ -1569,14 +1583,11 @@ static int resource_worker_submit(ResourceToken* token)
         SDL_memcpy(job->pal_snapshot, tcp->pal_dyn ? tcp->pal_dyn : tcp->pal, sizeof(Uint32) * job->pal_count);
         job->result_ready = 1;
         job->result_success = 1;
-        SDL_LockMutex(g_resource.worker_mutex);
-        if (g_resource.worker_done_tail)
-            g_resource.worker_done_tail->next = job;
-        else
-            g_resource.worker_done_head = job;
-        g_resource.worker_done_tail = job;
-        job->next = NULL;
-        SDL_UnlockMutex(g_resource.worker_mutex);
+        if (!resource_worker_push_done_ex(job, 0, 0))
+        {
+            token->retry_tick = g_resource.poll_tick + 1;
+            return -1;
+        }
         g_resource.frame_submitted++;
         return 1;
     }
@@ -1611,6 +1622,14 @@ static int resource_worker_submit(ResourceToken* token)
     g_resource.worker_thread_count = started;
 
     SDL_LockMutex(g_resource.worker_mutex);
+    if (resource_worker_count_jobs(g_resource.worker_head) >= RESOURCE_WORKER_PENDING_CAP)
+    {
+        SDL_UnlockMutex(g_resource.worker_mutex);
+        g_resource.worker_queue_full++;
+        token->retry_tick = g_resource.poll_tick + 1;
+        resource_worker_job_free(job);
+        return -1;
+    }
     resource_worker_enqueue(job);
     SDL_CondSignal(g_resource.worker_cond);
     SDL_UnlockMutex(g_resource.worker_mutex);
@@ -1624,9 +1643,30 @@ static int resource_worker_submit(ResourceToken* token)
 static int resource_try_native_frame(ResourceToken* token)
 {
     const char* status = NULL;
+    int submit;
     int ret;
     if (!token || token->status != RESOURCE_STATUS_QUEUED || token->cancelled)
         return 0;
+    if (token->retry_tick && g_resource.poll_tick < token->retry_tick)
+        return 0;
+    if (resource_is_tcp_shell(token))
+    {
+        if (token->shell_started)
+            return 0;
+        submit = resource_worker_submit(token);
+        if (submit > 0)
+        {
+            if (!resource_is_terminal(token->status))
+                token->worker_started = 1;
+            token->shell_started = 1;
+            return resource_is_terminal(token->status) ? 1 : 0;
+        }
+        if (submit < 0)
+            return 0;
+        resource_store_failure(token, "worker init failed");
+        resource_set_status(token, RESOURCE_STATUS_DEGRADED, "worker init failed");
+        return 1;
+    }
     if (resource_is_shell_type(token->resource_type))
         return 0;
     if (token->native_kind == RESOURCE_NATIVE_NONE)
@@ -1643,18 +1683,18 @@ static int resource_try_native_frame(ResourceToken* token)
     {
         if (token->worker_started)
             return 0;
-        if (resource_worker_submit(token))
+        submit = resource_worker_submit(token);
+        if (submit > 0)
         {
             if (!resource_is_terminal(token->status))
                 token->worker_started = 1;
             return resource_is_terminal(token->status) ? 1 : 0;
         }
+        if (submit < 0)
+            return 0;
         resource_finish_native_failed(token, "worker init failed");
         return 1;
     }
-
-    if (token->retry_tick && g_resource.poll_tick < token->retry_tick)
-        return 0;
 
     token->submit_attempts++;
     ret = resource_native_request_frame(token, &status);
@@ -1690,6 +1730,16 @@ static int resource_try_native_frame(ResourceToken* token)
 
 static int resource_native_frame_candidate(const ResourceToken* token)
 {
+    if (resource_is_tcp_shell(token))
+    {
+        if (token->shell_started)
+            return 0;
+        if (token->retry_tick && g_resource.poll_tick < token->retry_tick)
+            return 0;
+        return token->status == RESOURCE_STATUS_QUEUED
+            && token->wpk_ud
+            && token->has_wpk_id;
+    }
     return token
         && !resource_is_shell_type(token->resource_type)
         && token->native_kind != RESOURCE_NATIVE_NONE
@@ -2479,6 +2529,7 @@ static int resource_submit_native_producer(ResourceToken* token)
 {
     const char* message = NULL;
     int accepted;
+    int submit;
     if (!token || resource_is_terminal(token->status))
         return 0;
 
@@ -2525,13 +2576,16 @@ static int resource_submit_native_producer(ResourceToken* token)
         {
             return 1;
         }
-        if (resource_worker_submit(token))
+        submit = resource_worker_submit(token);
+        if (submit > 0)
         {
             if (!resource_is_terminal(token->status))
                 token->worker_started = 1;
             token->shell_started = resource_is_tcp_shell(token);
             return 1;
         }
+        if (submit < 0)
+            return 1;
         resource_store_failure(token, "worker init failed");
         resource_set_status(token, RESOURCE_STATUS_DEGRADED, "worker init failed");
         return 0;
@@ -2816,6 +2870,8 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "native_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.event_queue_full);
     lua_setfield(L, -2, "event_queue_full");
+    lua_pushinteger(L, (lua_Integer)g_resource.worker_queue_full);
+    lua_setfield(L, -2, "worker_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_done_queue_full);
     lua_setfield(L, -2, "worker_done_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.native_retried);
