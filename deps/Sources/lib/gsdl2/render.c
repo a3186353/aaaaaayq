@@ -1,5 +1,80 @@
 #include "gge.h"
 #include "SDL_render.h"
+#include <stdlib.h>
+
+#define GGE_RENDER_SAMPLE_CAP 1024
+
+typedef struct
+{
+    SDL_mutex* mutex;
+    Uint64 create_count;
+    Uint64 create_from_surface_count;
+    Uint64 update_count;
+    Uint64 upload_count;
+    Uint64 upload_total_us;
+    Uint32 upload_samples[GGE_RENDER_SAMPLE_CAP];
+    int upload_sample_pos;
+    int upload_sample_count;
+} GGE_RenderStats;
+
+static GGE_RenderStats g_render_stats = { 0 };
+
+static void GGE_RenderStatsEnsure(void)
+{
+    if (!g_render_stats.mutex)
+        g_render_stats.mutex = SDL_CreateMutex();
+}
+
+static Uint64 GGE_NowUS(void)
+{
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    if (!freq)
+        return 0;
+    return (SDL_GetPerformanceCounter() * 1000000ULL) / freq;
+}
+
+static void GGE_RenderStatsRecord(int kind, Uint64 elapsed_us)
+{
+    GGE_RenderStatsEnsure();
+    if (g_render_stats.mutex)
+        SDL_LockMutex(g_render_stats.mutex);
+    if (kind == 1)
+        g_render_stats.create_count++;
+    else if (kind == 2)
+        g_render_stats.create_from_surface_count++;
+    else if (kind == 3)
+        g_render_stats.update_count++;
+    g_render_stats.upload_count++;
+    g_render_stats.upload_total_us += elapsed_us;
+    g_render_stats.upload_samples[g_render_stats.upload_sample_pos] =
+        (Uint32)(elapsed_us > 0xFFFFFFFFULL ? 0xFFFFFFFFu : elapsed_us);
+    g_render_stats.upload_sample_pos = (g_render_stats.upload_sample_pos + 1) % GGE_RENDER_SAMPLE_CAP;
+    if (g_render_stats.upload_sample_count < GGE_RENDER_SAMPLE_CAP)
+        g_render_stats.upload_sample_count++;
+    if (g_render_stats.mutex)
+        SDL_UnlockMutex(g_render_stats.mutex);
+}
+
+static int GGE_Uint32Compare(const void* a, const void* b)
+{
+    Uint32 av = *(const Uint32*)a;
+    Uint32 bv = *(const Uint32*)b;
+    return (av > bv) - (av < bv);
+}
+
+static Uint32 GGE_Percentile(Uint32* values, int count, int pct)
+{
+    int idx;
+    if (!values || count <= 0)
+        return 0;
+    qsort(values, (size_t)count, sizeof(Uint32), GGE_Uint32Compare);
+    idx = (count * pct + 99) / 100;
+    if (idx < 1)
+        idx = 1;
+    if (idx > count)
+        idx = count;
+    return values[idx - 1];
+}
 
 static int LUA_GetNumRenderDrivers(lua_State* L)
 {
@@ -132,15 +207,22 @@ static int LUA_CreateTexture(lua_State* L)
     int h = (int)luaL_checkinteger(L, 3);
     int format = (int)luaL_optinteger(L, 5, SDL_PIXELFORMAT_ARGB8888);
     int access = (int)luaL_optinteger(L, 4, SDL_TEXTUREACCESS_TARGET);
+    Uint64 start_us = GGE_NowUS();
     SDL_Texture* tex = SDL_CreateTexture(rd, format, access, w, h);
     if (tex)
     {
         GGE_Texture* gt = (GGE_Texture*)SDL_calloc(1, sizeof(GGE_Texture));
+        if (!gt)
+        {
+            SDL_DestroyTexture(tex);
+            return 0;
+        }
         SDL_Texture** ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
         *ud = tex;
         gt->refcount = 1;
         SDL_SetTextureUserData(tex, gt);
         luaL_setmetatable(L, "SDL_Texture");
+        GGE_RenderStatsRecord(1, GGE_NowUS() - start_us);
         return 1;
     }
     return 0;
@@ -154,21 +236,29 @@ static int LUA_CreateTextureFromSurface(lua_State* L)
 
     if (access == SDL_TEXTUREACCESS_STATIC)
     {
+        Uint64 start_us = GGE_NowUS();
         SDL_Texture* tex = SDL_CreateTextureFromSurface(rd, sf);
         if (tex)
         {
             GGE_Texture* gt = (GGE_Texture*)SDL_calloc(1, sizeof(GGE_Texture));
+            if (!gt)
+            {
+                SDL_DestroyTexture(tex);
+                return 0;
+            }
             SDL_Texture** ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
             *ud = tex;
             gt->refcount = 1;
             gt->sf = GGE_SurfaceAlphaToSurface(sf, 0);
             SDL_SetTextureUserData(tex, gt);
             luaL_setmetatable(L, "SDL_Texture");
+            GGE_RenderStatsRecord(2, GGE_NowUS() - start_us);
             return 1;
         }
     }
     else if (access == SDL_TEXTUREACCESS_STREAMING)
     {
+        Uint64 start_us = GGE_NowUS();
         SDL_Texture* tex = SDL_CreateTexture(rd, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, sf->w, sf->h);
 
         if (tex)
@@ -182,6 +272,11 @@ static int LUA_CreateTextureFromSurface(lua_State* L)
                 SDL_UnlockTexture(tex);
             }
             GGE_Texture* gt = (GGE_Texture*)SDL_calloc(1, sizeof(GGE_Texture));
+            if (!gt)
+            {
+                SDL_DestroyTexture(tex);
+                return 0;
+            }
             SDL_Texture** ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
             *ud = tex;
             gt->refcount = 1;
@@ -198,6 +293,7 @@ static int LUA_CreateTextureFromSurface(lua_State* L)
 
             SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
             luaL_setmetatable(L, "SDL_Texture");
+            GGE_RenderStatsRecord(2, GGE_NowUS() - start_us);
             return 1;
         }
     }
@@ -314,8 +410,12 @@ static int LUA_UpdateTexture(lua_State* L)
     SDL_Rect* rect = rect = (SDL_Rect*)luaL_testudata(L, 2, "SDL_Rect");
     const void* pixels = lua_topointer(L, 3);
     int pitch = (int)luaL_checkinteger(L, 4);
+    Uint64 start_us = GGE_NowUS();
+    int ok = SDL_UpdateTexture(tex, rect, pixels, pitch) == 0;
 
-    lua_pushboolean(L, SDL_UpdateTexture(tex, rect, pixels, pitch) == 0);
+    if (ok)
+        GGE_RenderStatsRecord(3, GGE_NowUS() - start_us);
+    lua_pushboolean(L, ok);
     return 1;
 }
 
@@ -799,6 +899,55 @@ static int LUA_RenderFlush(lua_State* L)
     lua_pushboolean(L, SDL_RenderFlush(rd) == 0);
     return 1;
 }
+
+static int LUA_GetRenderStats(lua_State* L)
+{
+    Uint64 create_count;
+    Uint64 create_from_surface_count;
+    Uint64 update_count;
+    Uint64 upload_count;
+    Uint64 upload_total_us;
+    Uint32 samples[GGE_RENDER_SAMPLE_CAP];
+    int sample_count;
+    Uint32 p95;
+    Uint32 p99;
+
+    GGE_RenderStatsEnsure();
+    if (g_render_stats.mutex)
+        SDL_LockMutex(g_render_stats.mutex);
+    create_count = g_render_stats.create_count;
+    create_from_surface_count = g_render_stats.create_from_surface_count;
+    update_count = g_render_stats.update_count;
+    upload_count = g_render_stats.upload_count;
+    upload_total_us = g_render_stats.upload_total_us;
+    sample_count = g_render_stats.upload_sample_count;
+    if (sample_count > 0)
+        SDL_memcpy(samples, g_render_stats.upload_samples, sizeof(Uint32) * (size_t)sample_count);
+    if (g_render_stats.mutex)
+        SDL_UnlockMutex(g_render_stats.mutex);
+
+    p95 = GGE_Percentile(samples, sample_count, 95);
+    p99 = GGE_Percentile(samples, sample_count, 99);
+
+    lua_createtable(L, 0, 9);
+    lua_pushinteger(L, (lua_Integer)create_count);
+    lua_setfield(L, -2, "create");
+    lua_pushinteger(L, (lua_Integer)create_from_surface_count);
+    lua_setfield(L, -2, "create_from_surface");
+    lua_pushinteger(L, (lua_Integer)update_count);
+    lua_setfield(L, -2, "update");
+    lua_pushinteger(L, (lua_Integer)upload_count);
+    lua_setfield(L, -2, "upload_count");
+    lua_pushinteger(L, (lua_Integer)upload_total_us);
+    lua_setfield(L, -2, "upload_total_us");
+    lua_pushinteger(L, (lua_Integer)sample_count);
+    lua_setfield(L, -2, "sample_count");
+    lua_pushinteger(L, (lua_Integer)p95);
+    lua_setfield(L, -2, "upload_p95_us");
+    lua_pushinteger(L, (lua_Integer)p99);
+    lua_setfield(L, -2, "upload_p99_us");
+    return 1;
+}
 //TODO
 //SDL_GL_BindTexture
 //SDL_GL_UnbindTexture
@@ -853,6 +1002,7 @@ static const luaL_Reg renderer_funcs[] = {
 static const luaL_Reg sdl_funcs[] = {
     {"GetNumRenderDrivers", LUA_GetNumRenderDrivers},
     {"GetRenderDriverInfo", LUA_GetRenderDriverInfo},
+    {"GetRenderStats", LUA_GetRenderStats},
     //{"GL_BindTexture", LUA_GL_BindTexture},
     //{"GL_UnbindTexture", LUA_GL_UnbindTexture},
 

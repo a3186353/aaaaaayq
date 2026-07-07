@@ -144,3 +144,4 @@ int JY_Create(lua_State* L);
 int JY_NativeRequestFrame(JY_UserData* ud, Uint32 id, const char** status);
 int JY_NativePollAsync(JY_UserData* ud, Uint32 limit);
 int JY_NativeIsFrameDecoded(JY_UserData* ud, Uint32 id);
+void JY_PushPerfStats(lua_State* L);

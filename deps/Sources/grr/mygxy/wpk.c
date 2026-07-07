@@ -23,6 +23,7 @@
 #define WPK_DECODED_CACHE_MAX_ENTRIES 64u
 #define WPK_DECODED_CACHE_MAX_BYTES ((size_t)32u * 1024u * 1024u)
 #define WPK_WRITE_MAX_PACK_BYTES ((Sint64)1024 * 1024 * 1024)
+#define WPK_PERF_SAMPLE_CAP 1024
 
 typedef struct WPK_DebugStats
 {
@@ -43,6 +44,79 @@ typedef struct WPK_DebugStats
 } WPK_DebugStats;
 
 static WPK_DebugStats g_wpk_stats = {0};
+
+typedef struct WPK_TimeStats
+{
+    Uint64 count;
+    Uint64 total_us;
+    Uint32 samples[WPK_PERF_SAMPLE_CAP];
+    int sample_pos;
+    int sample_count;
+} WPK_TimeStats;
+
+typedef struct WPK_PerfStats
+{
+    SDL_mutex* mutex;
+    WPK_TimeStats parse_us;
+    WPK_TimeStats write_queue_us;
+} WPK_PerfStats;
+
+static WPK_PerfStats g_wpk_perf = {0};
+
+static void WPK_PerfEnsure(void)
+{
+    if (!g_wpk_perf.mutex)
+        g_wpk_perf.mutex = SDL_CreateMutex();
+}
+
+static Uint64 WPK_NowUS(void)
+{
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    if (!freq)
+        return 0;
+    return (SDL_GetPerformanceCounter() * 1000000ULL) / freq;
+}
+
+static void WPK_TimeRecord(WPK_TimeStats* s, Uint64 elapsed_us)
+{
+    if (!s)
+        return;
+    s->count++;
+    s->total_us += elapsed_us;
+    s->samples[s->sample_pos] = (Uint32)(elapsed_us > 0xFFFFFFFFULL ? 0xFFFFFFFFu : elapsed_us);
+    s->sample_pos = (s->sample_pos + 1) % WPK_PERF_SAMPLE_CAP;
+    if (s->sample_count < WPK_PERF_SAMPLE_CAP)
+        s->sample_count++;
+}
+
+static void WPK_RecordTime(WPK_TimeStats* s, Uint64 elapsed_us)
+{
+    WPK_PerfEnsure();
+    if (g_wpk_perf.mutex)
+        SDL_LockMutex(g_wpk_perf.mutex);
+    WPK_TimeRecord(s, elapsed_us);
+    if (g_wpk_perf.mutex)
+        SDL_UnlockMutex(g_wpk_perf.mutex);
+}
+
+static int WPK_Uint32Compare(const void* a, const void* b)
+{
+    Uint32 av = *(const Uint32*)a;
+    Uint32 bv = *(const Uint32*)b;
+    return (av > bv) - (av < bv);
+}
+
+static Uint32 WPK_Percentile(Uint32* values, int count, int pct)
+{
+    int idx;
+    if (!values || count <= 0)
+        return 0;
+    qsort(values, (size_t)count, sizeof(Uint32), WPK_Uint32Compare);
+    idx = (count * pct + 99) / 100;
+    if (idx < 1) idx = 1;
+    if (idx > count) idx = count;
+    return values[idx - 1];
+}
 
 #ifdef WPK_USE_PHYSFS
 static void WPK_LogOpenFailure(const char* stage, const char* path, const char* detail) {
@@ -4024,7 +4098,7 @@ static int WPK_SetHash(lua_State* L)
     return 1;
 }
 
-static int WPK_QueueWrite(lua_State* L)
+static int WPK_QueueWriteImpl(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
     const char* md5 = luaL_checkstring(L, 2);
@@ -4096,6 +4170,14 @@ static int WPK_QueueWrite(lua_State* L)
     lua_pushboolean(L, 1);
     lua_pushinteger(L, (lua_Integer)ud->write_queue_count);
     return 2;
+}
+
+static int WPK_QueueWrite(lua_State* L)
+{
+    Uint64 start_us = WPK_NowUS();
+    int ret = WPK_QueueWriteImpl(L);
+    WPK_RecordTime(&g_wpk_perf.write_queue_us, WPK_NowUS() - start_us);
+    return ret;
 }
 
 static int WPK_SetWriteBaseDir(lua_State* L)
@@ -4423,6 +4505,66 @@ static int WPK_GetStats(lua_State* L)
     return 1;
 }
 
+static void WPK_PushTimeStatsSnapshot(lua_State* L, const WPK_TimeStats* s)
+{
+    Uint32 samples[WPK_PERF_SAMPLE_CAP];
+    int sample_count = 0;
+    Uint32 p95 = 0;
+    Uint32 p99 = 0;
+    Uint64 avg_us = 0;
+
+    if (s) {
+        sample_count = s->sample_count;
+        if (sample_count > WPK_PERF_SAMPLE_CAP)
+            sample_count = WPK_PERF_SAMPLE_CAP;
+        if (sample_count > 0) {
+            SDL_memcpy(samples, s->samples, sizeof(Uint32) * (size_t)sample_count);
+            p95 = WPK_Percentile(samples, sample_count, 95);
+            SDL_memcpy(samples, s->samples, sizeof(Uint32) * (size_t)sample_count);
+            p99 = WPK_Percentile(samples, sample_count, 99);
+        }
+        if (s->count)
+            avg_us = s->total_us / s->count;
+    }
+
+    lua_createtable(L, 0, 6);
+    lua_pushinteger(L, s ? (lua_Integer)s->count : 0);
+    lua_setfield(L, -2, "count");
+    lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
+    lua_setfield(L, -2, "total_us");
+    lua_pushinteger(L, (lua_Integer)avg_us);
+    lua_setfield(L, -2, "avg_us");
+    lua_pushinteger(L, (lua_Integer)sample_count);
+    lua_setfield(L, -2, "sample_count");
+    lua_pushinteger(L, (lua_Integer)p95);
+    lua_setfield(L, -2, "p95_us");
+    lua_pushinteger(L, (lua_Integer)p99);
+    lua_setfield(L, -2, "p99_us");
+}
+
+void WPK_PushPerfStats(lua_State* L)
+{
+    WPK_TimeStats parse_us;
+    WPK_TimeStats write_queue_us;
+
+    SDL_memset(&parse_us, 0, sizeof(parse_us));
+    SDL_memset(&write_queue_us, 0, sizeof(write_queue_us));
+
+    WPK_PerfEnsure();
+    if (g_wpk_perf.mutex)
+        SDL_LockMutex(g_wpk_perf.mutex);
+    parse_us = g_wpk_perf.parse_us;
+    write_queue_us = g_wpk_perf.write_queue_us;
+    if (g_wpk_perf.mutex)
+        SDL_UnlockMutex(g_wpk_perf.mutex);
+
+    lua_createtable(L, 0, 2);
+    WPK_PushTimeStatsSnapshot(L, &parse_us);
+    lua_setfield(L, -2, "parse_us");
+    WPK_PushTimeStatsSnapshot(L, &write_queue_us);
+    lua_setfield(L, -2, "write_queue_us");
+}
+
 static int WPK_GC(lua_State* L)
 {
     WPK_UserData* ud = (WPK_UserData*)luaL_checkudata(L, 1, WPK_NAME);
@@ -4537,7 +4679,7 @@ static int WPK_ParseIdx(const Uint8* data, size_t size, size_t* outHeaderSize, s
     return 1;
 }
 
-static int WPK_NEW(lua_State* L)
+static int WPK_NEWImpl(lua_State* L)
 {
     Uint8* data = NULL;
     size_t size = 0;
@@ -4822,6 +4964,14 @@ static int WPK_NEW(lua_State* L)
     return 2;
 }
 
+static int WPK_NEW(lua_State* L)
+{
+    Uint64 start_us = WPK_NowUS();
+    int ret = WPK_NEWImpl(L);
+    WPK_RecordTime(&g_wpk_perf.parse_us, WPK_NowUS() - start_us);
+    return ret;
+}
+
 static int THD_FindHex32(const Uint8* p, size_t n, size_t* outOff)
 {
     if (n < 32)
@@ -4843,7 +4993,7 @@ static void THD_Xor5A(Uint8* dst, const Uint8* src, size_t n)
         dst[i] = (Uint8)(src[i] ^ 0x5A);
 }
 
-static int THD_Parse(lua_State* L)
+static int THD_ParseImpl(lua_State* L)
 {
     size_t len = 0;
     const Uint8* data = (const Uint8*)luaL_checklstring(L, 1, &len);
@@ -4940,6 +5090,14 @@ static int THD_Parse(lua_State* L)
         SDL_free(tmp);
 
     return 1;
+}
+
+static int THD_Parse(lua_State* L)
+{
+    Uint64 start_us = WPK_NowUS();
+    int ret = THD_ParseImpl(L);
+    WPK_RecordTime(&g_wpk_perf.parse_us, WPK_NowUS() - start_us);
+    return ret;
 }
 
 MYGXY_API int luaopen_mygxy_wpk(lua_State* L)

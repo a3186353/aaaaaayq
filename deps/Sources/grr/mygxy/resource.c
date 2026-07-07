@@ -10,6 +10,7 @@
 #include "tcp.h"
 #include "jy.h"
 #include "wpk.h"
+#include "map.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2934,6 +2935,16 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "render_native");
     lua_pushboolean(L, g_resource.native_ready > 0 || g_resource.native_retried > 0);
     lua_setfield(L, -2, "native_decode");
+    lua_createtable(L, 0, 4);
+    TCP_PushPerfStats(L);
+    lua_setfield(L, -2, "tcp");
+    JY_PushPerfStats(L);
+    lua_setfield(L, -2, "jy");
+    MAP_PushPerfStats(L);
+    lua_setfield(L, -2, "map");
+    WPK_PushPerfStats(L);
+    lua_setfield(L, -2, "wpk");
+    lua_setfield(L, -2, "perf");
     return 1;
 }
 

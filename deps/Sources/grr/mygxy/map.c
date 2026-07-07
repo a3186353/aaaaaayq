@@ -8,6 +8,129 @@
 /* I2: C 层异步任务并发硬上限
  * 防止 Lua 层 bug 导致无限提交 Timer 任务，耗尽线程和内存 */
 #define MAP_MAX_ACTIVE_TASKS 8
+#define MAP_PERF_SAMPLE_CAP 1024
+
+typedef struct
+{
+    SDL_Surface* sf;
+    int refcount;
+} MAP_GGETexture;
+
+typedef struct
+{
+    Uint64 count;
+    Uint64 total_us;
+    Uint32 samples[MAP_PERF_SAMPLE_CAP];
+    int sample_pos;
+    int sample_count;
+} MAP_TimeStats;
+
+typedef struct
+{
+    SDL_mutex* mutex;
+    MAP_TimeStats decode_us;
+    MAP_TimeStats upload_us;
+    MAP_TimeStats viewport_us;
+    MAP_TimeStats mask_prepare_us;
+} MAP_PerfStats;
+
+static MAP_PerfStats g_map_perf = {0};
+
+static void MAP_PerfEnsure(void)
+{
+    if (!g_map_perf.mutex)
+        g_map_perf.mutex = SDL_CreateMutex();
+}
+
+static Uint64 MAP_NowUS(void)
+{
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    if (!freq)
+        return 0;
+    return (SDL_GetPerformanceCounter() * 1000000ULL) / freq;
+}
+
+static void MAP_TimeRecord(MAP_TimeStats* s, Uint64 elapsed_us)
+{
+    if (!s)
+        return;
+    s->count++;
+    s->total_us += elapsed_us;
+    s->samples[s->sample_pos] = (Uint32)(elapsed_us > 0xFFFFFFFFULL ? 0xFFFFFFFFu : elapsed_us);
+    s->sample_pos = (s->sample_pos + 1) % MAP_PERF_SAMPLE_CAP;
+    if (s->sample_count < MAP_PERF_SAMPLE_CAP)
+        s->sample_count++;
+}
+
+static void MAP_RecordTime(MAP_TimeStats* s, Uint64 elapsed_us)
+{
+    MAP_PerfEnsure();
+    if (g_map_perf.mutex) SDL_LockMutex(g_map_perf.mutex);
+    MAP_TimeRecord(s, elapsed_us);
+    if (g_map_perf.mutex) SDL_UnlockMutex(g_map_perf.mutex);
+}
+
+static int MAP_Uint32Compare(const void* a, const void* b)
+{
+    Uint32 av = *(const Uint32*)a;
+    Uint32 bv = *(const Uint32*)b;
+    return (av > bv) - (av < bv);
+}
+
+static Uint32 MAP_Percentile(Uint32* values, int count, int pct)
+{
+    int idx;
+    if (!values || count <= 0)
+        return 0;
+    qsort(values, (size_t)count, sizeof(Uint32), MAP_Uint32Compare);
+    idx = (count * pct + 99) / 100;
+    if (idx < 1) idx = 1;
+    if (idx > count) idx = count;
+    return values[idx - 1];
+}
+
+static int MAP_PushTexture(lua_State* L, SDL_Texture* tex)
+{
+    MAP_GGETexture* gt;
+    SDL_Texture** ud;
+    if (!tex)
+        return 0;
+    gt = (MAP_GGETexture*)SDL_calloc(1, sizeof(MAP_GGETexture));
+    if (!gt)
+    {
+        SDL_DestroyTexture(tex);
+        return 0;
+    }
+    ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
+    *ud = tex;
+    gt->refcount = 1;
+    SDL_SetTextureUserData(tex, gt);
+    luaL_setmetatable(L, "SDL_Texture");
+    return 1;
+}
+
+static int MAP_PushTextureFromSurface(lua_State* L, SDL_Renderer* rd, SDL_Surface* sf, int blend)
+{
+    SDL_Texture* tex;
+    Uint64 start_us;
+    if (!rd || !sf)
+        return 0;
+    start_us = MAP_NowUS();
+    tex = SDL_CreateTextureFromSurface(rd, sf);
+    if (!tex)
+        return 0;
+    if (blend)
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    MAP_RecordTime(&g_map_perf.upload_us, MAP_NowUS() - start_us);
+    return MAP_PushTexture(L, tex);
+}
+
+static SDL_Surface* _getmapsf_profiled(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw,
+                                       MAP_RawPixels* out_raw, Uint8** out_brig);
+static int _getmasksinfo_profiled(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num,
+                                  SDL_RWops* rw);
+static int _getmasksf_profiled(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tmem,
+                               SDL_RWops* rw);
 
 /* ==========================================================================
  * iOS 独立 malloc zone 实现
@@ -1401,7 +1524,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
         for (int y = sfy; y < rect->h; y += 240) {
             for (int x = sfx; x < rect->w; x += 320) {
                 MAP_RawPixels tile = { NULL, 0, 0 };
-                _getmapsf(ud, curid++, tmem, rw, &tile, NULL);
+                _getmapsf_profiled(ud, curid++, tmem, rw, &tile, NULL);
                 if (tile.pixels) {
                     _blit_raw_tile(&tile, canvas, rect->w, rect->h, x, y);
                     MAP_FREE(tile.pixels);
@@ -1444,7 +1567,7 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 
     for (int y = sfy; y < msf->h; y += 240) {
         for (int x = sfx; x < msf->w; x += 320) {
-            SDL_Surface* sf = _getmapsf(ud, curid++, NULL, rw, NULL, NULL);
+            SDL_Surface* sf = _getmapsf_profiled(ud, curid++, NULL, rw, NULL, NULL);
             SDL_Rect xy = { x,y };
             if (sf) {
                 SDL_BlitSurface(sf, NULL, msf, &xy);
@@ -1477,6 +1600,33 @@ static int _getmasksf(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tme
 }
 
 //载入线程（使用 time->mem 独立缓冲区 + 独立 RWops，不复用 ud->mem/ud->file）
+static SDL_Surface* _getmapsf_profiled(MAP_UserData* ud, Uint32 id, MAP_Mem* tmem, SDL_RWops* rw,
+                                       MAP_RawPixels* out_raw, Uint8** out_brig)
+{
+    Uint64 start_us = MAP_NowUS();
+    SDL_Surface* sf = _getmapsf(ud, id, tmem, rw, out_raw, out_brig);
+    MAP_RecordTime(&g_map_perf.decode_us, MAP_NowUS() - start_us);
+    return sf;
+}
+
+static int _getmasksinfo_profiled(MAP_UserData* ud, Uint32 id, MAP_MaskInfo** mask, Uint32* num,
+                                  SDL_RWops* rw)
+{
+    Uint64 start_us = MAP_NowUS();
+    int ok = _getmasksinfo(ud, id, mask, num, rw);
+    MAP_RecordTime(&g_map_perf.mask_prepare_us, MAP_NowUS() - start_us);
+    return ok;
+}
+
+static int _getmasksf_profiled(MAP_UserData* ud, Uint32 id, MASK_Data* mask, MAP_Mem* tmem,
+                               SDL_RWops* rw)
+{
+    Uint64 start_us = MAP_NowUS();
+    int ok = _getmasksf(ud, id, mask, tmem, rw);
+    MAP_RecordTime(&g_map_perf.mask_prepare_us, MAP_NowUS() - start_us);
+    return ok;
+}
+
 static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
 {
     TIME_Data* time = (TIME_Data*)param;
@@ -1538,8 +1688,8 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
         }
 
         /* 解码地表 → 裸像素（不创建 SDL_Surface） */
-        _getmapsf(ud, time->id, time->mem, task_rw, &time->result_raw, &time->result_brig);
-        _getmasksinfo(ud, time->id, &time->result_mask, &time->result_masknum, task_rw);
+        _getmapsf_profiled(ud, time->id, time->mem, task_rw, &time->result_raw, &time->result_brig);
+        _getmasksinfo_profiled(ud, time->id, &time->result_mask, &time->result_masknum, task_rw);
         
         if (fm && time->result_masknum > 0 && time->result_mask)
         {
@@ -1568,7 +1718,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
                         continue;
                     }
                     
-                    _getmasksf(ud, time->id, &mdata, time->mem, task_rw);
+                    _getmasksf_profiled(ud, time->id, &mdata, time->mem, task_rw);
 
                     /* 把 _getmasksf 写入的 is_bottom 回写到主线程消费的 result_mask
                        （mdata.info 是 result_mask[i] 的拷贝，不回写则 push 到 lua 时丢失） */
@@ -1583,7 +1733,7 @@ static Uint32 SDLCALL TimerCallback(Uint32 interval, void* param)
     {
         MASK_Data* mask = (MASK_Data*)time->data;
 
-        _getmasksf(ud, mask->id, mask, time->mem, task_rw);
+        _getmasksf_profiled(ud, mask->id, mask, time->mem, task_rw);
     }
 
     SDL_RWclose(task_rw);
@@ -1736,14 +1886,36 @@ static int LUA_Run(lua_State* L)
             }
             else
             {
-                {
+                int pushed_main = 0;
+                Uint32 mask_count = time->result_mask ? time->result_masknum : 0;
+                if (time->texture_result) {
+                    pushed_main = MAP_PushTextureFromSurface(L, time->renderer, map_sf, 0);
+                    SDL_FreeSurface(map_sf);
+                    map_sf = NULL;
+                } else {
                     SDL_Surface** sf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
                     *sf = map_sf;
                     luaL_setmetatable(L, "SDL_Surface");
+                    pushed_main = 1;
                 }
 
-                lua_createtable(L, time->result_masknum, 0);
-                for (Uint32 i = 0; i < time->result_masknum; i++)
+                if (!pushed_main)
+                {
+                    if (lua_isfunction(L, -1)) {
+                        lua_pushnil(L);
+                        lua_pushnil(L);
+                        if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                            SDL_Log("Map[%d] Lua Callback Error: %s", id, lua_tostring(L, -1));
+                            lua_pop(L, 1);
+                        }
+                    } else {
+                        lua_pop(L, 1);
+                    }
+                    goto mapfull_cleanup;
+                }
+
+                lua_createtable(L, mask_count, 0);
+                for (Uint32 i = 0; i < mask_count; i++)
                 {
                     MAP_MaskInfo* info = &time->result_mask[i];
                     lua_createtable(L, 0, 9);
@@ -1768,10 +1940,16 @@ static int LUA_Run(lua_State* L)
                     if (fm && fm->mask_raws && fm->mask_raws[i].pixels) {
                         SDL_Surface* mask_sf = _raw_to_surface(&fm->mask_raws[i], SDL_PIXELFORMAT_ARGB8888);
                         if (mask_sf) {
-                            SDL_Surface** msf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
-                            *msf = mask_sf;
-                            luaL_setmetatable(L, "SDL_Surface");
-                            lua_setfield(L, -2, "sf");
+                            if (time->texture_result) {
+                                if (MAP_PushTextureFromSurface(L, time->renderer, mask_sf, 1))
+                                    lua_setfield(L, -2, "tex");
+                                SDL_FreeSurface(mask_sf);
+                            } else {
+                                SDL_Surface** msf = (SDL_Surface**)lua_newuserdata(L, sizeof(SDL_Surface*));
+                                *msf = mask_sf;
+                                luaL_setmetatable(L, "SDL_Surface");
+                                lua_setfield(L, -2, "sf");
+                            }
                         }
                     }
                     
@@ -1784,6 +1962,7 @@ static int LUA_Run(lua_State* L)
                 }
             }
 
+mapfull_cleanup:
             /* 释放 Timer 线程产出的遮罩信息 */
             if (time->result_mask) {
                 MAP_FREE(time->result_mask);
@@ -1897,7 +2076,7 @@ static int LUA_GetMap(lua_State* L)
         if (!ud->closing && ud->file)
         {
             if (!map->sf)
-                map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
+                map->sf = _getmapsf_profiled(ud, id, NULL, ud->file, NULL, NULL);
 
             if (map->sf)
             {
@@ -1926,6 +2105,144 @@ static int LUA_GetMap(lua_State* L)
         return 1;
     }
     return 0;
+}
+
+static int LUA_SurfaceToTexture(lua_State* L)
+{
+    (void)luaL_checkudata(L, 1, MAP_NAME);
+    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    SDL_Surface* sf = *(SDL_Surface**)luaL_checkudata(L, 3, "SDL_Surface");
+    return MAP_PushTextureFromSurface(L, rd, sf, 1) ? 1 : 0;
+}
+
+static int LUA_GetMapTexture(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    Uint32 id = (Uint32)luaL_checkinteger(L, 3);
+    SDL_Surface* sf = NULL;
+    int free_after = 0;
+    int pushed;
+
+    if (id >= ud->mapnum)
+        return luaL_error(L, "map id error!");
+
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file)
+    {
+        MAP_Data* map = &ud->map[id];
+        if (!map->sf)
+            map->sf = _getmapsf_profiled(ud, id, NULL, ud->file, NULL, NULL);
+        if (map->sf)
+        {
+            sf = map->sf;
+            if (ud->mode == 0x9527)
+            {
+                map->sf = NULL;
+                free_after = 1;
+            }
+        }
+    }
+    SDL_UnlockMutex(ud->mutex);
+
+    if (!sf)
+        return 0;
+    pushed = MAP_PushTextureFromSurface(L, rd, sf, 0);
+    if (free_after)
+        SDL_FreeSurface(sf);
+    return pushed ? 1 : 0;
+}
+
+static int LUA_GetMaskTexture(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    MASK_Data mask;
+    int pushed;
+
+    SDL_memset(&mask, 0, sizeof(MASK_Data));
+    lua_getfield(L, 3, "id");
+    mask.id = (Uint32)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 3, "offset");
+    mask.info.offset = (Uint32)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+    mask.info.is_bottom = -1;
+
+    SDL_LockMutex(ud->mutex);
+    if (!ud->closing && ud->file)
+        _getmasksf_profiled(ud, mask.id, &mask, NULL, ud->file);
+    SDL_UnlockMutex(ud->mutex);
+
+    if (!mask.sf)
+        return 0;
+    if (lua_istable(L, 3))
+    {
+        lua_pushinteger(L, mask.info.is_bottom);
+        lua_setfield(L, 3, "is_bottom");
+    }
+    pushed = MAP_PushTextureFromSurface(L, rd, mask.sf, 1);
+    SDL_FreeSurface(mask.sf);
+    return pushed ? 1 : 0;
+}
+
+static int LUA_GetViewportPlan(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    int left = (int)luaL_checkinteger(L, 2);
+    int top = (int)luaL_checkinteger(L, 3);
+    int width = (int)luaL_checkinteger(L, 4);
+    int height = (int)luaL_checkinteger(L, 5);
+    Uint64 start_us = MAP_NowUS();
+    int x_offset;
+    int y_offset;
+    Uint32 sid;
+    int out = 0;
+
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (width < 0) width = 0;
+    if (height < 0) height = 0;
+    if (ud->colnum == 0 || ud->mapnum == 0)
+    {
+        lua_createtable(L, 0, 0);
+        MAP_RecordTime(&g_map_perf.viewport_us, MAP_NowUS() - start_us);
+        return 1;
+    }
+
+    x_offset = -(left % 320);
+    y_offset = -(top % 240);
+    sid = (Uint32)((top / 240) * (int)ud->colnum + (left / 320));
+
+    lua_createtable(L, ((width / 320) + 2) * ((height / 240) + 2), 0);
+    for (int cy = y_offset; cy <= height; cy += 240)
+    {
+        Uint32 id = sid;
+        Uint32 row_end = sid - (sid % ud->colnum) + ud->colnum;
+        if (row_end > ud->mapnum)
+            row_end = ud->mapnum;
+
+        for (int cx = x_offset; cx <= width; cx += 320)
+        {
+            if (id >= row_end)
+                break;
+            lua_createtable(L, 0, 3);
+            lua_pushinteger(L, (lua_Integer)id);
+            lua_setfield(L, -2, "id");
+            lua_pushinteger(L, (lua_Integer)cx);
+            lua_setfield(L, -2, "x");
+            lua_pushinteger(L, (lua_Integer)cy);
+            lua_setfield(L, -2, "y");
+            lua_rawseti(L, -2, ++out);
+            id++;
+        }
+
+        sid += ud->colnum;
+        if (sid >= ud->mapnum)
+            break;
+    }
+    MAP_RecordTime(&g_map_perf.viewport_us, MAP_NowUS() - start_us);
+    return 1;
 }
 
 static int LUA_GetMapFull(lua_State* L)
@@ -1979,6 +2296,76 @@ static int LUA_GetMapFull(lua_State* L)
     return LUA_GetMap(L);
 }
 
+static int LUA_GetMapFullTexture(lua_State* L)
+{
+    MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
+    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    Uint32 id = (Uint32)luaL_checkinteger(L, 3);
+    int has_cb = lua_isfunction(L, 4);
+
+    if (id >= ud->mapnum)
+        return luaL_error(L, "map id error!");
+    if (!has_cb)
+        return LUA_GetMapTexture(L);
+
+    MAP_Data* map = &ud->map[id];
+
+    SDL_LockMutex(ud->mutex);
+    if (ud->closing || map->loading || ud->active_tasks >= MAP_MAX_ACTIVE_TASKS)
+    {
+        SDL_UnlockMutex(ud->mutex);
+        return 0;
+    }
+    map->loading = 1;
+    ud->active_tasks++;
+    SDL_UnlockMutex(ud->mutex);
+
+    TIME_Data* time = (TIME_Data*)MAP_CALLOC(1, sizeof(TIME_Data));
+    if (!time)
+    {
+        SDL_LockMutex(ud->mutex);
+        map->loading = 0;
+        ud->active_tasks--;
+        SDL_CondSignal(ud->cond);
+        SDL_UnlockMutex(ud->mutex);
+        return 0;
+    }
+    time->type = TIME_TYPE_MAPFULL;
+    time->ud = ud;
+    time->id = id;
+    time->renderer = rd;
+    time->texture_result = 1;
+
+    MAPFULL_Data* fm = (MAPFULL_Data*)MAP_CALLOC(1, sizeof(MAPFULL_Data));
+    if (!fm)
+    {
+        MAP_FREE(time);
+        SDL_LockMutex(ud->mutex);
+        map->loading = 0;
+        ud->active_tasks--;
+        SDL_CondSignal(ud->cond);
+        SDL_UnlockMutex(ud->mutex);
+        return 0;
+    }
+    fm->map = map;
+    time->data = (void*)fm;
+
+    lua_pushvalue(L, 4);
+    time->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (!SDL_AddTimer(0, TimerCallback, (void*)time)) {
+        luaL_unref(L, LUA_REGISTRYINDEX, time->cb_ref);
+        MAP_FREE(fm);
+        MAP_FREE(time);
+        SDL_LockMutex(ud->mutex);
+        map->loading = 0;
+        ud->active_tasks--;
+        SDL_CondSignal(ud->cond);
+        SDL_UnlockMutex(ud->mutex);
+        return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+    }
+    return 0;
+}
+
 static int LUA_GetMapInfo(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
@@ -2030,7 +2417,7 @@ static int LUA_GetMapInfo(lua_State* L)
     if (!ud->closing && ud->file)
     {
         if (!map->sf)
-            map->sf = _getmapsf(ud, id, NULL, ud->file, NULL, NULL);
+            map->sf = _getmapsf_profiled(ud, id, NULL, ud->file, NULL, NULL);
 
         if (map->sf)
         {
@@ -2045,7 +2432,7 @@ static int LUA_GetMapInfo(lua_State* L)
             }
         }
 
-        _getmasksinfo(ud, id, &mask, &num, ud->file);
+        _getmasksinfo_profiled(ud, id, &mask, &num, ud->file);
     }
     SDL_UnlockMutex(ud->mutex);
 
@@ -2101,7 +2488,7 @@ static int LUA_GetMaskInfo(lua_State* L)
 
     SDL_LockMutex(ud->mutex);
     if (!ud->closing && ud->file)
-        _getmasksinfo(ud, id, &mask, &num, ud->file);
+        _getmasksinfo_profiled(ud, id, &mask, &num, ud->file);
     SDL_UnlockMutex(ud->mutex);
 
     lua_createtable(L, num, 0);
@@ -2202,7 +2589,7 @@ static int LUA_GetMask(lua_State* L)
         SDL_LockMutex(ud->mutex);
         if (!ud->closing && ud->file)
         {
-            _getmasksf(ud, id, &mask, NULL, ud->file);
+            _getmasksf_profiled(ud, id, &mask, NULL, ud->file);
         }
         SDL_UnlockMutex(ud->mutex);
 
@@ -3105,13 +3492,88 @@ static int LUA_GetZBoostAt(lua_State* L)
 #endif /* MAP_DISABLE_ZBOOST_LZO */
 }
 
+static void MAP_PushTimeStatsSnapshot(lua_State* L, const MAP_TimeStats* s)
+{
+    Uint32 samples[MAP_PERF_SAMPLE_CAP];
+    int sample_count = 0;
+    Uint32 p95 = 0;
+    Uint32 p99 = 0;
+    Uint64 avg_us = 0;
+
+    if (s) {
+        sample_count = s->sample_count;
+        if (sample_count > MAP_PERF_SAMPLE_CAP)
+            sample_count = MAP_PERF_SAMPLE_CAP;
+        if (sample_count > 0) {
+            SDL_memcpy(samples, s->samples, sizeof(Uint32) * (size_t)sample_count);
+            p95 = MAP_Percentile(samples, sample_count, 95);
+            SDL_memcpy(samples, s->samples, sizeof(Uint32) * (size_t)sample_count);
+            p99 = MAP_Percentile(samples, sample_count, 99);
+        }
+        if (s->count)
+            avg_us = s->total_us / s->count;
+    }
+
+    lua_createtable(L, 0, 6);
+    lua_pushinteger(L, s ? (lua_Integer)s->count : 0);
+    lua_setfield(L, -2, "count");
+    lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
+    lua_setfield(L, -2, "total_us");
+    lua_pushinteger(L, (lua_Integer)avg_us);
+    lua_setfield(L, -2, "avg_us");
+    lua_pushinteger(L, (lua_Integer)sample_count);
+    lua_setfield(L, -2, "sample_count");
+    lua_pushinteger(L, (lua_Integer)p95);
+    lua_setfield(L, -2, "p95_us");
+    lua_pushinteger(L, (lua_Integer)p99);
+    lua_setfield(L, -2, "p99_us");
+}
+
+void MAP_PushPerfStats(lua_State* L)
+{
+    MAP_TimeStats decode_us;
+    MAP_TimeStats upload_us;
+    MAP_TimeStats viewport_us;
+    MAP_TimeStats mask_prepare_us;
+
+    SDL_memset(&decode_us, 0, sizeof(decode_us));
+    SDL_memset(&upload_us, 0, sizeof(upload_us));
+    SDL_memset(&viewport_us, 0, sizeof(viewport_us));
+    SDL_memset(&mask_prepare_us, 0, sizeof(mask_prepare_us));
+
+    MAP_PerfEnsure();
+    if (g_map_perf.mutex)
+        SDL_LockMutex(g_map_perf.mutex);
+    decode_us = g_map_perf.decode_us;
+    upload_us = g_map_perf.upload_us;
+    viewport_us = g_map_perf.viewport_us;
+    mask_prepare_us = g_map_perf.mask_prepare_us;
+    if (g_map_perf.mutex)
+        SDL_UnlockMutex(g_map_perf.mutex);
+
+    lua_createtable(L, 0, 4);
+    MAP_PushTimeStatsSnapshot(L, &decode_us);
+    lua_setfield(L, -2, "decode_us");
+    MAP_PushTimeStatsSnapshot(L, &upload_us);
+    lua_setfield(L, -2, "upload_us");
+    MAP_PushTimeStatsSnapshot(L, &viewport_us);
+    lua_setfield(L, -2, "viewport_us");
+    MAP_PushTimeStatsSnapshot(L, &mask_prepare_us);
+    lua_setfield(L, -2, "mask_prepare_us");
+}
+
 MYGXY_API int luaopen_mygxy_map(lua_State* L)
 {
     const luaL_Reg funcs[] = {
         {"__gc", LUA_GC},
         {"__close", LUA_GC},
         {"GetMap", LUA_GetMap},
-    {"GetMapFull", LUA_GetMapFull},
+        {"GetMapFull", LUA_GetMapFull},
+        {"SurfaceToTexture", LUA_SurfaceToTexture},
+        {"GetMapTexture", LUA_GetMapTexture},
+        {"GetMaskTexture", LUA_GetMaskTexture},
+        {"GetViewportPlan", LUA_GetViewportPlan},
+        {"GetMapFullTexture", LUA_GetMapFullTexture},
         {"GetMaskInfo", LUA_GetMaskInfo},
         {"GetMask", LUA_GetMask},
         {"GetResult", LUA_GetResult},

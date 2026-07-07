@@ -13,6 +13,8 @@
 #define SDL_PROXY_SYMBOLS(X) \
     X(SDL_GetError, PFN_SDL_GetError) \
     X(SDL_Error, PFN_SDL_Error) \
+    X(SDL_GetPerformanceCounter, PFN_SDL_GetPerformanceCounter) \
+    X(SDL_GetPerformanceFrequency, PFN_SDL_GetPerformanceFrequency) \
     X(SDL_CreateMutex, PFN_SDL_CreateMutex) \
     X(SDL_LockMutex, PFN_SDL_LockMutex) \
     X(SDL_UnlockMutex, PFN_SDL_UnlockMutex) \
@@ -37,7 +39,19 @@
     X(SDL_SetSurfaceBlendMode, PFN_SDL_SetSurfaceBlendMode) \
     X(SDL_DuplicateSurface, PFN_SDL_DuplicateSurface) \
     X(SDL_ConvertSurfaceFormat, PFN_SDL_ConvertSurfaceFormat) \
+    X(SDL_ConvertPixels, PFN_SDL_ConvertPixels) \
     X(SDL_PremultiplyAlpha, PFN_SDL_PremultiplyAlpha) \
+    X(SDL_CreateTexture, PFN_SDL_CreateTexture) \
+    X(SDL_CreateTextureFromSurface, PFN_SDL_CreateTextureFromSurface) \
+    X(SDL_UpdateTexture, PFN_SDL_UpdateTexture) \
+    X(SDL_LockTexture, PFN_SDL_LockTexture) \
+    X(SDL_UnlockTexture, PFN_SDL_UnlockTexture) \
+    X(SDL_SetTextureBlendMode, PFN_SDL_SetTextureBlendMode) \
+    X(SDL_SetTextureColorMod, PFN_SDL_SetTextureColorMod) \
+    X(SDL_SetTextureAlphaMod, PFN_SDL_SetTextureAlphaMod) \
+    X(SDL_SetTextureUserData, PFN_SDL_SetTextureUserData) \
+    X(SDL_GetTextureUserData, PFN_SDL_GetTextureUserData) \
+    X(SDL_DestroyTexture, PFN_SDL_DestroyTexture) \
     X(SDL_FillRect, PFN_SDL_FillRect) \
     X(SDL_UpperBlit, PFN_SDL_UpperBlit) \
     X(SDL_Delay, PFN_SDL_Delay) \

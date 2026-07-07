@@ -43,6 +43,14 @@ typedef int (*PFN_SDL_Error)(SDL_errorcode code);
 extern PFN_SDL_Error proxy_SDL_Error;
 #define SDL_Error proxy_SDL_Error
 
+typedef Uint64 (*PFN_SDL_GetPerformanceCounter)(void);
+extern PFN_SDL_GetPerformanceCounter proxy_SDL_GetPerformanceCounter;
+#define SDL_GetPerformanceCounter proxy_SDL_GetPerformanceCounter
+
+typedef Uint64 (*PFN_SDL_GetPerformanceFrequency)(void);
+extern PFN_SDL_GetPerformanceFrequency proxy_SDL_GetPerformanceFrequency;
+#define SDL_GetPerformanceFrequency proxy_SDL_GetPerformanceFrequency
+
 typedef SDL_mutex * (*PFN_SDL_CreateMutex)(void);
 extern PFN_SDL_CreateMutex proxy_SDL_CreateMutex;
 #define SDL_CreateMutex proxy_SDL_CreateMutex
@@ -148,9 +156,57 @@ typedef SDL_Surface * (*PFN_SDL_ConvertSurfaceFormat)(SDL_Surface * src, Uint32 
 extern PFN_SDL_ConvertSurfaceFormat proxy_SDL_ConvertSurfaceFormat;
 #define SDL_ConvertSurfaceFormat proxy_SDL_ConvertSurfaceFormat
 
+typedef int (*PFN_SDL_ConvertPixels)(int width, int height, Uint32 src_format, const void * src, int src_pitch, Uint32 dst_format, void * dst, int dst_pitch);
+extern PFN_SDL_ConvertPixels proxy_SDL_ConvertPixels;
+#define SDL_ConvertPixels proxy_SDL_ConvertPixels
+
 typedef int (*PFN_SDL_PremultiplyAlpha)(int width, int height, Uint32 src_format, const void * src, int src_pitch, Uint32 dst_format, void * dst, int dst_pitch);
 extern PFN_SDL_PremultiplyAlpha proxy_SDL_PremultiplyAlpha;
 #define SDL_PremultiplyAlpha proxy_SDL_PremultiplyAlpha
+
+typedef SDL_Texture * (*PFN_SDL_CreateTexture)(SDL_Renderer * renderer, Uint32 format, int access, int w, int h);
+extern PFN_SDL_CreateTexture proxy_SDL_CreateTexture;
+#define SDL_CreateTexture proxy_SDL_CreateTexture
+
+typedef SDL_Texture * (*PFN_SDL_CreateTextureFromSurface)(SDL_Renderer * renderer, SDL_Surface * surface);
+extern PFN_SDL_CreateTextureFromSurface proxy_SDL_CreateTextureFromSurface;
+#define SDL_CreateTextureFromSurface proxy_SDL_CreateTextureFromSurface
+
+typedef int (*PFN_SDL_UpdateTexture)(SDL_Texture * texture, const SDL_Rect * rect, const void *pixels, int pitch);
+extern PFN_SDL_UpdateTexture proxy_SDL_UpdateTexture;
+#define SDL_UpdateTexture proxy_SDL_UpdateTexture
+
+typedef int (*PFN_SDL_LockTexture)(SDL_Texture * texture, const SDL_Rect * rect, void **pixels, int *pitch);
+extern PFN_SDL_LockTexture proxy_SDL_LockTexture;
+#define SDL_LockTexture proxy_SDL_LockTexture
+
+typedef void (*PFN_SDL_UnlockTexture)(SDL_Texture * texture);
+extern PFN_SDL_UnlockTexture proxy_SDL_UnlockTexture;
+#define SDL_UnlockTexture proxy_SDL_UnlockTexture
+
+typedef int (*PFN_SDL_SetTextureBlendMode)(SDL_Texture * texture, SDL_BlendMode blendMode);
+extern PFN_SDL_SetTextureBlendMode proxy_SDL_SetTextureBlendMode;
+#define SDL_SetTextureBlendMode proxy_SDL_SetTextureBlendMode
+
+typedef int (*PFN_SDL_SetTextureColorMod)(SDL_Texture * texture, Uint8 r, Uint8 g, Uint8 b);
+extern PFN_SDL_SetTextureColorMod proxy_SDL_SetTextureColorMod;
+#define SDL_SetTextureColorMod proxy_SDL_SetTextureColorMod
+
+typedef int (*PFN_SDL_SetTextureAlphaMod)(SDL_Texture * texture, Uint8 alpha);
+extern PFN_SDL_SetTextureAlphaMod proxy_SDL_SetTextureAlphaMod;
+#define SDL_SetTextureAlphaMod proxy_SDL_SetTextureAlphaMod
+
+typedef int (*PFN_SDL_SetTextureUserData)(SDL_Texture * texture, void *userdata);
+extern PFN_SDL_SetTextureUserData proxy_SDL_SetTextureUserData;
+#define SDL_SetTextureUserData proxy_SDL_SetTextureUserData
+
+typedef void * (*PFN_SDL_GetTextureUserData)(SDL_Texture * texture);
+extern PFN_SDL_GetTextureUserData proxy_SDL_GetTextureUserData;
+#define SDL_GetTextureUserData proxy_SDL_GetTextureUserData
+
+typedef void (*PFN_SDL_DestroyTexture)(SDL_Texture * texture);
+extern PFN_SDL_DestroyTexture proxy_SDL_DestroyTexture;
+#define SDL_DestroyTexture proxy_SDL_DestroyTexture
 
 typedef int (*PFN_SDL_FillRect)(SDL_Surface * dst, const SDL_Rect * rect, Uint32 color);
 extern PFN_SDL_FillRect proxy_SDL_FillRect;

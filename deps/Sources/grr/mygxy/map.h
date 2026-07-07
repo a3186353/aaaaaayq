@@ -174,6 +174,8 @@ typedef struct
     Uint8* result_brig;             /* GIRB 解压缓冲 2400 字节，无则 NULL */
     MAP_MaskInfo* result_mask;      /* 遮罩信息数组 */
     Uint32 result_masknum;          /* 遮罩数量 */
+    SDL_Renderer* renderer;         /* 主线程 Run() 消费，Timer 线程不触碰 */
+    int texture_result;             /* 1=Run 回调返回 SDL_Texture userdata */
 } TIME_Data;
 
 typedef struct
@@ -182,3 +184,5 @@ typedef struct
     MAP_RawPixels* mask_raws;  /* 后台线程产出的遮罩裸像素 */
     Uint32 masknum;            /* 保存遮罩数量，drain 时不依赖 map->masknum */
 } MAPFULL_Data;
+
+void MAP_PushPerfStats(lua_State* L);

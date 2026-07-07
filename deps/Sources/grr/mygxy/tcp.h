@@ -185,3 +185,4 @@ void TCP_NativeClearFrameData(TCP_NativeFrameData* frame);
 int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status);
 int TCP_NativePollAsync(TCP_UserData* ud, Uint32 limit);
 int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id);
+void TCP_PushPerfStats(lua_State* L);
