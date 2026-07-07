@@ -24,6 +24,7 @@ int bind_gge(lua_State* L);
 int bind_video(lua_State* L);
 int bind_renderer(lua_State* L);
 int bind_surface(lua_State* L);
+void GGE_InstallTextureUserValueAccessors(lua_State* L);
 
 int bind_audio(lua_State* L);
 int bind_blendmode(lua_State* L);

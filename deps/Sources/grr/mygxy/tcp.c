@@ -172,6 +172,7 @@ static int TCP_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_sr
 {
     TCP_GGETexture* gt;
     SDL_Texture** ud;
+    SDL_Surface* alpha_sf;
     if (!tex)
         return 0;
     gt = (TCP_GGETexture*)SDL_calloc(1, sizeof(TCP_GGETexture));
@@ -180,10 +181,17 @@ static int TCP_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_sr
         SDL_DestroyTexture(tex);
         return 0;
     }
+    alpha_sf = TCP_SurfaceAlphaToSurface(alpha_src);
+    if (alpha_src && !alpha_sf)
+    {
+        SDL_DestroyTexture(tex);
+        SDL_free(gt);
+        return 0;
+    }
     ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
     *ud = tex;
     gt->refcount = 1;
-    gt->sf = TCP_SurfaceAlphaToSurface(alpha_src);
+    gt->sf = alpha_sf;
     SDL_SetTextureUserData(tex, gt);
     luaL_setmetatable(L, "SDL_Texture");
     return 1;
@@ -3324,30 +3332,46 @@ void TCP_PushPerfStats(lua_State* L)
 
     lua_createtable(L, 0, 3);
 
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.decode_us.count);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
     lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
+    lua_setfield(L, -2, "total_us");
     lua_pushinteger(L, (lua_Integer)decode_p95);
     lua_setfield(L, -2, "p95");
+    lua_pushinteger(L, (lua_Integer)decode_p95);
+    lua_setfield(L, -2, "p95_us");
     lua_pushinteger(L, (lua_Integer)decode_p99);
     lua_setfield(L, -2, "p99");
+    lua_pushinteger(L, (lua_Integer)decode_p99);
+    lua_setfield(L, -2, "p99_us");
     lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
     lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
+    lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "decode_us");
 
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.upload_us.count);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
     lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
+    lua_setfield(L, -2, "total_us");
     lua_pushinteger(L, (lua_Integer)upload_p95);
     lua_setfield(L, -2, "p95");
+    lua_pushinteger(L, (lua_Integer)upload_p95);
+    lua_setfield(L, -2, "p95_us");
     lua_pushinteger(L, (lua_Integer)upload_p99);
     lua_setfield(L, -2, "p99");
+    lua_pushinteger(L, (lua_Integer)upload_p99);
+    lua_setfield(L, -2, "p99_us");
     lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
     lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
+    lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "upload_us");
 
     lua_createtable(L, 0, 7);

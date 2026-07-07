@@ -336,6 +336,7 @@ int bind_gge(lua_State* L)
     luaL_getmetatable(L, "SDL_Texture");
     luaL_setfuncs(L, texture_funcs, 0);
     lua_pop(L, 1);
+    GGE_InstallTextureUserValueAccessors(L);
 
     luaL_setfuncs(L, sdl_funcs, 0);
     return 0;

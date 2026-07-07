@@ -896,6 +896,21 @@ static int LUA_TextureNewIndex(lua_State* L)
     return 0;
 }
 
+void GGE_InstallTextureUserValueAccessors(lua_State* L)
+{
+    luaL_getmetatable(L, "SDL_Texture");
+    if (!lua_istable(L, -1))
+    {
+        lua_pop(L, 1);
+        return;
+    }
+    lua_pushcfunction(L, LUA_TextureIndex);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, LUA_TextureNewIndex);
+    lua_setfield(L, -2, "__newindex");
+    lua_pop(L, 1);
+}
+
 static int LUA_DestroyTexture(lua_State* L)
 {
     SDL_Texture** tex = (SDL_Texture**)luaL_checkudata(L, 1, "SDL_Texture");
@@ -1083,6 +1098,7 @@ int bind_renderer(lua_State* L)
     luaL_getmetatable(L, "SDL_Texture");
     luaL_setfuncs(L, texture_funcs, 0);
     lua_pop(L, 1);
+    GGE_InstallTextureUserValueAccessors(L);
 
     luaL_getmetatable(L, "SDL_Renderer");
     luaL_setfuncs(L, renderer_funcs, 0);

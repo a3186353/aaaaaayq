@@ -176,6 +176,7 @@ static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src
 {
     JY_GGETexture* gt;
     SDL_Texture** ud;
+    SDL_Surface* alpha_sf;
     if (!tex)
         return 0;
     gt = (JY_GGETexture*)SDL_calloc(1, sizeof(JY_GGETexture));
@@ -184,10 +185,17 @@ static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src
         SDL_DestroyTexture(tex);
         return 0;
     }
+    alpha_sf = JY_SurfaceAlphaToSurface(alpha_src);
+    if (alpha_src && !alpha_sf)
+    {
+        SDL_DestroyTexture(tex);
+        SDL_free(gt);
+        return 0;
+    }
     ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
     *ud = tex;
     gt->refcount = 1;
-    gt->sf = JY_SurfaceAlphaToSurface(alpha_src);
+    gt->sf = alpha_sf;
     SDL_SetTextureUserData(tex, gt);
     luaL_setmetatable(L, "SDL_Texture");
     return 1;
@@ -213,6 +221,7 @@ static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
+static int JY_CompositeTexture(lua_State* L);
 static int JY_GC(lua_State* L);
 static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth);
 
@@ -240,6 +249,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
     {"CompositeTo", JY_CompositeTo},
+    {"CompositeTexture", JY_CompositeTexture},
     {NULL, NULL},
 };
 
@@ -2083,6 +2093,73 @@ static int JY_CompositeTo(lua_State* L)
     return 1;
 }
 
+static int JY_CompositeTexture(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    int canvas_w = (int)luaL_checkinteger(L, 3);
+    int canvas_h = (int)luaL_checkinteger(L, 4);
+    JY_CompLayer* layers = NULL;
+    int layer_n;
+    SDL_Surface* result;
+    int ok;
+    Uint64 start_us;
+    SDL_Texture* tex;
+
+    (void)ud;
+    luaL_checktype(L, 5, LUA_TTABLE);
+
+    if (!rd || canvas_w <= 0 || canvas_h <= 0)
+        return 0;
+
+    layer_n = JY_BuildLayerSet(L, 5, canvas_w, canvas_h, &layers);
+    if (layer_n < 0)
+        return luaL_error(L, "JY_CompositeTexture: failed to alloc layer set");
+    if (layer_n == 0)
+    {
+        JY_ReleaseLayerSet(layers, 0);
+        return 0;
+    }
+
+    result = SDL_CreateRGBSurfaceWithFormat(
+        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!result)
+    {
+        JY_ReleaseLayerSet(layers, layer_n);
+        return 0;
+    }
+
+    if (SDL_MUSTLOCK(result))
+        SDL_LockSurface(result);
+
+    ok = JY_RunCompositeKernel(result, layers, layer_n, canvas_w, canvas_h);
+
+    if (SDL_MUSTLOCK(result))
+        SDL_UnlockSurface(result);
+
+    JY_ReleaseLayerSet(layers, layer_n);
+
+    if (!ok)
+    {
+        SDL_FreeSurface(result);
+        return luaL_error(L, "JY_CompositeTexture: failed to alloc active layer list");
+    }
+
+    start_us = JY_NowUS();
+    tex = SDL_CreateTextureFromSurface(rd, result);
+    if (!tex)
+    {
+        SDL_FreeSurface(result);
+        return 0;
+    }
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    JY_RecordUpload(JY_NowUS() - start_us);
+
+    ok = JY_PushTexture(L, tex, result);
+    SDL_FreeSurface(result);
+    return ok ? 1 : 0;
+}
+
 /* ═══════════════════════════════════════════
  *  GC / cleanup
  * ═══════════════════════════════════════════ */
@@ -3155,30 +3232,46 @@ void JY_PushPerfStats(lua_State* L)
 
     lua_createtable(L, 0, 3);
 
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.decode_us.count);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
     lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
+    lua_setfield(L, -2, "total_us");
     lua_pushinteger(L, (lua_Integer)decode_p95);
     lua_setfield(L, -2, "p95");
+    lua_pushinteger(L, (lua_Integer)decode_p95);
+    lua_setfield(L, -2, "p95_us");
     lua_pushinteger(L, (lua_Integer)decode_p99);
     lua_setfield(L, -2, "p99");
+    lua_pushinteger(L, (lua_Integer)decode_p99);
+    lua_setfield(L, -2, "p99_us");
     lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
     lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
+    lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "decode_us");
 
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.upload_us.count);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
     lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
+    lua_setfield(L, -2, "total_us");
     lua_pushinteger(L, (lua_Integer)upload_p95);
     lua_setfield(L, -2, "p95");
+    lua_pushinteger(L, (lua_Integer)upload_p95);
+    lua_setfield(L, -2, "p95_us");
     lua_pushinteger(L, (lua_Integer)upload_p99);
     lua_setfield(L, -2, "p99");
+    lua_pushinteger(L, (lua_Integer)upload_p99);
+    lua_setfield(L, -2, "p99_us");
     lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
     lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
+    lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "upload_us");
 
     lua_createtable(L, 0, 7);

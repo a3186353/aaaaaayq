@@ -89,6 +89,23 @@ static Uint32 MAP_Percentile(Uint32* values, int count, int pct)
     return values[idx - 1];
 }
 
+static int MAP_FloorDiv(int a, int b)
+{
+    int q = a / b;
+    int r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0)))
+        q--;
+    return q;
+}
+
+static int MAP_PosMod(int a, int b)
+{
+    int r = a % b;
+    if (r < 0)
+        r += b < 0 ? -b : b;
+    return r;
+}
+
 static int MAP_PushTexture(lua_State* L, SDL_Texture* tex)
 {
     MAP_GGETexture* gt;
@@ -2196,11 +2213,11 @@ static int LUA_GetViewportPlan(lua_State* L)
     Uint64 start_us = MAP_NowUS();
     int x_offset;
     int y_offset;
-    Uint32 sid;
+    int sid;
     int out = 0;
+    int colnum;
+    int mapnum;
 
-    if (left < 0) left = 0;
-    if (top < 0) top = 0;
     if (width < 0) width = 0;
     if (height < 0) height = 0;
     if (ud->colnum == 0 || ud->mapnum == 0)
@@ -2210,35 +2227,40 @@ static int LUA_GetViewportPlan(lua_State* L)
         return 1;
     }
 
-    x_offset = -(left % 320);
-    y_offset = -(top % 240);
-    sid = (Uint32)((top / 240) * (int)ud->colnum + (left / 320));
+    colnum = (int)ud->colnum;
+    mapnum = (int)ud->mapnum;
+    x_offset = -MAP_PosMod(left, 320);
+    y_offset = -MAP_PosMod(top, 240);
+    sid = MAP_FloorDiv(top, 240) * colnum + MAP_FloorDiv(left, 320);
 
     lua_createtable(L, ((width / 320) + 2) * ((height / 240) + 2), 0);
     for (int cy = y_offset; cy <= height; cy += 240)
     {
-        Uint32 id = sid;
-        Uint32 row_end = sid - (sid % ud->colnum) + ud->colnum;
-        if (row_end > ud->mapnum)
-            row_end = ud->mapnum;
+        int id = sid;
+        int row_end = sid - MAP_PosMod(sid, colnum) + colnum;
+        if (row_end > mapnum)
+            row_end = mapnum;
 
         for (int cx = x_offset; cx <= width; cx += 320)
         {
             if (id >= row_end)
                 break;
-            lua_createtable(L, 0, 3);
-            lua_pushinteger(L, (lua_Integer)id);
-            lua_setfield(L, -2, "id");
-            lua_pushinteger(L, (lua_Integer)cx);
-            lua_setfield(L, -2, "x");
-            lua_pushinteger(L, (lua_Integer)cy);
-            lua_setfield(L, -2, "y");
-            lua_rawseti(L, -2, ++out);
+            if (id >= 0 && id < mapnum)
+            {
+                lua_createtable(L, 0, 3);
+                lua_pushinteger(L, (lua_Integer)id);
+                lua_setfield(L, -2, "id");
+                lua_pushinteger(L, (lua_Integer)cx);
+                lua_setfield(L, -2, "x");
+                lua_pushinteger(L, (lua_Integer)cy);
+                lua_setfield(L, -2, "y");
+                lua_rawseti(L, -2, ++out);
+            }
             id++;
         }
 
-        sid += ud->colnum;
-        if (sid >= ud->mapnum)
+        sid += colnum;
+        if (sid >= mapnum)
             break;
     }
     MAP_RecordTime(&g_map_perf.viewport_us, MAP_NowUS() - start_us);
@@ -3514,19 +3536,27 @@ static void MAP_PushTimeStatsSnapshot(lua_State* L, const MAP_TimeStats* s)
             avg_us = s->total_us / s->count;
     }
 
-    lua_createtable(L, 0, 6);
+    lua_createtable(L, 0, 10);
     lua_pushinteger(L, s ? (lua_Integer)s->count : 0);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
     lua_setfield(L, -2, "total_us");
+    lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
+    lua_setfield(L, -2, "total");
     lua_pushinteger(L, (lua_Integer)avg_us);
     lua_setfield(L, -2, "avg_us");
     lua_pushinteger(L, (lua_Integer)sample_count);
     lua_setfield(L, -2, "sample_count");
+    lua_pushinteger(L, (lua_Integer)sample_count);
+    lua_setfield(L, -2, "samples");
     lua_pushinteger(L, (lua_Integer)p95);
     lua_setfield(L, -2, "p95_us");
+    lua_pushinteger(L, (lua_Integer)p95);
+    lua_setfield(L, -2, "p95");
     lua_pushinteger(L, (lua_Integer)p99);
     lua_setfield(L, -2, "p99_us");
+    lua_pushinteger(L, (lua_Integer)p99);
+    lua_setfield(L, -2, "p99");
 }
 
 void MAP_PushPerfStats(lua_State* L)

@@ -4527,19 +4527,27 @@ static void WPK_PushTimeStatsSnapshot(lua_State* L, const WPK_TimeStats* s)
             avg_us = s->total_us / s->count;
     }
 
-    lua_createtable(L, 0, 6);
+    lua_createtable(L, 0, 10);
     lua_pushinteger(L, s ? (lua_Integer)s->count : 0);
     lua_setfield(L, -2, "count");
     lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
     lua_setfield(L, -2, "total_us");
+    lua_pushinteger(L, s ? (lua_Integer)s->total_us : 0);
+    lua_setfield(L, -2, "total");
     lua_pushinteger(L, (lua_Integer)avg_us);
     lua_setfield(L, -2, "avg_us");
     lua_pushinteger(L, (lua_Integer)sample_count);
     lua_setfield(L, -2, "sample_count");
+    lua_pushinteger(L, (lua_Integer)sample_count);
+    lua_setfield(L, -2, "samples");
     lua_pushinteger(L, (lua_Integer)p95);
     lua_setfield(L, -2, "p95_us");
+    lua_pushinteger(L, (lua_Integer)p95);
+    lua_setfield(L, -2, "p95");
     lua_pushinteger(L, (lua_Integer)p99);
     lua_setfield(L, -2, "p99_us");
+    lua_pushinteger(L, (lua_Integer)p99);
+    lua_setfield(L, -2, "p99");
 }
 
 void WPK_PushPerfStats(lua_State* L)
