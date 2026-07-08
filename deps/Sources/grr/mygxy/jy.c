@@ -38,6 +38,7 @@ typedef struct
 {
     SDL_mutex* mutex;
     JY_TimeStats decode_us;
+    JY_TimeStats upload_us;
     Uint64 cache_bytes;
     Uint64 decoded_frames;
     Uint64 cache_hits;
@@ -46,6 +47,12 @@ typedef struct
     Uint64 cache_clear_count;
     Uint64 cache_clear_freed_bytes;
 } JY_PerfStats;
+
+typedef struct
+{
+    SDL_Surface* sf;
+    int refcount;
+} JY_GGETexture;
 
 static JY_PerfStats g_jy_perf = {0};
 
@@ -83,6 +90,14 @@ static void JY_RecordDecode(Uint64 elapsed_us)
     if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
 }
 
+static void JY_RecordUpload(Uint64 elapsed_us)
+{
+    JY_PerfEnsure();
+    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
+    JY_TimeRecord(&g_jy_perf.upload_us, elapsed_us);
+    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
+}
+
 static Uint64 JY_CacheEntryBytes(const JY_CacheEntry* e)
 {
     Uint64 npx;
@@ -111,11 +126,121 @@ static Uint32 JY_Percentile(Uint32* values, int count, int pct)
     return values[idx - 1];
 }
 
+static SDL_Surface* JY_SurfaceAlphaToSurface(SDL_Surface* sf)
+{
+    if (!sf || !sf->format || sf->w <= 0 || sf->h <= 0)
+        return NULL;
+
+    SDL_Surface* src = sf;
+    int free_src = 0;
+    if (sf->format->format != SDL_PIXELFORMAT_ARGB8888)
+    {
+        src = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
+        if (!src)
+            return NULL;
+        free_src = 1;
+    }
+
+    SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, sf->w, sf->h, 8, SDL_PIXELFORMAT_INDEX8);
+    if (!out)
+    {
+        if (free_src)
+            SDL_FreeSurface(src);
+        return NULL;
+    }
+
+    int src_locked = 0;
+    int out_locked = 0;
+    if (SDL_MUSTLOCK(src))
+    {
+        if (SDL_LockSurface(src) != 0)
+        {
+            SDL_FreeSurface(out);
+            if (free_src)
+                SDL_FreeSurface(src);
+            return NULL;
+        }
+        src_locked = 1;
+    }
+    if (SDL_MUSTLOCK(out))
+    {
+        if (SDL_LockSurface(out) != 0)
+        {
+            if (src_locked)
+                SDL_UnlockSurface(src);
+            SDL_FreeSurface(out);
+            if (free_src)
+                SDL_FreeSurface(src);
+            return NULL;
+        }
+        out_locked = 1;
+    }
+
+    for (int y = 0; y < src->h; y++)
+    {
+        const Uint32* src_row = (const Uint32*)((const Uint8*)src->pixels + (size_t)y * (size_t)src->pitch);
+        Uint8* dst = (Uint8*)out->pixels + (size_t)y * (size_t)out->pitch;
+        for (int x = 0; x < src->w; x++)
+            dst[x] = (Uint8)((src_row[x] >> 24) & 0xFF);
+    }
+
+    if (out_locked)
+        SDL_UnlockSurface(out);
+    if (src_locked)
+        SDL_UnlockSurface(src);
+    if (free_src)
+        SDL_FreeSurface(src);
+    return out;
+}
+
+static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src)
+{
+    if (!tex || !alpha_src)
+        return 0;
+
+    luaL_getmetatable(L, "SDL_Texture");
+    if (!lua_istable(L, -1))
+    {
+        lua_pop(L, 1);
+        SDL_DestroyTexture(tex);
+        return 0;
+    }
+    lua_pop(L, 1);
+
+    JY_GGETexture* gt = (JY_GGETexture*)SDL_calloc(1, sizeof(JY_GGETexture));
+    if (!gt)
+    {
+        SDL_DestroyTexture(tex);
+        return 0;
+    }
+    gt->sf = JY_SurfaceAlphaToSurface(alpha_src);
+    if (!gt->sf)
+    {
+        SDL_free(gt);
+        SDL_DestroyTexture(tex);
+        return 0;
+    }
+    gt->refcount = 1;
+    if (SDL_SetTextureUserData(tex, gt) != 0)
+    {
+        SDL_FreeSurface(gt->sf);
+        SDL_free(gt);
+        SDL_DestroyTexture(tex);
+        return 0;
+    }
+
+    SDL_Texture** ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
+    *ud = tex;
+    luaL_setmetatable(L, "SDL_Texture");
+    return 1;
+}
+
 /* ═══════════════════════════════════════════
  *  Forward declarations
  * ═══════════════════════════════════════════ */
 static int JY_GetFrame(lua_State* L);
 static int JY_GetFrameReady(lua_State* L);
+static int JY_GetFrameTexture(lua_State* L);
 static int JY_GetFrameInfo(lua_State* L);
 static int JY_SetPal(lua_State* L);
 static int JY_GetPal(lua_State* L);
@@ -141,6 +266,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"GetFrame",    JY_GetFrame},
     {"get_frame",   JY_GetFrame},
     {"GetFrameReady", JY_GetFrameReady},
+    {"GetFrameTexture", JY_GetFrameTexture},
     {"GetFrameInfo", JY_GetFrameInfo},
     {"SetPal",      JY_SetPal},
     {"set_palette", JY_SetPalette},
@@ -999,6 +1125,59 @@ static int JY_GetFrameReady(lua_State* L)
         }
     }
     return 0;
+}
+
+static int JY_GetFrameTexture(lua_State* L)
+{
+    JY_UserData* ud = JY_Check(L, 1);
+    SDL_Renderer** rdud = (SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
+    lua_Integer idx = luaL_checkinteger(L, 3);
+    if (idx < 0 || (Uint32)idx >= ud->frame_count)
+        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
+    if (!rdud || !*rdud)
+        return 0;
+
+    Uint32 id = (Uint32)idx;
+    JY_FrameInfo* f = &ud->frames[id];
+    JY_AsyncPollDecoded(ud, 4);
+
+    if (!ud->cache)
+        return 0;
+    JY_CacheEntry* hit = JY_CacheLookup(ud, id);
+    if (!hit || !hit->idx_pixels)
+        return 0;
+
+    SDL_Surface* sf = JY_RenderFrameToSurface(ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
+    if (!sf)
+        return 0;
+
+    Uint64 start_us = JY_NowUS();
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(*rdud, sf);
+    if (!tex)
+    {
+        SDL_FreeSurface(sf);
+        return 0;
+    }
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    JY_RecordUpload(JY_NowUS() - start_us);
+
+    if (!JY_PushTexture(L, tex, sf))
+    {
+        SDL_FreeSurface(sf);
+        return 0;
+    }
+
+    SDL_FreeSurface(sf);
+    lua_createtable(L, 0, 4);
+    lua_pushinteger(L, (lua_Integer)f->sh);
+    lua_setfield(L, -2, "height");
+    lua_pushinteger(L, (lua_Integer)f->sw);
+    lua_setfield(L, -2, "width");
+    lua_pushinteger(L, (lua_Integer)f->key_x);
+    lua_setfield(L, -2, "x");
+    lua_pushinteger(L, (lua_Integer)f->key_y);
+    lua_setfield(L, -2, "y");
+    return 2;
 }
 
 static int JY_GetFrameInfo(lua_State* L)
@@ -2993,8 +3172,11 @@ void JY_PushPerfStats(lua_State* L)
 {
     JY_PerfStats snap;
     Uint32 decode_samples[JY_PERF_SAMPLE_CAP];
+    Uint32 upload_samples[JY_PERF_SAMPLE_CAP];
     Uint32 decode_p95;
     Uint32 decode_p99;
+    Uint32 upload_p95;
+    Uint32 upload_p99;
 
     SDL_memset(&snap, 0, sizeof(snap));
     JY_PerfEnsure();
@@ -3002,12 +3184,16 @@ void JY_PushPerfStats(lua_State* L)
     snap = g_jy_perf;
     if (snap.decode_us.sample_count > 0)
         SDL_memcpy(decode_samples, g_jy_perf.decode_us.samples, sizeof(Uint32) * (size_t)snap.decode_us.sample_count);
+    if (snap.upload_us.sample_count > 0)
+        SDL_memcpy(upload_samples, g_jy_perf.upload_us.samples, sizeof(Uint32) * (size_t)snap.upload_us.sample_count);
     if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
 
     decode_p95 = JY_Percentile(decode_samples, snap.decode_us.sample_count, 95);
     decode_p99 = JY_Percentile(decode_samples, snap.decode_us.sample_count, 99);
+    upload_p95 = JY_Percentile(upload_samples, snap.upload_us.sample_count, 95);
+    upload_p99 = JY_Percentile(upload_samples, snap.upload_us.sample_count, 99);
 
-    lua_createtable(L, 0, 2);
+    lua_createtable(L, 0, 3);
 
     lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.decode_us.count);
@@ -3029,6 +3215,27 @@ void JY_PushPerfStats(lua_State* L)
     lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
     lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "decode_us");
+
+    lua_createtable(L, 0, 9);
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.count);
+    lua_setfield(L, -2, "count");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
+    lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
+    lua_setfield(L, -2, "total_us");
+    lua_pushinteger(L, (lua_Integer)upload_p95);
+    lua_setfield(L, -2, "p95");
+    lua_pushinteger(L, (lua_Integer)upload_p95);
+    lua_setfield(L, -2, "p95_us");
+    lua_pushinteger(L, (lua_Integer)upload_p99);
+    lua_setfield(L, -2, "p99");
+    lua_pushinteger(L, (lua_Integer)upload_p99);
+    lua_setfield(L, -2, "p99_us");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
+    lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
+    lua_setfield(L, -2, "sample_count");
+    lua_setfield(L, -2, "upload_us");
 
     lua_createtable(L, 0, 7);
     lua_pushinteger(L, (lua_Integer)snap.cache_bytes);
