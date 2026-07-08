@@ -36,7 +36,6 @@ typedef struct
 {
     SDL_mutex* mutex;
     TCP_TimeStats decode_us;
-    TCP_TimeStats upload_us;
     Uint64 cache_bytes;
     Uint64 decoded_frames;
     Uint64 cache_hits;
@@ -3179,11 +3178,8 @@ void TCP_PushPerfStats(lua_State* L)
 {
     TCP_PerfStats snap;
     Uint32 decode_samples[TCP_PERF_SAMPLE_CAP];
-    Uint32 upload_samples[TCP_PERF_SAMPLE_CAP];
     Uint32 decode_p95;
     Uint32 decode_p99;
-    Uint32 upload_p95;
-    Uint32 upload_p99;
 
     SDL_memset(&snap, 0, sizeof(snap));
     TCP_PerfEnsure();
@@ -3191,16 +3187,12 @@ void TCP_PushPerfStats(lua_State* L)
     snap = g_tcp_perf;
     if (snap.decode_us.sample_count > 0)
         SDL_memcpy(decode_samples, g_tcp_perf.decode_us.samples, sizeof(Uint32) * (size_t)snap.decode_us.sample_count);
-    if (snap.upload_us.sample_count > 0)
-        SDL_memcpy(upload_samples, g_tcp_perf.upload_us.samples, sizeof(Uint32) * (size_t)snap.upload_us.sample_count);
     if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
 
     decode_p95 = TCP_Percentile(decode_samples, snap.decode_us.sample_count, 95);
     decode_p99 = TCP_Percentile(decode_samples, snap.decode_us.sample_count, 99);
-    upload_p95 = TCP_Percentile(upload_samples, snap.upload_us.sample_count, 95);
-    upload_p99 = TCP_Percentile(upload_samples, snap.upload_us.sample_count, 99);
 
-    lua_createtable(L, 0, 3);
+    lua_createtable(L, 0, 2);
 
     lua_createtable(L, 0, 9);
     lua_pushinteger(L, (lua_Integer)snap.decode_us.count);
@@ -3222,27 +3214,6 @@ void TCP_PushPerfStats(lua_State* L)
     lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
     lua_setfield(L, -2, "sample_count");
     lua_setfield(L, -2, "decode_us");
-
-    lua_createtable(L, 0, 9);
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.count);
-    lua_setfield(L, -2, "count");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
-    lua_setfield(L, -2, "total");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
-    lua_setfield(L, -2, "total_us");
-    lua_pushinteger(L, (lua_Integer)upload_p95);
-    lua_setfield(L, -2, "p95");
-    lua_pushinteger(L, (lua_Integer)upload_p95);
-    lua_setfield(L, -2, "p95_us");
-    lua_pushinteger(L, (lua_Integer)upload_p99);
-    lua_setfield(L, -2, "p99");
-    lua_pushinteger(L, (lua_Integer)upload_p99);
-    lua_setfield(L, -2, "p99_us");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
-    lua_setfield(L, -2, "samples");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
-    lua_setfield(L, -2, "sample_count");
-    lua_setfield(L, -2, "upload_us");
 
     lua_createtable(L, 0, 7);
     lua_pushinteger(L, (lua_Integer)snap.cache_bytes);
