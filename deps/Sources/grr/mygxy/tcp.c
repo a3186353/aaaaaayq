@@ -25,12 +25,6 @@
 
 typedef struct
 {
-    SDL_Surface* sf;
-    int refcount;
-} TCP_GGETexture;
-
-typedef struct
-{
     Uint64 count;
     Uint64 total_us;
     Uint32 samples[TCP_PERF_SAMPLE_CAP];
@@ -88,14 +82,6 @@ static void TCP_RecordDecode(Uint64 elapsed_us)
     if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
 }
 
-static void TCP_RecordUpload(Uint64 elapsed_us)
-{
-    TCP_PerfEnsure();
-    if (g_tcp_perf.mutex) SDL_LockMutex(g_tcp_perf.mutex);
-    TCP_TimeRecord(&g_tcp_perf.upload_us, elapsed_us);
-    if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
-}
-
 static Uint64 TCP_SurfaceBytes(SDL_Surface* sf)
 {
     if (!sf || sf->h <= 0 || sf->pitch <= 0)
@@ -120,81 +106,6 @@ static Uint32 TCP_Percentile(Uint32* values, int count, int pct)
     if (idx < 1) idx = 1;
     if (idx > count) idx = count;
     return values[idx - 1];
-}
-
-static SDL_Surface* TCP_SurfaceAlphaToSurface(SDL_Surface* sf)
-{
-    if (!sf)
-        return NULL;
-
-    SDL_Surface* nsf = SDL_CreateRGBSurfaceWithFormat(0, sf->w, sf->h, 8, SDL_PIXELFORMAT_INDEX8);
-    if (!nsf)
-        return NULL;
-
-    Uint8 r, g, b, a;
-    Uint8* rp = (Uint8*)sf->pixels;
-    Uint8* wp = (Uint8*)nsf->pixels;
-    int bpp = sf->format->BytesPerPixel;
-
-    for (int h = 0; h < sf->h; h++)
-    {
-        Uint8* lrp = rp;
-        Uint8* lwp = wp;
-        for (int w = 0; w < sf->w; w++)
-        {
-            switch (bpp)
-            {
-            case 1:
-                *lwp = *lrp;
-                break;
-            case 2:
-                SDL_GetRGBA(*(Uint16*)lrp, sf->format, &r, &g, &b, &a);
-                *lwp = a;
-                break;
-            case 4:
-                SDL_GetRGBA(*(Uint32*)lrp, sf->format, &r, &g, &b, &a);
-                *lwp = a;
-                break;
-            default:
-                *lwp = 255;
-                break;
-            }
-            lrp += bpp;
-            lwp++;
-        }
-        rp += sf->pitch;
-        wp += nsf->pitch;
-    }
-    return nsf;
-}
-
-static int TCP_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src)
-{
-    TCP_GGETexture* gt;
-    SDL_Texture** ud;
-    SDL_Surface* alpha_sf;
-    if (!tex)
-        return 0;
-    gt = (TCP_GGETexture*)SDL_calloc(1, sizeof(TCP_GGETexture));
-    if (!gt)
-    {
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-    alpha_sf = TCP_SurfaceAlphaToSurface(alpha_src);
-    if (alpha_src && !alpha_sf)
-    {
-        SDL_DestroyTexture(tex);
-        SDL_free(gt);
-        return 0;
-    }
-    ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
-    *ud = tex;
-    gt->refcount = 1;
-    gt->sf = alpha_sf;
-    SDL_SetTextureUserData(tex, gt);
-    luaL_setmetatable(L, "SDL_Texture");
-    return 1;
 }
 
 static void* TCP_TestUserData(lua_State* L, int idx, const char* tname)
@@ -222,7 +133,6 @@ static TCP_UserData* TCP_Check(lua_State* L, int idx)
 
 static int TCP_GetFrame(lua_State* L);
 static int TCP_GetFrameReady(lua_State* L);
-static int TCP_GetFrameTexture(lua_State* L);
 static int TCP_SetPP(lua_State* L);
 static int TCP_GetPal(lua_State* L);
 static int TCP_SetPal(lua_State* L);
@@ -249,7 +159,6 @@ static const luaL_Reg TCP_FUNCS[] = {
     {"GetFrame", TCP_GetFrame},
     {"get_frame", TCP_GetFrame},
     {"GetFrameReady", TCP_GetFrameReady},
-    {"GetFrameTexture", TCP_GetFrameTexture},
     {"SetPP", TCP_SetPP},
     {"GetPal", TCP_GetPal},
     {"get_palette", TCP_GetPal},
@@ -2486,45 +2395,6 @@ static int TCP_GetFrame(lua_State* L)
     if (cache_sf)
         TCP_CacheInsert(ud, i, ud->pal_version, cache_sf, w, h, x, y);
     return TCP_PushFrame(L, sf, w, h, x, y, &opts);
-}
-
-static int TCP_GetFrameTexture(lua_State* L)
-{
-    TCP_UserData* ud = TCP_Check(L, 1);
-    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
-    lua_Integer idx = luaL_checkinteger(L, 3);
-    TCP_CacheEntry* cached;
-    SDL_Texture* tex;
-    Uint64 start_us;
-
-    if (idx < 0 || (Uint32)idx >= ud->number)
-        return luaL_error(L, "Frame index out of range: %d.", (int)idx);
-
-    TCP_AsyncPollDecoded(ud, 4);
-    cached = TCP_CacheLookup(ud, (Uint32)idx);
-    if (!cached || !cached->surface)
-        return 0;
-
-    start_us = TCP_NowUS();
-    tex = SDL_CreateTextureFromSurface(rd, cached->surface);
-    if (!tex)
-        return 0;
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    TCP_RecordUpload(TCP_NowUS() - start_us);
-
-    if (!TCP_PushTexture(L, tex, cached->surface))
-        return 0;
-
-    lua_createtable(L, 0, 4);
-    lua_pushinteger(L, (lua_Integer)cached->h);
-    lua_setfield(L, -2, "height");
-    lua_pushinteger(L, (lua_Integer)cached->w);
-    lua_setfield(L, -2, "width");
-    lua_pushinteger(L, (lua_Integer)cached->x);
-    lua_setfield(L, -2, "x");
-    lua_pushinteger(L, (lua_Integer)cached->y);
-    lua_setfield(L, -2, "y");
-    return 2;
 }
 
 static int TCP_GetFrameReady(lua_State* L)

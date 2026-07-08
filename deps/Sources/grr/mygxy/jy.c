@@ -27,12 +27,6 @@
 
 typedef struct
 {
-    SDL_Surface* sf;
-    int refcount;
-} JY_GGETexture;
-
-typedef struct
-{
     Uint64 count;
     Uint64 total_us;
     Uint32 samples[JY_PERF_SAMPLE_CAP];
@@ -90,14 +84,6 @@ static void JY_RecordDecode(Uint64 elapsed_us)
     if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
 }
 
-static void JY_RecordUpload(Uint64 elapsed_us)
-{
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    JY_TimeRecord(&g_jy_perf.upload_us, elapsed_us);
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-}
-
 static Uint64 JY_CacheEntryBytes(const JY_CacheEntry* e)
 {
     Uint64 npx;
@@ -126,87 +112,11 @@ static Uint32 JY_Percentile(Uint32* values, int count, int pct)
     return values[idx - 1];
 }
 
-static SDL_Surface* JY_SurfaceAlphaToSurface(SDL_Surface* sf)
-{
-    if (!sf)
-        return NULL;
-
-    SDL_Surface* nsf = SDL_CreateRGBSurfaceWithFormat(0, sf->w, sf->h, 8, SDL_PIXELFORMAT_INDEX8);
-    if (!nsf)
-        return NULL;
-
-    Uint8 r, g, b, a;
-    Uint8* rp = (Uint8*)sf->pixels;
-    Uint8* wp = (Uint8*)nsf->pixels;
-    int bpp = sf->format->BytesPerPixel;
-
-    for (int h = 0; h < sf->h; h++)
-    {
-        Uint8* lrp = rp;
-        Uint8* lwp = wp;
-        for (int w = 0; w < sf->w; w++)
-        {
-            switch (bpp)
-            {
-            case 1:
-                *lwp = *lrp;
-                break;
-            case 2:
-                SDL_GetRGBA(*(Uint16*)lrp, sf->format, &r, &g, &b, &a);
-                *lwp = a;
-                break;
-            case 4:
-                SDL_GetRGBA(*(Uint32*)lrp, sf->format, &r, &g, &b, &a);
-                *lwp = a;
-                break;
-            default:
-                *lwp = 255;
-                break;
-            }
-            lrp += bpp;
-            lwp++;
-        }
-        rp += sf->pitch;
-        wp += nsf->pitch;
-    }
-    return nsf;
-}
-
-static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src)
-{
-    JY_GGETexture* gt;
-    SDL_Texture** ud;
-    SDL_Surface* alpha_sf;
-    if (!tex)
-        return 0;
-    gt = (JY_GGETexture*)SDL_calloc(1, sizeof(JY_GGETexture));
-    if (!gt)
-    {
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-    alpha_sf = JY_SurfaceAlphaToSurface(alpha_src);
-    if (alpha_src && !alpha_sf)
-    {
-        SDL_DestroyTexture(tex);
-        SDL_free(gt);
-        return 0;
-    }
-    ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
-    *ud = tex;
-    gt->refcount = 1;
-    gt->sf = alpha_sf;
-    SDL_SetTextureUserData(tex, gt);
-    luaL_setmetatable(L, "SDL_Texture");
-    return 1;
-}
-
 /* ═══════════════════════════════════════════
  *  Forward declarations
  * ═══════════════════════════════════════════ */
 static int JY_GetFrame(lua_State* L);
 static int JY_GetFrameReady(lua_State* L);
-static int JY_GetFrameTexture(lua_State* L);
 static int JY_GetFrameInfo(lua_State* L);
 static int JY_SetPal(lua_State* L);
 static int JY_GetPal(lua_State* L);
@@ -221,7 +131,6 @@ static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
-static int JY_CompositeTexture(lua_State* L);
 static int JY_GC(lua_State* L);
 static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth);
 
@@ -233,7 +142,6 @@ static const luaL_Reg JY_FUNCS[] = {
     {"GetFrame",    JY_GetFrame},
     {"get_frame",   JY_GetFrame},
     {"GetFrameReady", JY_GetFrameReady},
-    {"GetFrameTexture", JY_GetFrameTexture},
     {"GetFrameInfo", JY_GetFrameInfo},
     {"SetPal",      JY_SetPal},
     {"set_palette", JY_SetPalette},
@@ -249,7 +157,6 @@ static const luaL_Reg JY_FUNCS[] = {
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
     {"CompositeTo", JY_CompositeTo},
-    {"CompositeTexture", JY_CompositeTexture},
     {NULL, NULL},
 };
 
@@ -1068,61 +975,6 @@ static int JY_GetFrame(lua_State* L)
     }
 
     return JY_PushFrame(L, sf, f);
-}
-
-static int JY_GetFrameTexture(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
-    lua_Integer idx = luaL_checkinteger(L, 3);
-    Uint32 id;
-    JY_FrameInfo* f;
-    JY_CacheEntry* hit;
-    SDL_Surface* sf;
-    SDL_Texture* tex;
-    Uint64 start_us;
-
-    if (idx < 0 || (Uint32)idx >= ud->frame_count)
-        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
-
-    id = (Uint32)idx;
-    f = &ud->frames[id];
-    JY_AsyncPollDecoded(ud, 4);
-    hit = JY_CacheLookup(ud, id);
-    if (!hit || !hit->idx_pixels)
-        return 0;
-
-    sf = JY_RenderFrameToSurface(ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
-    if (!sf)
-        return 0;
-
-    start_us = JY_NowUS();
-    tex = SDL_CreateTextureFromSurface(rd, sf);
-    if (!tex)
-    {
-        SDL_FreeSurface(sf);
-        return 0;
-    }
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    JY_RecordUpload(JY_NowUS() - start_us);
-
-    if (!JY_PushTexture(L, tex, sf))
-    {
-        SDL_FreeSurface(sf);
-        return 0;
-    }
-    SDL_FreeSurface(sf);
-
-    lua_createtable(L, 0, 4);
-    lua_pushinteger(L, (lua_Integer)f->sh);
-    lua_setfield(L, -2, "height");
-    lua_pushinteger(L, (lua_Integer)f->sw);
-    lua_setfield(L, -2, "width");
-    lua_pushinteger(L, (lua_Integer)f->key_x);
-    lua_setfield(L, -2, "x");
-    lua_pushinteger(L, (lua_Integer)f->key_y);
-    lua_setfield(L, -2, "y");
-    return 2;
 }
 
 static int JY_GetFrameReady(lua_State* L)
@@ -2091,73 +1943,6 @@ static int JY_CompositeTo(lua_State* L)
     /* target 的 BlendMode 由 Lua 侧自管(创建 surface 时一次性设好,不每帧重设) */
     lua_pushboolean(L, 1);
     return 1;
-}
-
-static int JY_CompositeTexture(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    SDL_Renderer* rd = *(SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
-    int canvas_w = (int)luaL_checkinteger(L, 3);
-    int canvas_h = (int)luaL_checkinteger(L, 4);
-    JY_CompLayer* layers = NULL;
-    int layer_n;
-    SDL_Surface* result;
-    int ok;
-    Uint64 start_us;
-    SDL_Texture* tex;
-
-    (void)ud;
-    luaL_checktype(L, 5, LUA_TTABLE);
-
-    if (!rd || canvas_w <= 0 || canvas_h <= 0)
-        return 0;
-
-    layer_n = JY_BuildLayerSet(L, 5, canvas_w, canvas_h, &layers);
-    if (layer_n < 0)
-        return luaL_error(L, "JY_CompositeTexture: failed to alloc layer set");
-    if (layer_n == 0)
-    {
-        JY_ReleaseLayerSet(layers, 0);
-        return 0;
-    }
-
-    result = SDL_CreateRGBSurfaceWithFormat(
-        SDL_SWSURFACE, canvas_w, canvas_h, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!result)
-    {
-        JY_ReleaseLayerSet(layers, layer_n);
-        return 0;
-    }
-
-    if (SDL_MUSTLOCK(result))
-        SDL_LockSurface(result);
-
-    ok = JY_RunCompositeKernel(result, layers, layer_n, canvas_w, canvas_h);
-
-    if (SDL_MUSTLOCK(result))
-        SDL_UnlockSurface(result);
-
-    JY_ReleaseLayerSet(layers, layer_n);
-
-    if (!ok)
-    {
-        SDL_FreeSurface(result);
-        return luaL_error(L, "JY_CompositeTexture: failed to alloc active layer list");
-    }
-
-    start_us = JY_NowUS();
-    tex = SDL_CreateTextureFromSurface(rd, result);
-    if (!tex)
-    {
-        SDL_FreeSurface(result);
-        return 0;
-    }
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    JY_RecordUpload(JY_NowUS() - start_us);
-
-    ok = JY_PushTexture(L, tex, result);
-    SDL_FreeSurface(result);
-    return ok ? 1 : 0;
 }
 
 /* ═══════════════════════════════════════════
