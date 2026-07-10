@@ -2318,6 +2318,16 @@ static int LUA_GetMapFull(lua_State* L)
     return LUA_GetMap(L);
 }
 
+static int map_push_submit_result(lua_State* L, int accepted, const char* reason)
+{
+    lua_pushboolean(L, accepted);
+    if (reason)
+        lua_pushstring(L, reason);
+    else
+        lua_pushnil(L);
+    return 2;
+}
+
 static int LUA_GetMapFullTexture(lua_State* L)
 {
     MAP_UserData* ud = (MAP_UserData*)luaL_checkudata(L, 1, MAP_NAME);
@@ -2335,8 +2345,10 @@ static int LUA_GetMapFullTexture(lua_State* L)
     SDL_LockMutex(ud->mutex);
     if (ud->closing || map->loading || ud->active_tasks >= MAP_MAX_ACTIVE_TASKS)
     {
+        const char* reason = ud->closing ? "closing"
+            : (map->loading ? "loading" : "queue_full");
         SDL_UnlockMutex(ud->mutex);
-        return 0;
+        return map_push_submit_result(L, 0, reason);
     }
     map->loading = 1;
     ud->active_tasks++;
@@ -2350,7 +2362,7 @@ static int LUA_GetMapFullTexture(lua_State* L)
         ud->active_tasks--;
         SDL_CondSignal(ud->cond);
         SDL_UnlockMutex(ud->mutex);
-        return 0;
+        return map_push_submit_result(L, 0, "out_of_memory");
     }
     time->type = TIME_TYPE_MAPFULL;
     time->ud = ud;
@@ -2367,7 +2379,7 @@ static int LUA_GetMapFullTexture(lua_State* L)
         ud->active_tasks--;
         SDL_CondSignal(ud->cond);
         SDL_UnlockMutex(ud->mutex);
-        return 0;
+        return map_push_submit_result(L, 0, "out_of_memory");
     }
     fm->map = map;
     time->data = (void*)fm;
@@ -2383,9 +2395,9 @@ static int LUA_GetMapFullTexture(lua_State* L)
         ud->active_tasks--;
         SDL_CondSignal(ud->cond);
         SDL_UnlockMutex(ud->mutex);
-        return luaL_error(L, "SDL_AddTimer failed, out of system resources");
+        return map_push_submit_result(L, 0, "timer_failed");
     }
-    return 0;
+    return map_push_submit_result(L, 1, NULL);
 }
 
 static int LUA_GetMapInfo(lua_State* L)

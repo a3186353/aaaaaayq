@@ -28,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef GHV_NO_CRYPTO
@@ -123,6 +124,50 @@ static int download_final_error(int ret, int status_code)
 static bool download_is_timeout_status(int status)
 {
     return status == -ETIMEDOUT || status == -1100 || status == -10060;
+}
+
+static void download_compute_md5(const std::shared_ptr<DownloadCoreState>& state)
+{
+#ifndef GHV_NO_CRYPTO
+    if (!state)
+        return;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    bool source_ready = false;
+    std::string hex;
+    if (ctx && EVP_DigestInit_ex(ctx, EVP_md5(), NULL)) {
+        if (!state->filepath.empty()) {
+            FILE* f = download_open_file(state->filepath, "rb");
+            if (f) {
+                unsigned char buf[8192];
+                size_t n;
+                source_ready = true;
+                while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+                    EVP_DigestUpdate(ctx, buf, n);
+                fclose(f);
+            }
+        } else {
+            std::lock_guard<std::mutex> lock(state->data_mutex);
+            EVP_DigestUpdate(ctx, state->memory_data.data(), state->memory_data.size());
+            source_ready = true;
+        }
+        unsigned char md[EVP_MAX_MD_SIZE];
+        unsigned int md_len = 0;
+        if (source_ready && EVP_DigestFinal_ex(ctx, md, &md_len)) {
+            char value[33] = {0};
+            for (unsigned int i = 0; i < md_len && i < 16; i++)
+                sprintf(value + i * 2, "%02x", md[i]);
+            hex = value;
+        }
+    }
+    if (ctx)
+        EVP_MD_CTX_free(ctx);
+    if (!hex.empty()) {
+        std::lock_guard<std::mutex> lock(state->data_mutex);
+        state->md5_hex = std::move(hex);
+    }
+#else
+    (void)state;
+#endif
 }
 
 class DownloadManager {
@@ -374,6 +419,7 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
             download_remove_file(state->filepath);
             state->status = download_final_error(ret, resp.status_code);
         } else {
+            download_compute_md5(state);
             state->status = GHV_DOWNLOAD_STATUS_DONE;
         }
     } else {
@@ -409,6 +455,7 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
                 state->current_size = state->memory_data.size();
                 state->total_size = state->memory_data.size();
             }
+            download_compute_md5(state);
             state->status = GHV_DOWNLOAD_STATUS_DONE;
         }
     }
@@ -449,37 +496,7 @@ static int l_download_get_data(lua_State* L) {
 
 static int l_download_get_md5(lua_State* L) {
     LuaDownload* self = check_download(L);
-#ifndef GHV_NO_CRYPTO
-    if (self->core->md5_hex.empty() && self->core->status == GHV_DOWNLOAD_STATUS_DONE) {
-        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        if (ctx && EVP_DigestInit_ex(ctx, EVP_md5(), NULL)) {
-            if (!self->core->filepath.empty()) {
-                FILE* f = download_open_file(self->core->filepath, "rb");
-                if (f) {
-                    unsigned char buf[8192];
-                    size_t n;
-                    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-                        EVP_DigestUpdate(ctx, buf, n);
-                    }
-                    fclose(f);
-                }
-            } else {
-                std::lock_guard<std::mutex> lock(self->core->data_mutex);
-                EVP_DigestUpdate(ctx, self->core->memory_data.data(), self->core->memory_data.size());
-            }
-            unsigned char md[EVP_MAX_MD_SIZE];
-            unsigned int md_len = 0;
-            if (EVP_DigestFinal_ex(ctx, md, &md_len)) {
-                char hex[33] = {0};
-                for (unsigned int i = 0; i < md_len && i < 16; i++) {
-                    sprintf(hex + i * 2, "%02x", md[i]);
-                }
-                self->core->md5_hex = hex;
-            }
-        }
-        if (ctx) EVP_MD_CTX_free(ctx);
-    }
-#endif
+    std::lock_guard<std::mutex> lock(self->core->data_mutex);
     lua_pushstring(L, self->core->md5_hex.c_str());
     return 1;
 }

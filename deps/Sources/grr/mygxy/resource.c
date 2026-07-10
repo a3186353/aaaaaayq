@@ -82,7 +82,7 @@ typedef struct ResourceToken
     ResourcePriority priority;
     ResourceStatus status;
     int allow_cold_download;
-    int cancelled;
+    SDL_atomic_t cancelled;
     int download_ref;
     int timeout;
     unsigned int current_url;
@@ -108,6 +108,7 @@ typedef struct ResourceToken
     unsigned int created_tick;
     unsigned int terminal_tick;
     unsigned int event_pending;
+    unsigned int event_delivered;
     unsigned int retry_tick;
     unsigned int submit_attempts;
     unsigned int queue_full_count;
@@ -305,6 +306,16 @@ static int resource_is_terminal(ResourceStatus status)
         || status == RESOURCE_STATUS_CANCELLED;
 }
 
+static int resource_token_is_cancelled(const ResourceToken* token)
+{
+    return token && SDL_AtomicGet((SDL_atomic_t*)&token->cancelled) != 0;
+}
+
+static int resource_token_mark_cancelled(ResourceToken* token)
+{
+    return token && SDL_AtomicCAS(&token->cancelled, 0, 1) == SDL_TRUE;
+}
+
 static void resource_unref_download(lua_State* L, ResourceToken* token)
 {
     if (!token || token->download_ref == LUA_NOREF)
@@ -391,6 +402,8 @@ static int resource_token_can_reap(const ResourceToken* token)
         return 0;
     if (token->callbacks && !token->callbacks_done)
         return 0;
+    if (!token->event_delivered)
+        return 0;
     if (token->event_pending)
         return 0;
     if (token->result_native)
@@ -465,34 +478,17 @@ static void resource_event_free(ResourceEvent* ev)
     free(ev);
 }
 
-static int resource_drop_oldest_event(void)
-{
-    ResourceEvent* ev = g_resource.events_head;
-    ResourceToken* token;
-    if (!ev)
-        return 0;
-    g_resource.events_head = ev->next;
-    if (g_resource.events_tail == ev)
-        g_resource.events_tail = NULL;
-    token = ev->token ? ev->token : resource_find_token_ptr(ev->token_id);
-    if (token)
-        token->event_pending = 0;
-    ev->next = NULL;
-    resource_event_free(ev);
-    g_resource.event_queue_full++;
-    return 1;
-}
-
 static int resource_push_event(ResourceToken* token, ResourceStatus status, const char* resource_id, const char* message)
 {
-    ResourceEvent* ev = (ResourceEvent*)calloc(1, sizeof(ResourceEvent));
+    ResourceEvent* ev;
+    if (resource_event_queue_count() >= RESOURCE_EVENT_QUEUE_CAP)
+    {
+        g_resource.event_queue_full++;
+        return 0;
+    }
+    ev = (ResourceEvent*)calloc(1, sizeof(ResourceEvent));
     if (!ev)
         return 0;
-    while (resource_event_queue_count() >= RESOURCE_EVENT_QUEUE_CAP)
-    {
-        if (!resource_drop_oldest_event())
-            break;
-    }
     ev->token_id = token ? token->id : 0;
     ev->token = token;
     ev->status = status;
@@ -518,7 +514,10 @@ static unsigned int resource_drop_events(unsigned int token_id)
         {
             ResourceToken* token = ev->token ? ev->token : resource_find_token_ptr(ev->token_id);
             if (token)
+            {
                 token->event_pending = 0;
+                token->event_delivered = 1;
+            }
             if (prev)
                 prev->next = next;
             else
@@ -566,7 +565,10 @@ static unsigned int resource_drop_update_events(void)
         if (drop)
         {
             if (token)
+            {
                 token->event_pending = 0;
+                token->event_delivered = 1;
+            }
             if (prev)
                 prev->next = next;
             else
@@ -596,6 +598,8 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     old_status = token->status;
     if (old_status == status)
         return;
+    if (resource_is_terminal(old_status))
+        return;
     token->status = status;
     if (old_status == RESOURCE_STATUS_QUEUED)
     {
@@ -616,6 +620,24 @@ static void resource_set_status(ResourceToken* token, ResourceStatus status, con
     {
         token->terminal_tick = g_resource.poll_tick;
         token->event_pending = event_queued ? 1u : 0u;
+        token->event_delivered = 0;
+    }
+}
+
+static void resource_retry_terminal_events(void)
+{
+    ResourceToken* token = g_resource.tokens;
+    while (token)
+    {
+        if (resource_is_terminal(token->status)
+            && !token->event_pending && !token->event_delivered)
+        {
+            const char* message = token->result_error ? token->result_error : resource_status_name(token->status);
+            if (!resource_push_event(token, token->status, token->resource_id, message))
+                break;
+            token->event_pending = 1;
+        }
+        token = token->next;
     }
 }
 
@@ -835,7 +857,7 @@ static unsigned int resource_dispatch_pending_callbacks(lua_State* L)
 static int resource_start_download(lua_State* L, ResourceToken* token)
 {
     const char* url;
-    if (!token || token->cancelled || token->status != RESOURCE_STATUS_QUEUED)
+    if (!token || resource_token_is_cancelled(token) || token->status != RESOURCE_STATUS_QUEUED)
         return 0;
     if (token->download_ref != LUA_NOREF)
         return 1;
@@ -990,7 +1012,7 @@ static ResourceToken* resource_pick_queued(ResourcePriority want_preheat)
     ResourceToken* best = NULL;
     while (p)
     {
-        if (!p->cancelled && p->status == RESOURCE_STATUS_QUEUED
+        if (!resource_token_is_cancelled(p) && p->status == RESOURCE_STATUS_QUEUED
             && p->download_ref == LUA_NOREF && p->allow_cold_download
             && p->urls && p->url_count > 0)
         {
@@ -1310,7 +1332,7 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
         token = job->token;
         if (token)
             token->worker_started = 0;
-        if (!token || token->cancelled || resource_is_terminal(token->status))
+        if (!token || resource_token_is_cancelled(token) || resource_is_terminal(token->status))
         {
             TCP_NativeFree(job->result_tcp);
             job->result_tcp = NULL;
@@ -1476,7 +1498,7 @@ static int resource_worker_loop(void* ptr)
             resource_worker_push_done(job);
             continue;
         }
-        if (job->token->cancelled || resource_is_terminal(job->token->status))
+        if (resource_token_is_cancelled(job->token))
         {
             job->result_ready = 1;
             job->result_success = 0;
@@ -1646,7 +1668,7 @@ static int resource_try_native_frame(ResourceToken* token)
     const char* status = NULL;
     int submit;
     int ret;
-    if (!token || token->status != RESOURCE_STATUS_QUEUED || token->cancelled)
+    if (!token || token->status != RESOURCE_STATUS_QUEUED || resource_token_is_cancelled(token))
         return 0;
     if (token->retry_tick && g_resource.poll_tick < token->retry_tick)
         return 0;
@@ -1833,11 +1855,11 @@ static void resource_update_downloads(lua_State* L)
     while (p)
     {
         ResourceToken* next = p->next;
-        if (p->cancelled && p->download_ref != LUA_NOREF)
+        if (resource_token_is_cancelled(p) && p->download_ref != LUA_NOREF)
             resource_cancel_download(L, p);
         else
             resource_check_active_download(L, p);
-        if (!p->cancelled && p->download_ref != LUA_NOREF)
+        if (!resource_token_is_cancelled(p) && p->download_ref != LUA_NOREF)
         {
             active++;
             if (p->priority == RESOURCE_PRIORITY_PREHEAT)
@@ -2164,7 +2186,7 @@ static ResourceToken* resource_find_by_dedupe_key(const char* dedupe_key)
     p = g_resource.tokens;
     while (p)
     {
-        if (!p->cancelled && !resource_is_terminal(p->status)
+        if (!resource_token_is_cancelled(p) && !resource_is_terminal(p->status)
             && p->dedupe_key && strcmp(p->dedupe_key, dedupe_key) == 0)
             return p;
         p = p->next;
@@ -2370,6 +2392,7 @@ static ResourceToken* resource_create_token(lua_State* L, int req_idx)
         token->terminal_tick = g_resource.poll_tick;
         token->event_pending = resource_push_event(token, RESOURCE_STATUS_DEGRADED,
             token->resource_id, "cold download disabled") ? 1u : 0u;
+        token->event_delivered = 0;
     }
     else if (token->priority == RESOURCE_PRIORITY_PREHEAT)
     {
@@ -2435,7 +2458,7 @@ static void resource_push_token_table(lua_State* L, const ResourceToken* token)
     lua_setfield(L, -2, RESOURCE_KEY_STATUS);
     lua_pushstring(L, resource_status_name(token->status));
     lua_setfield(L, -2, "status");
-    lua_pushboolean(L, token->cancelled);
+    lua_pushboolean(L, resource_token_is_cancelled(token));
     lua_setfield(L, -2, "cancelled");
     lua_pushboolean(L, token->native_kind != RESOURCE_NATIVE_NONE);
     lua_setfield(L, -2, "native_decode");
@@ -2695,7 +2718,10 @@ static int resource_lua_poll(lua_State* L)
         lua_rawseti(L, -2, i++);
 
         if (ev->token)
+        {
             ev->token->event_pending = 0;
+            ev->token->event_delivered = 1;
+        }
         free(ev->resource_id);
         free(ev->message);
         free(ev);
@@ -2703,6 +2729,7 @@ static int resource_lua_poll(lua_State* L)
     }
     g_resource.events_head = NULL;
     g_resource.events_tail = NULL;
+    resource_retry_terminal_events();
     resource_reap_finished(L);
     return 1;
 }
@@ -2732,16 +2759,16 @@ static int resource_lua_cancel(lua_State* L)
         lua_pushboolean(L, 0);
         return 1;
     }
-    if (!token->cancelled)
+    if (!resource_is_terminal(token->status) && resource_token_mark_cancelled(token))
     {
-        token->cancelled = 1;
         g_resource.cancelled++;
         if (token->download_ref != LUA_NOREF)
             resource_cancel_download(L, token);
         resource_store_failure(token, "cancelled");
         resource_set_status(token, RESOURCE_STATUS_CANCELLED, "cancelled");
     }
-    lua_pushboolean(L, 1);
+    lua_pushboolean(L, resource_is_terminal(token->status)
+        && token->status == RESOURCE_STATUS_CANCELLED);
     return 1;
 }
 
@@ -2751,9 +2778,8 @@ static int resource_lua_cancel_all(lua_State* L)
     ResourceToken* token = g_resource.tokens;
     while (token)
     {
-        if (!resource_is_terminal(token->status) && !token->cancelled)
+        if (!resource_is_terminal(token->status) && resource_token_mark_cancelled(token))
         {
-            token->cancelled = 1;
             g_resource.cancelled++;
             if (token->download_ref != LUA_NOREF)
                 resource_cancel_download(L, token);
@@ -2775,11 +2801,11 @@ static int resource_lua_cancel_scope(lua_State* L)
     unsigned int worker_dropped = resource_worker_cancel_scope(scope);
     while (token)
     {
-        if (!resource_is_terminal(token->status) && !token->cancelled
+        if (!resource_is_terminal(token->status)
             && ((token->scope && strcmp(token->scope, scope) == 0)
-                || (token->scene && strcmp(token->scene, scope) == 0)))
+                || (token->scene && strcmp(token->scene, scope) == 0))
+            && resource_token_mark_cancelled(token))
         {
-            token->cancelled = 1;
             g_resource.cancelled++;
             g_resource.render_cancelled++;
             if (token->download_ref != LUA_NOREF)
@@ -2810,7 +2836,7 @@ static int resource_push_stats(lua_State* L)
         tokens_alive++;
         if (resource_is_terminal(token->status))
             tokens_terminal++;
-        if (!token->cancelled && token->download_ref != LUA_NOREF)
+        if (!resource_token_is_cancelled(token) && token->download_ref != LUA_NOREF)
         {
             active++;
             if (token->priority == RESOURCE_PRIORITY_PREHEAT)
@@ -2969,6 +2995,7 @@ static int resource_lua_update(lua_State* L)
     }
     resource_update_all(L, max_ops, max_ops);
     resource_drop_update_events();
+    resource_retry_terminal_events();
     resource_reap_finished(L);
     lua_pushboolean(L, 1);
     return 1;
@@ -3009,11 +3036,15 @@ static int resource_lua_get_ready(lua_State* L)
         token->result_ready = 0;
         token->result_success = 0;
         nret = TCP_NativePushParsed(L, tcp);
+        token->event_pending = 0;
+        token->event_delivered = 1;
         resource_drop_events(token->id);
         resource_reap_finished(L);
         return nret;
     }
     resource_push_token_table(L, token);
+    token->event_pending = 0;
+    token->event_delivered = 1;
     resource_drop_events(token->id);
     resource_reap_finished(L);
     return 1;

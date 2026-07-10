@@ -140,24 +140,14 @@ typedef struct
     Uint32 cache_tick;
 
     SDL_mutex* async_mutex;
-    SDL_cond* async_cond;
-    SDL_Thread* async_thread;
-    int async_stop;
     Uint32 async_generation;
-    TCP_AsyncJob* async_queue_head;
-    TCP_AsyncJob* async_queue_tail;
     TCP_AsyncJob* async_done_head;
     TCP_AsyncJob* async_done_tail;
-    Uint32 async_queued;
     Uint32 async_ready;
     Uint32 async_submitted;
     Uint32 async_decoded;
     Uint32 async_failed;
     Uint32 async_cancelled;
-    int async_active;
-    Uint32 async_active_frame;
-    Uint32 async_active_generation;
-    Uint32 async_active_pal_version;
 } TCP_UserData;
 
 typedef struct

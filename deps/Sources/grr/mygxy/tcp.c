@@ -964,87 +964,11 @@ static void TCP_AsyncJobListFree(TCP_AsyncJob* job)
 static int TCP_AsyncQueueHasFrame(TCP_UserData* ud, Uint32 frame_id, Uint32 pal_version)
 {
     TCP_AsyncJob* p;
-    if (ud->async_active && ud->async_active_frame == frame_id
-        && ud->async_active_generation == ud->async_generation
-        && ud->async_active_pal_version == pal_version)
-        return 1;
-    for (p = ud->async_queue_head; p; p = p->next)
-    {
-        if (p->frame_id == frame_id && p->generation == ud->async_generation
-            && p->pal_version == pal_version)
-            return 1;
-    }
     for (p = ud->async_done_head; p; p = p->next)
     {
         if (p->frame_id == frame_id && p->generation == ud->async_generation
             && p->pal_version == pal_version)
             return 1;
-    }
-    return 0;
-}
-
-static int TCP_AsyncWorker(void* ptr)
-{
-    TCP_UserData* ud = (TCP_UserData*)ptr;
-    for (;;)
-    {
-        TCP_AsyncJob* job = NULL;
-        SDL_LockMutex(ud->async_mutex);
-        while (!ud->async_stop && !ud->async_queue_head)
-            SDL_CondWait(ud->async_cond, ud->async_mutex);
-
-        if (ud->async_stop)
-        {
-            TCP_AsyncJob* discard = ud->async_queue_head;
-            ud->async_queue_head = ud->async_queue_tail = NULL;
-            ud->async_cancelled += ud->async_queued;
-            ud->async_queued = 0;
-            SDL_UnlockMutex(ud->async_mutex);
-            TCP_AsyncJobListFree(discard);
-            break;
-        }
-
-        job = ud->async_queue_head;
-        if (job)
-        {
-            ud->async_queue_head = job->next;
-            if (!ud->async_queue_head)
-                ud->async_queue_tail = NULL;
-            job->next = NULL;
-            ud->async_active = 1;
-            ud->async_active_frame = job->frame_id;
-            ud->async_active_generation = job->generation;
-            ud->async_active_pal_version = job->pal_version;
-            if (ud->async_queued > 0)
-                ud->async_queued--;
-        }
-        SDL_UnlockMutex(ud->async_mutex);
-
-        if (!job)
-            continue;
-
-        job->ok = 1;
-
-        SDL_LockMutex(ud->async_mutex);
-        ud->async_active = 0;
-        ud->async_active_frame = 0;
-        ud->async_active_generation = 0;
-        ud->async_active_pal_version = 0;
-        if (ud->async_stop || job->generation != ud->async_generation)
-        {
-            ud->async_cancelled++;
-            SDL_UnlockMutex(ud->async_mutex);
-            TCP_AsyncJobFree(job);
-            continue;
-        }
-
-        if (ud->async_done_tail)
-            ud->async_done_tail->next = job;
-        else
-            ud->async_done_head = job;
-        ud->async_done_tail = job;
-        ud->async_ready++;
-        SDL_UnlockMutex(ud->async_mutex);
     }
     return 0;
 }
@@ -1062,68 +986,19 @@ static int TCP_AsyncEnsureState(TCP_UserData* ud)
     return 1;
 }
 
-static int TCP_AsyncEnsure(TCP_UserData* ud)
-{
-    if (!TCP_AsyncEnsureState(ud))
-        return 0;
-    if (!ud->async_cond)
-    {
-        ud->async_cond = SDL_CreateCond();
-        if (!ud->async_cond)
-        {
-            if (ud->async_mutex)
-            {
-                SDL_DestroyMutex(ud->async_mutex);
-                ud->async_mutex = NULL;
-            }
-            return 0;
-        }
-    }
-    if (!ud->async_thread)
-    {
-        ud->async_stop = 0;
-        ud->async_thread = SDL_CreateThread(TCP_AsyncWorker, "tcp_decode", ud);
-        if (!ud->async_thread)
-        {
-            if (ud->async_cond)
-            {
-                SDL_DestroyCond(ud->async_cond);
-                ud->async_cond = NULL;
-            }
-            if (ud->async_mutex)
-            {
-                SDL_DestroyMutex(ud->async_mutex);
-                ud->async_mutex = NULL;
-            }
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static void TCP_AsyncCancelPending(TCP_UserData* ud, int bump_generation)
 {
-    TCP_AsyncJob *queue = NULL, *done = NULL;
+    TCP_AsyncJob* done = NULL;
     if (!ud || !ud->async_mutex)
         return;
     SDL_LockMutex(ud->async_mutex);
     if (bump_generation)
         ud->async_generation++;
-    queue = ud->async_queue_head;
     done = ud->async_done_head;
-    ud->async_queue_head = ud->async_queue_tail = NULL;
     ud->async_done_head = ud->async_done_tail = NULL;
-    if (!ud->async_active)
-    {
-        ud->async_active_frame = 0;
-        ud->async_active_generation = 0;
-        ud->async_active_pal_version = 0;
-    }
-    ud->async_cancelled += ud->async_queued + ud->async_ready;
-    ud->async_queued = 0;
+    ud->async_cancelled += ud->async_ready;
     ud->async_ready = 0;
     SDL_UnlockMutex(ud->async_mutex);
-    TCP_AsyncJobListFree(queue);
     TCP_AsyncJobListFree(done);
 }
 
@@ -1131,25 +1006,7 @@ static void TCP_AsyncShutdown(TCP_UserData* ud)
 {
     if (!ud)
         return;
-    if (ud->async_mutex)
-    {
-        SDL_LockMutex(ud->async_mutex);
-        ud->async_stop = 1;
-        if (ud->async_cond)
-            SDL_CondSignal(ud->async_cond);
-        SDL_UnlockMutex(ud->async_mutex);
-    }
-    if (ud->async_thread)
-    {
-        SDL_WaitThread(ud->async_thread, NULL);
-        ud->async_thread = NULL;
-    }
     TCP_AsyncCancelPending(ud, 1);
-    if (ud->async_cond)
-    {
-        SDL_DestroyCond(ud->async_cond);
-        ud->async_cond = NULL;
-    }
     if (ud->async_mutex)
     {
         SDL_DestroyMutex(ud->async_mutex);
@@ -2307,7 +2164,7 @@ static int TCP_RequestFrame(lua_State* L)
         lua_pushstring(L, "pending");
         return 2;
     }
-    if (ud->async_queued + ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
+    if (ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
     {
         SDL_UnlockMutex(ud->async_mutex);
         SDL_free(pal_snapshot);
@@ -2330,6 +2187,7 @@ static int TCP_RequestFrame(lua_State* L)
     job->generation = ud->async_generation;
     job->pal_version = pal_version;
     job->pal_count = pal_count;
+    job->ok = 1;
     if (ud->async_done_tail)
         ud->async_done_tail->next = job;
     else
@@ -2403,7 +2261,7 @@ int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
         if (status) *status = "pending";
         return MYGXY_ASYNC_FRAME_PENDING;
     }
-    if (ud->async_queued + ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
+    if (ud->async_ready >= TCP_ASYNC_QUEUE_CAP)
     {
         SDL_UnlockMutex(ud->async_mutex);
         SDL_free(pal_snapshot);
@@ -2424,6 +2282,7 @@ int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status)
     job->generation = ud->async_generation;
     job->pal_version = pal_version;
     job->pal_count = pal_count;
+    job->ok = 1;
     if (ud->async_done_tail)
         ud->async_done_tail->next = job;
     else
@@ -2465,7 +2324,7 @@ static int TCP_AsyncStats(lua_State* L)
     if (ud)
         TCP_AsyncPollDecoded(ud, 8);
     lua_createtable(L, 0, 8);
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_queued : 0));
+    lua_pushinteger(L, 0);
     lua_setfield(L, -2, "queued");
     lua_pushinteger(L, (lua_Integer)(ud ? ud->async_ready : 0));
     lua_setfield(L, -2, "ready");
@@ -2477,7 +2336,7 @@ static int TCP_AsyncStats(lua_State* L)
     lua_setfield(L, -2, "failed");
     lua_pushinteger(L, (lua_Integer)(ud ? ud->async_cancelled : 0));
     lua_setfield(L, -2, "cancelled");
-    lua_pushboolean(L, ud && ud->async_thread != NULL);
+    lua_pushboolean(L, 0);
     lua_setfield(L, -2, "worker");
     lua_pushboolean(L, 1);
     lua_setfield(L, -2, "native_decode");
