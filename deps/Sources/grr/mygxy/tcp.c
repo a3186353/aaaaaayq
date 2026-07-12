@@ -1,19 +1,23 @@
 #include "sdl_proxy.h"
 #include "tcp.h"
 
+#include <stdint.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
 
 /* E8: stb_image 头文件（static 实现，每个编译单元独立静态副本）
  * 用于 TCP_GetPR 的 iOS/Android stb_image fallback */
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
 #define STB_IMAGE_STATIC
 #define STBI_NO_HDR
 #define STBI_NO_LINEAR
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-#endif
 
 #if defined(_WIN32)
 #define MYGXY_API __declspec(dllexport)
@@ -42,6 +46,8 @@ typedef struct
     Uint64 cache_hits;
     Uint64 cache_misses;
     Uint64 lru_evictions;
+    Uint64 palette_evictions;
+    Uint64 texture_upload_bytes;
     Uint64 cache_clear_count;
     Uint64 cache_clear_freed_bytes;
 } TCP_PerfStats;
@@ -93,6 +99,22 @@ static void TCP_RecordUpload(Uint64 elapsed_us)
     TCP_PerfEnsure();
     if (g_tcp_perf.mutex) SDL_LockMutex(g_tcp_perf.mutex);
     TCP_TimeRecord(&g_tcp_perf.upload_us, elapsed_us);
+    if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
+}
+
+static void TCP_RecordTextureUploadBytes(Uint64 bytes)
+{
+    TCP_PerfEnsure();
+    if (g_tcp_perf.mutex) SDL_LockMutex(g_tcp_perf.mutex);
+    g_tcp_perf.texture_upload_bytes += bytes;
+    if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
+}
+
+static void TCP_RecordPaletteEviction(void)
+{
+    TCP_PerfEnsure();
+    if (g_tcp_perf.mutex) SDL_LockMutex(g_tcp_perf.mutex);
+    g_tcp_perf.palette_evictions++;
     if (g_tcp_perf.mutex) SDL_UnlockMutex(g_tcp_perf.mutex);
 }
 
@@ -1091,14 +1113,14 @@ static Uint32 RGB565to888_Pal(Uint16 color16, Uint32 R1, Uint32 G1, Uint32 B1, U
     return A | R | G | B;
 }
 
-static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
-                                 Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
+static int TCP_DecodePSRaw(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                           TCP_NativeRawFrameData* out)
 {
     Uint32 frameStart = ud->splist[id];
     Uint32 frameEnd = TCP_FindNextOffset(ud->splist, ud->number, frameStart, ud->len);
     Uint32 safeFrameStart, safeFrameEnd;
     if (!TCP_ClampRange(frameStart, frameEnd, ud->len, &safeFrameStart, &safeFrameEnd))
-        return NULL;
+        return 0;
 
     Uint8* frame = ud->data + safeFrameStart;
     Uint32 frameSize = safeFrameEnd - safeFrameStart;
@@ -1112,16 +1134,16 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
     Uint32 maskSize = 0;
 
     if (frameSize < sizeof(SP_INFO) + 4)
-        return NULL;
+        return 0;
     Uint32 maybeType = TCP_ReadU32(frame + sizeof(SP_INFO));
     if (maybeType == 1 || maybeType == 2)
     {
         type = maybeType;
         if (frameSize < sizeof(SP_INFO) + 8)
-            return NULL;
+            return 0;
         maskSize = TCP_ReadU32(frame + sizeof(SP_INFO) + 4);
         if (maskSize > frameSize)
-            return NULL;
+            return 0;
         line = (const Uint8*)(frame + sizeof(SP_INFO) + 8);
     }
     else
@@ -1133,20 +1155,26 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
         size_t lineOff = (size_t)((const Uint8*)line - frame);
         size_t need = (size_t)info->height * sizeof(Uint32);
         if (lineOff > frameSize || need > frameSize - lineOff)
-            return NULL;
+            return 0;
     }
 
     if (!info->width || !info->height) //如果宽高为0
-        return NULL;
-    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, (int)info->width, (int)info->height, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!sf)
-        return NULL;
-    SDL_FillRect(sf, NULL, 0);
-    SDL_SetSurfaceBlendMode(sf, SDL_BLENDMODE_BLEND);
+        return 0;
+    if (!out || (size_t)info->width > SIZE_MAX / ((size_t)info->height * 4))
+        return 0;
+    out->pitch = info->width * 4;
+    out->width = info->width;
+    out->height = info->height;
+    out->x = info->x;
+    out->y = info->y;
+    out->frame_id = id;
+    out->pixels = calloc((size_t)info->width * info->height, 4);
+    if (!out->pixels)
+        return 0;
 
-    Uint32* wdata2 = (Uint32*)sf->pixels;
+    Uint32* wdata2 = (Uint32*)out->pixels;
     Uint32 linelen = info->width;
-    Uint32 stride = (Uint32)(sf->pitch / 4);
+    Uint32 stride = info->width;
 
     for (h = 0; h < info->height; h++)
     {
@@ -1170,7 +1198,7 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
             {
                 Uint32 prevStart = TCP_ReadU32(line + (h - 1) * 4);
                 if (prevStart < frameSize && *(frame + prevStart))
-                    SDL_memcpy(row, row - stride, linelen * 4);
+                    memcpy(row, row - stride, linelen * 4);
             }
         }
         else
@@ -1311,7 +1339,7 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
             Sint32 dy = maskTopY - baseTopY;
 
             if (mframeSize < sizeof(SP_INFO) + 4)
-                return TCP_FinishDecodedSurface(sf, info->width, info->height, info->x, info->y, outW, outH, outX, outY);
+                return 1;
 
             const Uint8* mline;
             Uint32 mMaybeType = TCP_ReadU32(mframe + sizeof(SP_INFO));
@@ -1329,16 +1357,16 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
 
             Uint32 dstW = info->width;
             Uint32 dstH = info->height;
-            Uint32 dstStride = (Uint32)(sf->pitch / 4);
-            Uint32* dst = (Uint32*)sf->pixels;
+            Uint32 dstStride = stride;
+            Uint32* dst = wdata2;
 
             Uint32 linelenMask = minfo->width;
-            Uint32* prevMaskRow = (Uint32*)SDL_calloc((size_t)linelenMask, sizeof(Uint32));
-            Uint32* maskRow = (Uint32*)SDL_calloc((size_t)linelenMask, sizeof(Uint32));
+            Uint32* prevMaskRow = (Uint32*)calloc((size_t)linelenMask, sizeof(Uint32));
+            Uint32* maskRow = (Uint32*)calloc((size_t)linelenMask, sizeof(Uint32));
             if (!prevMaskRow || !maskRow)
             {
-                SDL_free(prevMaskRow);
-                SDL_free(maskRow);
+                free(prevMaskRow);
+                free(maskRow);
                 goto skip_mask;
             }
             int prevValid = 0;
@@ -1382,7 +1410,7 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
                     continue;
                 }
 
-                SDL_memset(maskRow, 0, (size_t)linelenMask * sizeof(Uint32));
+                memset(maskRow, 0, (size_t)linelenMask * sizeof(Uint32));
                 Uint32 pos = 0;
                 while (rdata < mLineLimit && *rdata && pos < linelenMask)
                 {
@@ -1528,14 +1556,49 @@ static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal,
                 prevValid = 1;
             }
 
-            SDL_free(prevMaskRow);
-            SDL_free(maskRow);
+            free(prevMaskRow);
+            free(maskRow);
         }
     }
 
 skip_mask:
 
-    return TCP_FinishDecodedSurface(sf, info->width, info->height, info->x, info->y, outW, outH, outX, outY);
+    return 1;
+}
+
+static SDL_Surface* TCP_SurfaceFromRaw(const TCP_NativeRawFrameData* raw)
+{
+    SDL_Surface* surface;
+    Uint32 y;
+    if (!raw || !raw->pixels || !raw->width || !raw->height)
+        return NULL;
+    surface = SDL_CreateRGBSurfaceWithFormat(SDL_SWSURFACE, (int)raw->width,
+        (int)raw->height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!surface)
+        return NULL;
+    for (y = 0; y < raw->height; y++)
+        memcpy((Uint8*)surface->pixels + (size_t)y * surface->pitch,
+            (const Uint8*)raw->pixels + (size_t)y * raw->pitch,
+            (size_t)raw->width * 4);
+    SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
+    return surface;
+}
+
+static SDL_Surface* TCP_DecodePS(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                 Uint32* outW, Uint32* outH, Sint32* outX, Sint32* outY)
+{
+    TCP_NativeRawFrameData raw;
+    SDL_Surface* surface;
+    memset(&raw, 0, sizeof(raw));
+    if (!TCP_DecodePSRaw(ud, id, pal, pal_count, &raw))
+        return NULL;
+    if (outW) *outW = raw.width;
+    if (outH) *outH = raw.height;
+    if (outX) *outX = raw.x;
+    if (outY) *outY = raw.y;
+    surface = TCP_SurfaceFromRaw(&raw);
+    TCP_NativeFreeFramePixels(&raw);
+    return surface;
 }
 
 // 解码单个图层的RLE数据到临时缓冲区
@@ -1586,7 +1649,7 @@ static Uint32 TCP_DecodeTPLayer(
     // 如果需要的内存超过栈缓冲区，则分配堆内存
     if (layerH + 1 > HEXLIST_STACK_SIZE)
     {
-        hexlist = (Uint32*)SDL_malloc(sizeof(Uint32) * ((Uint32)layerH + 1));
+        hexlist = (Uint32*)malloc(sizeof(Uint32) * ((Uint32)layerH + 1));
         if (!hexlist)
             return 0;
     }
@@ -1612,7 +1675,7 @@ static Uint32 TCP_DecodeTPLayer(
     if (pixelStart > dataEnd)
     {
         if (hexlist != stack_hexlist)
-            SDL_free(hexlist);
+            free(hexlist);
         return 0;
     }
 
@@ -1815,12 +1878,96 @@ static Uint32 TCP_DecodeTPLayer(
     }
 
     if (hexlist != stack_hexlist)
-        SDL_free(hexlist);
+        free(hexlist);
 
     // 计算该图层消费的字节数（4字节对齐）
     Uint32 layerEnd = pixelStart + maxRowEnd;
     layerEnd = TCP_ALIGN4(layerEnd);
     return layerEnd - layerPos;
+}
+
+/* PT is already expressed as palette-indexed RLE layers.  Decode it into a
+ * plain ARGB8888 heap buffer so resource workers never create SDL objects. */
+static int TCP_DecodePTRaw(TCP_UserData* ud, Uint32 id, const Uint32* pal,
+                           Uint32 pal_count, TCP_NativeRawFrameData* out,
+                           char* err, size_t errSize)
+{
+    Uint32 ofs;
+    Uint32 frameEnd;
+    Uint32 safeFrameStart;
+    Uint32 safeFrameEnd;
+    Uint32 palCount;
+    const Uint32* palette;
+    Uint8* base;
+    Uint32 firstLayerPos;
+    Sint16 keyX;
+    Sint16 keyY;
+    Uint16 width;
+    Uint16 height;
+    Uint32* dst;
+    Uint32 currentPos;
+    int layerIndex = 0;
+
+    if (!ud || !out || !ud->tplist || id >= ud->number || !(ofs = ud->tplist[id]))
+        goto invalid;
+    frameEnd = TCP_FindNextOffset(ud->tplist, ud->number, ofs, ud->len);
+    if (!TCP_ClampRange(ofs, frameEnd, ud->len, &safeFrameStart, &safeFrameEnd))
+        goto invalid;
+    palCount = pal ? pal_count : ud->pal_count;
+    palette = pal ? pal : ud->pal_dyn;
+    if (!palette || !palCount)
+        goto invalid;
+    base = ud->data;
+    firstLayerPos = safeFrameStart + 0x14;
+    if (firstLayerPos + 20 > safeFrameEnd)
+        goto invalid;
+    keyX = TCP_ReadS16(base + firstLayerPos);
+    keyY = TCP_ReadS16(base + firstLayerPos + 2);
+    width = TCP_ReadU16(base + firstLayerPos + 4);
+    height = TCP_ReadU16(base + firstLayerPos + 6);
+    if (!width || !height || (size_t)width > SIZE_MAX / ((size_t)height * 4))
+        goto invalid;
+
+    out->pitch = (Uint32)width * 4;
+    out->width = width;
+    out->height = height;
+    out->x = keyX;
+    out->y = keyY;
+    out->pixels = calloc((size_t)width * height, 4);
+    if (!out->pixels)
+    {
+        if (err && errSize) snprintf(err, errSize, "raw frame allocation failed");
+        return 0;
+    }
+    dst = (Uint32*)out->pixels;
+    currentPos = firstLayerPos;
+    while (currentPos + 20 <= safeFrameEnd && layerIndex < 64)
+    {
+        Sint16 layerKeyX = TCP_ReadS16(base + currentPos);
+        Sint16 layerKeyY = TCP_ReadS16(base + currentPos + 2);
+        Uint16 layerW = TCP_ReadU16(base + currentPos + 4);
+        Uint16 layerH = TCP_ReadU16(base + currentPos + 6);
+        Uint32 consumed;
+        if (!layerW || !layerH)
+            break;
+        consumed = TCP_DecodeTPLayer(base, currentPos, ud->len, palette, palCount,
+            dst, width, height, width,
+            (Sint32)keyX - (Sint32)layerKeyX,
+            (Sint32)keyY - (Sint32)layerKeyY,
+            layerIndex == 0 ? 1 : 0);
+        if (!consumed)
+            break;
+        currentPos += consumed;
+        layerIndex++;
+        if (currentPos >= safeFrameEnd)
+            break;
+    }
+    out->frame_id = id;
+    return 1;
+
+invalid:
+    if (err && errSize) snprintf(err, errSize, "PT raw frame unavailable");
+    return 0;
 }
 
 static SDL_Surface* TCP_DecodePT(TCP_UserData* ud, Uint32 id, const Uint32* pal_override, Uint32 pal_override_count,
@@ -1913,6 +2060,57 @@ static SDL_Surface* TCP_DecodePT(TCP_UserData* ud, Uint32 id, const Uint32* pal_
     }
 
     return TCP_FinishDecodedSurface(sf, (Uint32)width, (Uint32)height, (Sint32)keyX, (Sint32)keyY, outW, outH, outX, outY);
+}
+
+static int TCP_DecodePRRaw(TCP_UserData* ud, Uint32 id, TCP_NativeRawFrameData* out)
+{
+    RP_INFO* info;
+    Uint32 ofs;
+    Uint32 blen;
+    stbi_uc* rgba;
+    Uint32* pixels;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    size_t count;
+    size_t i;
+
+    if (!ud || !out || !ud->rpinfo || !ud->rplist || id >= ud->number)
+        return 0;
+    info = &ud->rpinfo[id];
+    ofs = ud->rplist[id].offset;
+    blen = ud->rplist[id].len;
+    if (!blen || blen > INT_MAX || ofs > ud->len || blen > ud->len - ofs)
+        return 0;
+    rgba = stbi_load_from_memory(ud->data + ofs, (int)blen, &width, &height, &channels, 4);
+    if (!rgba || width <= 0 || height <= 0
+        || (size_t)width > SIZE_MAX / ((size_t)height * 4))
+    {
+        if (rgba) stbi_image_free(rgba);
+        return 0;
+    }
+    count = (size_t)width * (size_t)height;
+    pixels = (Uint32*)malloc(count * sizeof(Uint32));
+    if (!pixels)
+    {
+        stbi_image_free(rgba);
+        return 0;
+    }
+    for (i = 0; i < count; i++)
+    {
+        const stbi_uc* p = rgba + i * 4;
+        pixels[i] = ((Uint32)p[3] << 24) | ((Uint32)p[0] << 16)
+            | ((Uint32)p[1] << 8) | (Uint32)p[2];
+    }
+    stbi_image_free(rgba);
+    out->pixels = pixels;
+    out->pitch = (Uint32)width * 4;
+    out->width = (Uint32)width;
+    out->height = (Uint32)height;
+    out->x = info->x;
+    out->y = info->y;
+    out->frame_id = id;
+    return 1;
 }
 
 static SDL_Surface* TCP_DecodePR(TCP_UserData* ud, Uint32 id,
@@ -2047,6 +2245,79 @@ void TCP_NativeClearFrameData(TCP_NativeFrameData* frame)
     frame->h = 0;
     frame->x = 0;
     frame->y = 0;
+}
+
+void TCP_NativeFreeFramePixels(TCP_NativeRawFrameData* frame)
+{
+    if (!frame)
+        return;
+    free(frame->pixels);
+    frame->pixels = NULL;
+    frame->pitch = 0;
+    frame->width = 0;
+    frame->height = 0;
+    frame->x = 0;
+    frame->y = 0;
+    frame->frame_id = 0;
+    frame->pal_version = 0;
+}
+
+int TCP_NativeDecodeFramePixels(TCP_UserData* ud, Uint32 id, const Uint32* pal,
+                                Uint32 pal_count, Uint32 pal_version,
+                                TCP_NativeRawFrameData* out, char* err,
+                                size_t errSize)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!ud || !out || id >= ud->number)
+    {
+        if (err && errSize) snprintf(err, errSize, "frame index out of range");
+        return 0;
+    }
+    if (ud->fmt == TCP_FMT_PS)
+    {
+        if (!TCP_DecodePSRaw(ud, id, pal, pal_count, out))
+            goto failed;
+    }
+    else if (ud->fmt == TCP_FMT_PT)
+    {
+        if (!TCP_DecodePTRaw(ud, id, pal, pal_count, out, err, errSize))
+            return 0;
+    }
+    else if (ud->fmt == TCP_FMT_PR)
+    {
+        if (!TCP_DecodePRRaw(ud, id, out))
+            goto failed;
+    }
+    else
+    {
+        if (err && errSize) snprintf(err, errSize, "raw decoder fallback");
+        return -2;
+    }
+    if (!out->pixels)
+        goto failed;
+    out->frame_id = id;
+    out->pal_version = pal_version;
+    return 1;
+
+failed:
+    TCP_NativeFreeFramePixels(out);
+    if (err && errSize) snprintf(err, errSize, "raw frame decode failed");
+        return 0;
+}
+
+int TCP_NativeStoreRawFrame(TCP_UserData* ud, TCP_NativeRawFrameData* frame)
+{
+    SDL_Surface* surface;
+    if (!ud || !frame || !frame->pixels || !frame->width || !frame->height)
+        return 0;
+    surface = TCP_SurfaceFromRaw(frame);
+    if (!surface)
+        return 0;
+    TCP_CacheInsert(ud, frame->frame_id, frame->pal_version, surface,
+        frame->width, frame->height, frame->x, frame->y);
+    TCP_NativeFreeFramePixels(frame);
+    return 1;
 }
 
 int TCP_NativeDecodeFrameWithPalette(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
@@ -2423,23 +2694,29 @@ static int TCP_GetFrameTexture(lua_State* L)
         return 0;
 
     Uint64 start_us = TCP_NowUS();
+    Uint32 cached_w = cached->w;
+    Uint32 cached_h = cached->h;
+    Sint32 cached_x = cached->x;
+    Sint32 cached_y = cached->y;
     SDL_Texture* tex = SDL_CreateTextureFromSurface(*rdud, cached->surface);
     if (!tex)
         return 0;
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
     TCP_RecordUpload(TCP_NowUS() - start_us);
+    TCP_RecordTextureUploadBytes((Uint64)cached->w * (Uint64)cached->h * 4ULL);
 
     if (!TCP_PushTexture(L, tex, cached->surface))
         return 0;
+    TCP_CacheEntryFree(cached);
 
     lua_createtable(L, 0, 4);
-    lua_pushinteger(L, (lua_Integer)cached->h);
+    lua_pushinteger(L, (lua_Integer)cached_h);
     lua_setfield(L, -2, "height");
-    lua_pushinteger(L, (lua_Integer)cached->w);
+    lua_pushinteger(L, (lua_Integer)cached_w);
     lua_setfield(L, -2, "width");
-    lua_pushinteger(L, (lua_Integer)cached->x);
+    lua_pushinteger(L, (lua_Integer)cached_x);
     lua_setfield(L, -2, "x");
-    lua_pushinteger(L, (lua_Integer)cached->y);
+    lua_pushinteger(L, (lua_Integer)cached_y);
     lua_setfield(L, -2, "y");
     return 2;
 }
@@ -2482,6 +2759,7 @@ static int TCP_SetPP(lua_State* L)
                 ud->pal_dyn[j] = ud->pal[j];
         }
         ud->pal_version++;
+        TCP_RecordPaletteEviction();
         TCP_AsyncCancelPending(ud, 1);
         TCP_CacheClear(ud);
         lua_pushboolean(L, 1);
@@ -2511,6 +2789,7 @@ static int TCP_SetPal(lua_State* L)
             SDL_memcpy(ud->pal_dyn, ud->pal, max * sizeof(Uint32));
         }
         ud->pal_version++;
+        TCP_RecordPaletteEviction();
         TCP_AsyncCancelPending(ud, 1);
         TCP_CacheClear(ud);
     }
@@ -3281,6 +3560,10 @@ void TCP_PushPerfStats(lua_State* L)
     lua_setfield(L, -2, "misses");
     lua_pushinteger(L, (lua_Integer)snap.lru_evictions);
     lua_setfield(L, -2, "lru_evictions");
+    lua_pushinteger(L, (lua_Integer)snap.palette_evictions);
+    lua_setfield(L, -2, "palette_evictions");
+    lua_pushinteger(L, (lua_Integer)snap.texture_upload_bytes);
+    lua_setfield(L, -2, "texture_upload_bytes");
     lua_pushinteger(L, (lua_Integer)snap.cache_clear_count);
     lua_setfield(L, -2, "clear_count");
     lua_pushinteger(L, (lua_Integer)snap.cache_clear_freed_bytes);

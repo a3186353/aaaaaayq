@@ -161,6 +161,20 @@ typedef struct
     Sint32 y;
 } TCP_NativeFrameData;
 
+/* Worker-owned decoded pixels.  The buffer is plain heap memory and must not
+ * be passed to SDL/IMG/renderer code until the main thread upload step. */
+typedef struct
+{
+    void* pixels;
+    Uint32 pitch;
+    Uint32 width;
+    Uint32 height;
+    Sint32 x;
+    Sint32 y;
+    Uint32 frame_id;
+    Uint32 pal_version;
+} TCP_NativeRawFrameData;
+
 int TCP_Create(lua_State* L, Uint8* data, size_t size);
 TCP_UserData* TCP_NativeCreateFromData(const Uint8* data, size_t size, char* err, size_t errSize);
 void TCP_NativeFree(TCP_UserData* ud);
@@ -169,7 +183,11 @@ int TCP_NativeWarmFrame(TCP_UserData* ud, Uint32 group, Uint32 frame, char* err,
 int TCP_NativeDecodeGroupFrame(TCP_UserData* ud, Uint32 group, Uint32 frame,
                                TCP_NativeFrameData* out, char* err, size_t errSize);
 int TCP_NativeDecodeFrameWithPalette(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
-                                     Uint32 pal_version, TCP_NativeFrameData* out, char* err, size_t errSize);
+                                      Uint32 pal_version, TCP_NativeFrameData* out, char* err, size_t errSize);
+int TCP_NativeDecodeFramePixels(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
+                                Uint32 pal_version, TCP_NativeRawFrameData* out, char* err, size_t errSize);
+void TCP_NativeFreeFramePixels(TCP_NativeRawFrameData* frame);
+int TCP_NativeStoreRawFrame(TCP_UserData* ud, TCP_NativeRawFrameData* frame);
 int TCP_NativeStoreDecodedFrame(TCP_UserData* ud, TCP_NativeFrameData* frame);
 void TCP_NativeClearFrameData(TCP_NativeFrameData* frame);
 int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status);

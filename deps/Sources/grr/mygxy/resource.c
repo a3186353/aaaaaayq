@@ -42,6 +42,9 @@
 #define RESOURCE_DEFAULT_LOW_ACTIVE 2
 #define RESOURCE_DEFAULT_TIMEOUT 10
 #define RESOURCE_DEFAULT_CALLBACK_BUDGET 4
+#define RESOURCE_DEFAULT_DOWNLOAD_FINISH_BUDGET 2
+#define RESOURCE_DEFAULT_DOWNLOAD_FINISH_BYTES (8u * 1024u * 1024u)
+#define RESOURCE_DEFAULT_DOWNLOAD_FINISH_MS 3u
 #define RESOURCE_PREHEAT_AGING_TICKS 40
 #define RESOURCE_DEFAULT_NATIVE_RETRIES 600
 #define RESOURCE_WORKER_THREADS 3
@@ -89,10 +92,14 @@ typedef struct ResourceToken
     unsigned int url_count;
     unsigned int hit_url;
     int callbacks_done;
+    int download_completed;
+    size_t download_completed_bytes;
     char** urls;
     char* save_path;
     char* dedupe_key;
     char* expected_md5;
+    char* completed_md5;
+    int md5_verified;
     char* resource_id;
     char* resource_type;
     char* scene;
@@ -168,8 +175,10 @@ typedef struct ResourceWorkerJob
     int warm_success;
     int result_ready;
     int result_success;
+    int result_fallback;
     TCP_UserData* result_tcp;
     TCP_NativeFrameData result_frame;
+    TCP_NativeRawFrameData result_raw;
     char result_error[160];
     struct ResourceWorkerJob* next;
 } ResourceWorkerJob;
@@ -207,6 +216,8 @@ typedef struct ResourceState
     unsigned int frame_submitted;
     unsigned int frame_ready;
     unsigned int frame_failed;
+    unsigned int frame_fallback;
+    unsigned int md5_native_verified;
     unsigned int tokens_freed;
     unsigned int worker_configured;
     unsigned int worker_active;
@@ -214,6 +225,8 @@ typedef struct ResourceState
     unsigned int worker_jobs_started;
     unsigned int worker_cancelled;
     unsigned int worker_poll_tick;
+    int tcp_frame_decode_v2;
+    int tcp_frame_decode_v2_configured;
     unsigned int poll_tick;
     unsigned int native_cursor_id;
     ResourceToken* tokens;
@@ -379,6 +392,7 @@ static void resource_free_token(lua_State* L, ResourceToken* token)
     free(token->save_path);
     free(token->dedupe_key);
     free(token->expected_md5);
+    free(token->completed_md5);
     free(token->resource_id);
     free(token->resource_type);
     free(token->scene);
@@ -762,7 +776,15 @@ static void resource_dispatch_callbacks(lua_State* L, ResourceToken* token,
             lua_pushstring(L, hit_url);
             lua_pushinteger(L, (lua_Integer)token->hit_url);
             lua_pushinteger(L, (lua_Integer)token->url_count);
-            if (lua_pcall(L, 5, 0, 0) != LUA_OK)
+            if (token->completed_md5 && token->completed_md5[0])
+            {
+                lua_createtable(L, 0, 2);
+                lua_pushstring(L, token->completed_md5);
+                lua_setfield(L, -2, "md5");
+                lua_pushboolean(L, token->md5_verified);
+                lua_setfield(L, -2, "md5_verified");
+            }
+            if (lua_pcall(L, token->completed_md5 && token->completed_md5[0] ? 6 : 5, 0, 0) != LUA_OK)
             {
                 fprintf(stderr, "[resource] callback failed: %s\n", lua_tostring(L, -1));
                 lua_pop(L, 1);
@@ -830,6 +852,13 @@ static unsigned int resource_worker_target_threads(void)
     if (n > RESOURCE_WORKER_THREADS)
         n = RESOURCE_WORKER_THREADS;
     return n;
+}
+
+static int resource_tcp_frame_decode_v2_enabled(void)
+{
+    return g_resource.tcp_frame_decode_v2_configured
+        ? g_resource.tcp_frame_decode_v2 != 0
+        : 1;
 }
 
 static unsigned int resource_dispatch_pending_callbacks(lua_State* L)
@@ -909,19 +938,26 @@ static void resource_finish_success(lua_State* L, ResourceToken* token)
     if (!token)
         return;
     token->hit_url = token->current_url;
+    free(token->completed_md5);
+    token->completed_md5 = NULL;
+    token->md5_verified = 0;
+    if (resource_call_download_method(L, token, "GetMD5", 0, 1))
+    {
+        const char* md5 = lua_tostring(L, -1);
+        if (md5 && md5[0])
+        {
+            token->completed_md5 = resource_strdup(md5);
+            token->md5_verified = token->completed_md5 != NULL;
+            if (token->md5_verified)
+                g_resource.md5_native_verified++;
+        }
+        lua_pop(L, 1);
+    }
     if (token->expected_md5 && token->expected_md5[0])
     {
-        const char* got = NULL;
-        int md5_idx = 0;
         int matched = 0;
-        if (resource_call_download_method(L, token, "GetMD5", 0, 1))
-        {
-            md5_idx = lua_gettop(L);
-            got = lua_tostring(L, md5_idx);
-            matched = got && strcmp(got, token->expected_md5) == 0;
-        }
-        if (md5_idx)
-            lua_pop(L, 1);
+        const char* got = token->completed_md5;
+        matched = got && strcmp(got, token->expected_md5) == 0;
         if (!matched)
         {
             resource_unref_download(L, token);
@@ -981,10 +1017,15 @@ static void resource_check_active_download(lua_State* L, ResourceToken* token)
     }
     top = lua_gettop(L);
     status = lua_tointeger(L, top);
+    if (status == 100)
+    {
+        lua_Integer completed_bytes = lua_tointeger(L, top - 2);
+        token->download_completed_bytes = completed_bytes > 0 ? (size_t)completed_bytes : 0;
+    }
     lua_pop(L, 3);
     if (status == 100)
     {
-        resource_finish_success(L, token);
+        token->download_completed = 1;
     }
     else if (status < 0)
     {
@@ -1004,6 +1045,34 @@ static void resource_check_active_download(lua_State* L, ResourceToken* token)
             resource_finish_failed(L, token, error_buf);
         }
     }
+}
+
+static unsigned int resource_process_completed_downloads(lua_State* L, unsigned int max_ops)
+{
+    ResourceToken* token = g_resource.tokens;
+    unsigned int processed = 0;
+    size_t processed_bytes = 0;
+    Uint64 started_ms = SDL_GetTicks64();
+    if (!max_ops)
+        max_ops = RESOURCE_DEFAULT_DOWNLOAD_FINISH_BUDGET;
+    while (token && processed < max_ops)
+    {
+        ResourceToken* next = token->next;
+        if (!resource_token_is_cancelled(token) && token->download_completed
+            && token->download_ref != LUA_NOREF && token->status == RESOURCE_STATUS_QUEUED)
+        {
+            if (processed > 0 && (processed_bytes + token->download_completed_bytes > RESOURCE_DEFAULT_DOWNLOAD_FINISH_BYTES
+                || SDL_GetTicks64() - started_ms >= RESOURCE_DEFAULT_DOWNLOAD_FINISH_MS))
+                break;
+            token->download_completed = 0;
+            processed_bytes += token->download_completed_bytes;
+            token->download_completed_bytes = 0;
+            resource_finish_success(L, token);
+            processed++;
+        }
+        token = next;
+    }
+    return processed;
 }
 
 static ResourceToken* resource_pick_queued(ResourcePriority want_preheat)
@@ -1188,6 +1257,7 @@ static void resource_worker_job_free(ResourceWorkerJob* job)
         return;
     TCP_NativeFree(job->result_tcp);
     TCP_NativeClearFrameData(&job->result_frame);
+    TCP_NativeFreeFramePixels(&job->result_raw);
     SDL_free(job->pal_snapshot);
     free(job);
 }
@@ -1340,14 +1410,38 @@ static unsigned int resource_update_shell_results(unsigned int max_ops)
         else if (job->is_tcp_frame)
         {
             decode_err[0] = '\0';
-            if (job->result_ready && job->result_success
-                && TCP_NativeDecodeFrameWithPalette((TCP_UserData*)token->native_ud, job->frame_id,
-                    job->pal_snapshot, job->pal_count, job->pal_version,
-                    &job->result_frame, decode_err, sizeof(decode_err))
-                && TCP_NativeStoreDecodedFrame((TCP_UserData*)token->native_ud, &job->result_frame))
+            if (job->result_ready && job->result_success && !job->result_fallback
+                && job->result_raw.pal_version == ((TCP_UserData*)token->native_ud)->pal_version
+                && TCP_NativeStoreRawFrame((TCP_UserData*)token->native_ud, &job->result_raw))
             {
                 resource_finish_native_ready(token);
                 g_resource.frame_ready++;
+            }
+            else if (job->result_ready && job->result_success && job->result_fallback)
+            {
+                g_resource.frame_fallback++;
+                if (job->pal_version != ((TCP_UserData*)token->native_ud)->pal_version)
+                {
+                    token->retry_tick = g_resource.poll_tick + 1;
+                }
+                else if (TCP_NativeDecodeFrameWithPalette((TCP_UserData*)token->native_ud,
+                    job->frame_id, job->pal_snapshot, job->pal_count, job->pal_version,
+                    &job->result_frame, decode_err, sizeof(decode_err))
+                    && TCP_NativeStoreDecodedFrame((TCP_UserData*)token->native_ud, &job->result_frame))
+                {
+                    resource_finish_native_ready(token);
+                    g_resource.frame_ready++;
+                }
+                else
+                {
+                    resource_finish_native_failed(token, decode_err[0] ? decode_err : "frame decode fallback failed");
+                    g_resource.frame_failed++;
+                }
+            }
+            else if (job->result_ready && job->result_success
+                && job->result_raw.pal_version != ((TCP_UserData*)token->native_ud)->pal_version)
+            {
+                token->retry_tick = g_resource.poll_tick + 1;
             }
             else
             {
@@ -1541,8 +1635,16 @@ static int resource_worker_loop(void* ptr)
         }
         else if (job->is_tcp_frame)
         {
+            int decode_status;
+            decode_status = TCP_NativeDecodeFramePixels(job->tcp_ud, job->frame_id,
+                job->pal_snapshot, job->pal_count, job->pal_version,
+                &job->result_raw, err, sizeof(err));
             job->result_ready = 1;
-            job->result_success = 1;
+            job->result_success = decode_status > 0;
+            job->result_fallback = decode_status == -2;
+            if (!job->result_success && !job->result_fallback)
+                SDL_snprintf(job->result_error, sizeof(job->result_error), "%s",
+                    err[0] ? err : "raw frame decode failed");
         }
         else
         {
@@ -1604,15 +1706,19 @@ static int resource_worker_submit(ResourceToken* token)
             return 0;
         }
         SDL_memcpy(job->pal_snapshot, tcp->pal_dyn ? tcp->pal_dyn : tcp->pal, sizeof(Uint32) * job->pal_count);
-        job->result_ready = 1;
-        job->result_success = 1;
-        if (!resource_worker_push_done_ex(job, 0, 0))
+        if (!resource_tcp_frame_decode_v2_enabled())
         {
-            token->retry_tick = g_resource.poll_tick + 1;
-            return -1;
+            job->result_ready = 1;
+            job->result_success = 1;
+            job->result_fallback = 1;
+            if (!resource_worker_push_done_ex(job, 0, 0))
+            {
+                token->retry_tick = g_resource.poll_tick + 1;
+                return -1;
+            }
+            g_resource.frame_submitted++;
+            return 1;
         }
-        g_resource.frame_submitted++;
-        return 1;
     }
 
     if (!g_resource.worker_cond)
@@ -1857,7 +1963,7 @@ static void resource_update_downloads(lua_State* L)
         ResourceToken* next = p->next;
         if (resource_token_is_cancelled(p) && p->download_ref != LUA_NOREF)
             resource_cancel_download(L, p);
-        else
+        else if (!p->download_completed)
             resource_check_active_download(L, p);
         if (!resource_token_is_cancelled(p) && p->download_ref != LUA_NOREF)
         {
@@ -1867,6 +1973,7 @@ static void resource_update_downloads(lua_State* L)
         }
         p = next;
     }
+    resource_process_completed_downloads(L, RESOURCE_DEFAULT_DOWNLOAD_FINISH_BUDGET);
 
     while (active < max_active)
     {
@@ -2827,6 +2934,7 @@ static int resource_push_stats(lua_State* L)
     unsigned int tokens_alive = 0;
     unsigned int tokens_terminal = 0;
     unsigned int events_pending = 0;
+    unsigned int download_finish_pending = 0;
     unsigned int worker_pending = 0;
     unsigned int worker_done = 0;
     ResourceToken* token = g_resource.tokens;
@@ -2836,6 +2944,8 @@ static int resource_push_stats(lua_State* L)
         tokens_alive++;
         if (resource_is_terminal(token->status))
             tokens_terminal++;
+        if (token->download_completed)
+            download_finish_pending++;
         if (!resource_token_is_cancelled(token) && token->download_ref != LUA_NOREF)
         {
             active++;
@@ -2901,6 +3011,8 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "worker_queue_full");
     lua_pushinteger(L, (lua_Integer)g_resource.worker_done_queue_full);
     lua_setfield(L, -2, "worker_done_queue_full");
+    lua_pushinteger(L, (lua_Integer)download_finish_pending);
+    lua_setfield(L, -2, "download_finish_pending");
     lua_pushinteger(L, (lua_Integer)g_resource.native_retried);
     lua_setfield(L, -2, "native_retried");
     lua_pushinteger(L, (lua_Integer)g_resource.shell_submitted);
@@ -2919,6 +3031,12 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "frame_ready");
     lua_pushinteger(L, (lua_Integer)g_resource.frame_failed);
     lua_setfield(L, -2, "frame_failed");
+    lua_pushinteger(L, (lua_Integer)g_resource.frame_fallback);
+    lua_setfield(L, -2, "frame_fallback");
+    lua_pushinteger(L, (lua_Integer)g_resource.md5_native_verified);
+    lua_setfield(L, -2, "md5_native_verified");
+    lua_pushboolean(L, resource_tcp_frame_decode_v2_enabled());
+    lua_setfield(L, -2, "tcp_frame_decode_v2");
     lua_pushinteger(L, (lua_Integer)tokens_alive);
     lua_setfield(L, -2, "tokens_alive");
     lua_pushinteger(L, (lua_Integer)tokens_terminal);
@@ -2961,7 +3079,7 @@ static int resource_push_stats(lua_State* L)
     lua_setfield(L, -2, "render_native");
     lua_pushboolean(L, g_resource.native_ready > 0 || g_resource.native_retried > 0);
     lua_setfield(L, -2, "native_decode");
-    lua_createtable(L, 0, 4);
+    lua_createtable(L, 0, 5);
     TCP_PushPerfStats(L);
     lua_setfield(L, -2, "tcp");
     JY_PushPerfStats(L);
@@ -3062,6 +3180,9 @@ static int resource_lua_config(lua_State* L)
             resource_table_int(L, 1, "\xe5\x9b\x9e\xe8\xb0\x83\xe9\xa2\x84\xe7\xae\x97", (int)resource_callback_budget()));
         int worker_threads = resource_table_int(L, 1, "worker_threads",
             resource_table_int(L, 1, "\xe8\xb5\x84\xe6\xba\x90Worker\xe7\xba\xbf\xe7\xa8\x8b", (int)resource_worker_target_threads()));
+        int tcp_decode_v2 = resource_table_bool(L, 1, "tcp_frame_decode_v2",
+            resource_table_bool(L, 1, "\xe5\xbc\x82\xe6\xad\xa5TCP\xe5\xb8\xa7\xe8\xa7\xa3\xe7\xa0\x81v2",
+                resource_tcp_frame_decode_v2_enabled()));
         if (max_active > 0)
             g_resource.max_active = (unsigned int)(max_active > 64 ? 64 : max_active);
         if (low_active >= 0)
@@ -3070,6 +3191,8 @@ static int resource_lua_config(lua_State* L)
             g_resource.callback_budget = (unsigned int)(callback_budget > 64 ? 64 : callback_budget);
         if (worker_threads > 0)
             g_resource.worker_configured = (unsigned int)(worker_threads > RESOURCE_WORKER_THREADS ? RESOURCE_WORKER_THREADS : worker_threads);
+        g_resource.tcp_frame_decode_v2 = tcp_decode_v2 != 0;
+        g_resource.tcp_frame_decode_v2_configured = 1;
     }
     lua_createtable(L, 0, 4);
     lua_pushinteger(L, (lua_Integer)resource_max_active());
@@ -3080,6 +3203,8 @@ static int resource_lua_config(lua_State* L)
     lua_setfield(L, -2, "callback_budget");
     lua_pushinteger(L, (lua_Integer)resource_worker_target_threads());
     lua_setfield(L, -2, "worker_threads");
+    lua_pushboolean(L, resource_tcp_frame_decode_v2_enabled());
+    lua_setfield(L, -2, "tcp_frame_decode_v2");
     return 1;
 }
 
