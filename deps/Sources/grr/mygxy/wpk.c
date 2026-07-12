@@ -1221,67 +1221,33 @@ static void THX_XorRev64Inplace(Uint8* buf, size_t size)
     }
 }
 
+static int WPK_HasOnlyZeroPadding(const Uint8* data, size_t size)
+{
+    for (size_t i = 0; i < size; i++)
+    {
+        if (data[i] != 0)
+            return 0;
+    }
+    return 1;
+}
+
 static int WPK_TryParseThx24Header(const Uint8* data, size_t size, Uint32* outCount)
 {
     if (!data || !outCount || size < 12)
         return 0;
     if (!(data[0] == 'T' && data[1] == 'H' && data[2] == 'D' && data[3] == 'O'))
         return 0;
-    if (!(data[4] == 'S' && data[5] == 'K' && data[6] == 'P' && data[7] == 'E'))
+    int isSkpe = data[4] == 'S' && data[5] == 'K' && data[6] == 'P' && data[7] == 'E';
+    int isEnon = data[4] == 'E' && data[5] == 'N' && data[6] == 'O' && data[7] == 'N';
+    if (!isSkpe && !isEnon)
         return 0;
     Uint32 count = WPK_ReadU32LE(data + 8);
-    if (count == 0)
+    if (count == 0 || (size - 12) / 24 < count)
         return 0;
     size_t need = 12 + (size_t)count * 24;
-    if (need != size)
+    if (need != size && (!isEnon || !WPK_HasOnlyZeroPadding(data + need, size - need)))
         return 0;
     *outCount = count;
-    return 1;
-}
-
-static int THD_FindHex32(const Uint8* p, size_t n, size_t* outOff);
-static void THD_Xor5A(Uint8* dst, const Uint8* src, size_t n);
-
-static int WPK_TryParseThdRecord(const Uint8* rec, char md5[33], Uint32* outHash)
-{
-    size_t md5Off = 0;
-    const Uint8* use = rec;
-
-    int ok = THD_FindHex32(rec, 0x40, &md5Off);
-    Uint8 decoded[0x40];
-    if (!ok)
-    {
-        THD_Xor5A(decoded, rec, 0x40);
-        if (THD_FindHex32(decoded, 0x40, &md5Off))
-        {
-            use = decoded;
-            ok = 1;
-        }
-    }
-    if (!ok)
-    {
-        int allZero = 1;
-        for (int j = 0; j < 0x40; j++)
-        {
-            if (rec[j] != 0)
-            {
-                allZero = 0;
-                break;
-            }
-        }
-        if (allZero)
-            return 0;
-
-        WPK_BinToLowerHex32(md5, rec);
-        *outHash = WPK_ReadU32LE(rec + 16);
-        return 1;
-    }
-
-    WPK_ToLowerHex32(md5, use + md5Off);
-    if (md5Off + 36 <= 0x40)
-        *outHash = WPK_ReadU32LE(use + md5Off + 32);
-    else
-        *outHash = WPK_ReadU32LE(use + 0x3C);
     return 1;
 }
 
@@ -4136,27 +4102,6 @@ static int WPK_NEW(lua_State* L)
     return ret;
 }
 
-static int THD_FindHex32(const Uint8* p, size_t n, size_t* outOff)
-{
-    if (n < 32)
-        return 0;
-    for (size_t i = 0; i + 32 <= n; i++)
-    {
-        if (WPK_IsHex32(p + i))
-        {
-            *outOff = i;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void THD_Xor5A(Uint8* dst, const Uint8* src, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        dst[i] = (Uint8)(src[i] ^ 0x5A);
-}
-
 static int THD_ParseImpl(lua_State* L)
 {
     size_t len = 0;
@@ -4187,69 +4132,24 @@ static int THD_ParseImpl(lua_State* L)
             }
         }
     }
-    if (thx24)
-    {
-        lua_createtable(L, (int)thxCount, 0);
-        for (Uint32 i = 0; i < thxCount; i++)
-        {
-            const Uint8* rec = useData + 12 + (size_t)i * 24;
-            Uint32 hash = WPK_ReadU32LE(rec);
-            char md5[33];
-            WPK_BinToLowerHex32(md5, rec + 8);
-
-            lua_createtable(L, 0, 2);
-            lua_pushstring(L, md5);
-            lua_setfield(L, -2, "md5");
-            lua_pushinteger(L, (lua_Integer)hash);
-            lua_setfield(L, -2, "hash");
-            lua_rawseti(L, -2, (lua_Integer)i + 1);
-        }
-        if (tmp)
-            SDL_free(tmp);
-        return 1;
-    }
-
-    static const size_t headerCandidates[] = {8, 12, 16, 20, 24, 32, 40, 64};
-    size_t header = 0;
-    size_t number = 0;
-    for (size_t i = 0; i < (sizeof(headerCandidates) / sizeof(headerCandidates[0])); i++)
-    {
-        size_t h = headerCandidates[i];
-        if (len <= h)
-            continue;
-        size_t payload = len - h;
-        if (payload % 0x40 != 0)
-            continue;
-        size_t n = payload / 0x40;
-        if (n == 0)
-            continue;
-        header = h;
-        number = n;
-        break;
-    }
-    if (!number)
+    if (!thx24)
         return 0;
 
-    lua_createtable(L, (int)number, 0);
-    lua_Integer outIndex = 0;
-    for (size_t i = 0; i < number; i++)
+    lua_createtable(L, (int)thxCount, 0);
+    for (Uint32 i = 0; i < thxCount; i++)
     {
-        const Uint8* rec = data + header + i * 0x40;
-
+        const Uint8* rec = useData + 12 + (size_t)i * 24;
+        Uint32 hash = WPK_ReadU32LE(rec);
         char md5[33];
-        Uint32 hash = 0;
-        if (!WPK_TryParseThdRecord(rec, md5, &hash))
-            continue;
+        WPK_BinToLowerHex32(md5, rec + 8);
 
         lua_createtable(L, 0, 2);
         lua_pushstring(L, md5);
         lua_setfield(L, -2, "md5");
         lua_pushinteger(L, (lua_Integer)hash);
         lua_setfield(L, -2, "hash");
-        outIndex++;
-        lua_rawseti(L, -2, outIndex);
+        lua_rawseti(L, -2, (lua_Integer)i + 1);
     }
-
     if (tmp)
         SDL_free(tmp);
 
