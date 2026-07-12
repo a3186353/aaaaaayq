@@ -1231,6 +1231,20 @@ static int WPK_HasOnlyZeroPadding(const Uint8* data, size_t size)
     return 1;
 }
 
+static int WPK_HasOfficialThxTail(const Uint8* data, size_t size)
+{
+    if (WPK_HasOnlyZeroPadding(data, size))
+        return 1;
+    if (size < 20 || WPK_ReadU32LE(data) != 0 || WPK_ReadU32LE(data + 4) != 0x7Bu)
+        return 0;
+
+    Uint32 count = WPK_ReadU32LE(data + 8);
+    if (count == 0 || (size - 12) / 8 < count)
+        return 0;
+    size_t need = 12 + (size_t)count * 8;
+    return WPK_HasOnlyZeroPadding(data + need, size - need);
+}
+
 static int WPK_TryParseThx24Header(const Uint8* data, size_t size, Uint32* outCount)
 {
     if (!data || !outCount || size < 12)
@@ -1245,7 +1259,7 @@ static int WPK_TryParseThx24Header(const Uint8* data, size_t size, Uint32* outCo
     if (count == 0 || (size - 12) / 24 < count)
         return 0;
     size_t need = 12 + (size_t)count * 24;
-    if (need != size && (!isEnon || !WPK_HasOnlyZeroPadding(data + need, size - need)))
+    if (need != size && (!isEnon || !WPK_HasOfficialThxTail(data + need, size - need)))
         return 0;
     *outCount = count;
     return 1;
