@@ -9,6 +9,8 @@
 #pragma once
 #include "lua_proxy.h"
 #include "sdl_proxy.h"
+#include "lua_proxy.h"
+#include "sdl_proxy.h"
 
 #define TCP_MT_XY2 "xy2_tcp"
 #define TCP_MT_XYQ "xyq_tcp"
@@ -17,15 +19,6 @@
 #define TCP_FMT_PS  0x5053   /* 'PS' = SP格式 */
 #define TCP_FMT_PR  0x5052   /* 'PR' = RP格式 */
 #define TCP_FMT_PT  0x5054   /* 'PT' = TP格式 */
-
-#ifndef MYGXY_ASYNC_FRAME_STATUS
-#define MYGXY_ASYNC_FRAME_STATUS
-#define MYGXY_ASYNC_FRAME_QUEUED      0
-#define MYGXY_ASYNC_FRAME_READY       1
-#define MYGXY_ASYNC_FRAME_PENDING     2
-#define MYGXY_ASYNC_FRAME_QUEUE_FULL -2
-#define MYGXY_ASYNC_FRAME_ERROR      -1
-#endif
 //TCA TCP SP
 typedef struct
 {
@@ -94,30 +87,6 @@ typedef struct
 
 typedef struct
 {
-    SDL_Surface* surface;
-    Uint32 frame_id;
-    Uint32 pal_version;
-    Uint32 w, h;
-    Sint32 x, y;
-    Uint32 lru_tick;
-} TCP_CacheEntry;
-
-typedef struct TCP_AsyncJob
-{
-    Uint32 frame_id;
-    Uint32 generation;
-    Uint32 pal_version;
-    Uint32 pal_count;
-    Uint32* pal_snapshot;
-    SDL_Surface* surface;
-    Uint32 w, h;
-    Sint32 x, y;
-    int ok;
-    struct TCP_AsyncJob* next;
-} TCP_AsyncJob;
-
-typedef struct
-{
     Uint8* data;
     Uint32 len;
     Uint32* splist; //SP格式
@@ -133,64 +102,6 @@ typedef struct
     Uint32 pal_count;  //pal_dyn长度
     Uint16 fmt;        //'PS'/'PR'/'PT'
     Uint8 sp_rgb565;   //1=RGB565调色板, 0=RGB/BGRA调色板
-
-    Uint32 pal_version;
-    TCP_CacheEntry* cache;
-    Uint32 cache_cap;
-    Uint32 cache_tick;
-
-    SDL_mutex* async_mutex;
-    Uint32 async_generation;
-    TCP_AsyncJob* async_done_head;
-    TCP_AsyncJob* async_done_tail;
-    Uint32 async_ready;
-    Uint32 async_submitted;
-    Uint32 async_decoded;
-    Uint32 async_failed;
-    Uint32 async_cancelled;
 } TCP_UserData;
 
-typedef struct
-{
-    SDL_Surface* surface;
-    Uint32 frame_id;
-    Uint32 pal_version;
-    Uint32 w;
-    Uint32 h;
-    Sint32 x;
-    Sint32 y;
-} TCP_NativeFrameData;
-
-/* Worker-owned decoded pixels.  The buffer is plain heap memory and must not
- * be passed to SDL/IMG/renderer code until the main thread upload step. */
-typedef struct
-{
-    void* pixels;
-    Uint32 pitch;
-    Uint32 width;
-    Uint32 height;
-    Sint32 x;
-    Sint32 y;
-    Uint32 frame_id;
-    Uint32 pal_version;
-} TCP_NativeRawFrameData;
-
 int TCP_Create(lua_State* L, Uint8* data, size_t size);
-TCP_UserData* TCP_NativeCreateFromData(const Uint8* data, size_t size, char* err, size_t errSize);
-void TCP_NativeFree(TCP_UserData* ud);
-int TCP_NativePushParsed(lua_State* L, TCP_UserData* ud);
-int TCP_NativeWarmFrame(TCP_UserData* ud, Uint32 group, Uint32 frame, char* err, size_t errSize);
-int TCP_NativeDecodeGroupFrame(TCP_UserData* ud, Uint32 group, Uint32 frame,
-                               TCP_NativeFrameData* out, char* err, size_t errSize);
-int TCP_NativeDecodeFrameWithPalette(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
-                                      Uint32 pal_version, TCP_NativeFrameData* out, char* err, size_t errSize);
-int TCP_NativeDecodeFramePixels(TCP_UserData* ud, Uint32 id, const Uint32* pal, Uint32 pal_count,
-                                Uint32 pal_version, TCP_NativeRawFrameData* out, char* err, size_t errSize);
-void TCP_NativeFreeFramePixels(TCP_NativeRawFrameData* frame);
-int TCP_NativeStoreRawFrame(TCP_UserData* ud, TCP_NativeRawFrameData* frame);
-int TCP_NativeStoreDecodedFrame(TCP_UserData* ud, TCP_NativeFrameData* frame);
-void TCP_NativeClearFrameData(TCP_NativeFrameData* frame);
-int TCP_NativeRequestFrame(TCP_UserData* ud, Uint32 id, const char** status);
-int TCP_NativePollAsync(TCP_UserData* ud, Uint32 limit);
-int TCP_NativeIsFrameDecoded(TCP_UserData* ud, Uint32 id);
-void TCP_PushPerfStats(lua_State* L);

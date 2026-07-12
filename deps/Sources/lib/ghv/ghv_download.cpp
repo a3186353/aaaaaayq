@@ -64,6 +64,14 @@ struct DownloadCoreState {
 
 static void download_do_download(std::shared_ptr<DownloadCoreState> state);
 
+static bool download_try_finish(const std::shared_ptr<DownloadCoreState>& state, int status)
+{
+    if (!state)
+        return false;
+    int expected = GHV_DOWNLOAD_STATUS_DOWNLOADING;
+    return state->status.compare_exchange_strong(expected, status);
+}
+
 static FILE* download_open_file(const std::string& filepath, const char* mode)
 {
 #ifdef _WIN32
@@ -126,48 +134,97 @@ static bool download_is_timeout_status(int status)
     return status == -ETIMEDOUT || status == -1100 || status == -10060;
 }
 
-static void download_compute_md5(const std::shared_ptr<DownloadCoreState>& state)
-{
 #ifndef GHV_NO_CRYPTO
-    if (!state)
-        return;
+static EVP_MD_CTX* download_md5_create()
+{
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    bool source_ready = false;
-    std::string hex;
-    if (ctx && EVP_DigestInit_ex(ctx, EVP_md5(), NULL)) {
-        if (!state->filepath.empty()) {
-            FILE* f = download_open_file(state->filepath, "rb");
-            if (f) {
-                unsigned char buf[8192];
-                size_t n;
-                source_ready = true;
-                while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-                    EVP_DigestUpdate(ctx, buf, n);
-                fclose(f);
-            }
-        } else {
-            std::lock_guard<std::mutex> lock(state->data_mutex);
-            EVP_DigestUpdate(ctx, state->memory_data.data(), state->memory_data.size());
-            source_ready = true;
-        }
-        unsigned char md[EVP_MAX_MD_SIZE];
-        unsigned int md_len = 0;
-        if (source_ready && EVP_DigestFinal_ex(ctx, md, &md_len)) {
-            char value[33] = {0};
-            for (unsigned int i = 0; i < md_len && i < 16; i++)
-                sprintf(value + i * 2, "%02x", md[i]);
-            hex = value;
-        }
-    }
+    if (ctx && EVP_DigestInit_ex(ctx, EVP_md5(), NULL) == 1)
+        return ctx;
     if (ctx)
         EVP_MD_CTX_free(ctx);
-    if (!hex.empty()) {
-        std::lock_guard<std::mutex> lock(state->data_mutex);
-        state->md5_hex = std::move(hex);
+    return nullptr;
+}
+
+static bool download_md5_reset(EVP_MD_CTX* ctx)
+{
+    return ctx && EVP_MD_CTX_reset(ctx) == 1
+        && EVP_DigestInit_ex(ctx, EVP_md5(), NULL) == 1;
+}
+
+static bool download_md5_existing_prefix(
+    EVP_MD_CTX* ctx, const std::string& filepath, int64_t expected_size)
+{
+    if (!ctx)
+        return false;
+    FILE* f = download_open_file(filepath, "rb");
+    if (!f)
+        return errno == ENOENT && expected_size == 0;
+    unsigned char buf[8192];
+    size_t n = 0;
+    int64_t total = 0;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (EVP_DigestUpdate(ctx, buf, n) != 1) {
+            ok = false;
+            break;
+        }
+        if (n > (size_t)(INT64_MAX - total)) {
+            ok = false;
+            break;
+        }
+        total += (int64_t)n;
     }
-#else
-    (void)state;
+    if (ferror(f))
+        ok = false;
+    fclose(f);
+    return ok && total == expected_size;
+}
+
+static bool download_md5_publish(EVP_MD_CTX* ctx, const std::shared_ptr<DownloadCoreState>& state)
+{
+    if (!ctx || !state)
+        return false;
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    if (EVP_DigestFinal_ex(ctx, md, &md_len) != 1)
+        return false;
+    char value[33] = {0};
+    for (unsigned int i = 0; i < md_len && i < 16; i++)
+        snprintf(value + i * 2, 3, "%02x", md[i]);
+    std::lock_guard<std::mutex> lock(state->data_mutex);
+    if (state->cancelled.load())
+        return false;
+    state->md5_hex.assign(value);
+    return true;
+}
 #endif
+
+static void download_clear_md5(const std::shared_ptr<DownloadCoreState>& state)
+{
+    if (!state)
+        return;
+    std::lock_guard<std::mutex> lock(state->data_mutex);
+    state->md5_hex.clear();
+}
+
+static bool download_parse_range_start(const std::string& value, int64_t* out)
+{
+    if (!out || value.empty())
+        return false;
+    const char* p = value.c_str();
+    if (value.compare(0, 6, "bytes=") == 0)
+        p += 6;
+    else if (value.compare(0, 6, "bytes ") == 0)
+        p += 6;
+    if (*p < '0' || *p > '9')
+        return false;
+    errno = 0;
+    char* end = nullptr;
+    const long long start = strtoll(p, &end, 10);
+    if (errno != 0 || !end || *end != '-' || start < 0)
+        return false;
+    *out = static_cast<int64_t>(start);
+    return true;
 }
 
 class DownloadManager {
@@ -199,16 +256,21 @@ public:
     {
         if (!state)
             return;
+        state->cancelled = true;
         int status = state->status.load();
+        while (status != GHV_DOWNLOAD_STATUS_DONE && status >= 0) {
+            if (state->status.compare_exchange_weak(
+                    status, GHV_DOWNLOAD_STATUS_CANCELLED))
+                break;
+        }
         if (status == GHV_DOWNLOAD_STATUS_DONE || status < 0)
             return;
-        state->cancelled = true;
+        download_clear_md5(state);
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto it = queue_.begin(); it != queue_.end(); ++it) {
             if (it->get() == state.get()) {
                 queue_.erase(it);
                 state->queued = false;
-                state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
                 record_cancelled_locked(state);
                 cv_.notify_all();
                 return;
@@ -314,7 +376,7 @@ private:
 
             if (!state || state->cancelled.load()) {
                 if (state) {
-                    state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+                    download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
                     std::lock_guard<std::mutex> lock(mutex_);
                     record_cancelled_locked(state);
                 }
@@ -367,7 +429,7 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
 {
     if (!state || state->cancelled.load()) {
         if (state)
-            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
         return;
     }
 
@@ -385,45 +447,121 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
 
     if (!state->filepath.empty()) {
         bool append_mode = !state->range.empty();
+        int64_t requested_offset = 0;
+        if (append_mode && !download_parse_range_start(state->range, &requested_offset)) {
+            download_try_finish(state, -EINVAL);
+            return;
+        }
+#ifndef GHV_NO_CRYPTO
+        EVP_MD_CTX* digest = download_md5_create();
+        bool digest_ok = digest != nullptr;
+        if (append_mode && digest_ok)
+            digest_ok = download_md5_existing_prefix(digest, state->filepath, requested_offset);
+#endif
+        bool write_failed = false;
         FILE* fp = download_open_file(state->filepath, append_mode ? "ab" : "wb");
         if (!fp) {
-            state->status = -1;
+#ifndef GHV_NO_CRYPTO
+            if (digest) EVP_MD_CTX_free(digest);
+#endif
+            download_try_finish(state, -1);
             return;
         }
 
-        resp.http_cb = [state, &fp, append_mode](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
+        resp.http_cb = [state, &fp, append_mode, requested_offset, &write_failed
+#ifndef GHV_NO_CRYPTO
+            , digest, &digest_ok
+#endif
+        ](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
             if (state->cancelled.load()) return;
             if (state_h == HP_HEADERS_COMPLETE) {
-                if (append_mode && msg->GetHeader("Content-Range").empty()) {
-                    if (fp) {
-                        fclose(fp);
-                        fp = download_open_file(state->filepath, "wb");
+                if (append_mode) {
+                    const HttpResponse* response = static_cast<const HttpResponse*>(msg);
+                    const std::string content_range = msg->GetHeader("Content-Range");
+                    int64_t response_offset = -1;
+                    const bool exact_resume = response
+                        && response->status_code == HTTP_STATUS_PARTIAL_CONTENT
+                        && download_parse_range_start(content_range, &response_offset)
+                        && response_offset == requested_offset;
+                    const bool full_restart = response
+                        && response->status_code == HTTP_STATUS_OK
+                        && content_range.empty();
+                    if (!exact_resume && !full_restart) {
+                        write_failed = true;
+                        if (fp) {
+                            fclose(fp);
+                            fp = nullptr;
+                        }
+                        return;
+                    }
+                    if (full_restart) {
+                        if (fp) {
+                            fclose(fp);
+                            fp = download_open_file(state->filepath, "wb");
+                        }
+#ifndef GHV_NO_CRYPTO
+                        digest_ok = download_md5_reset(digest);
+#endif
+                        if (!fp)
+                            write_failed = true;
                     }
                 }
                 download_set_content_length(state, msg->GetHeader("Content-Length"));
             } else if (state_h == HP_BODY) {
                 if (data && size > 0 && fp) {
-                    fwrite(data, 1, size, fp);
-                    state->current_size += size;
+                    const size_t written = fwrite(data, 1, size, fp);
+                    if (written != size) {
+                        write_failed = true;
+                    } else {
+#ifndef GHV_NO_CRYPTO
+                        if (digest_ok && EVP_DigestUpdate(digest, data, size) != 1)
+                            digest_ok = false;
+#endif
+                        state->current_size += size;
+                    }
                 }
             }
         };
 
         int ret = client.send(&req, &resp);
-        if (fp) fclose(fp);
+        if (fp && fclose(fp) != 0)
+            write_failed = true;
 
         if (state->cancelled.load()) {
             download_remove_file(state->filepath);
-            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
-        } else if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
+            download_clear_md5(state);
+            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
+        } else if (write_failed || ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
             download_remove_file(state->filepath);
-            state->status = download_final_error(ret, resp.status_code);
+            download_clear_md5(state);
+            download_try_finish(state, write_failed ? -EIO : download_final_error(ret, resp.status_code));
         } else {
-            download_compute_md5(state);
-            state->status = GHV_DOWNLOAD_STATUS_DONE;
+            bool digest_published = true;
+#ifndef GHV_NO_CRYPTO
+            digest_published = digest_ok && download_md5_publish(digest, state);
+#endif
+            if (!digest_published) {
+                download_remove_file(state->filepath);
+                download_clear_md5(state);
+                download_try_finish(state, -EIO);
+            } else if (!download_try_finish(state, GHV_DOWNLOAD_STATUS_DONE)) {
+                download_remove_file(state->filepath);
+                download_clear_md5(state);
+            }
         }
+#ifndef GHV_NO_CRYPTO
+        if (digest) EVP_MD_CTX_free(digest);
+#endif
     } else {
-        resp.http_cb = [state](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
+#ifndef GHV_NO_CRYPTO
+        EVP_MD_CTX* digest = download_md5_create();
+        bool digest_ok = digest != nullptr;
+#endif
+        resp.http_cb = [state
+#ifndef GHV_NO_CRYPTO
+            , digest, &digest_ok
+#endif
+        ](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
             if (state->cancelled.load()) return;
             if (state_h == HP_HEADERS_COMPLETE) {
                 download_set_content_length(state, msg->GetHeader("Content-Length"));
@@ -435,6 +573,10 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
                 if (data && size > 0) {
                     std::lock_guard<std::mutex> lock(state->data_mutex);
                     state->memory_data.append(data, size);
+#ifndef GHV_NO_CRYPTO
+                    if (digest_ok && EVP_DigestUpdate(digest, data, size) != 1)
+                        digest_ok = false;
+#endif
                     state->current_size += size;
                 }
             }
@@ -444,20 +586,39 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
 
         if (state->cancelled.load()) {
             download_clear_memory(state);
-            state->status = GHV_DOWNLOAD_STATUS_CANCELLED;
+            download_clear_md5(state);
+            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
         } else if (ret != 0 || resp.status_code < 200 || resp.status_code >= 400) {
             download_clear_memory(state);
-            state->status = download_final_error(ret, resp.status_code);
+            download_clear_md5(state);
+            download_try_finish(state, download_final_error(ret, resp.status_code));
         } else {
             if (state->memory_data.empty() && !resp.body.empty()) {
                 std::lock_guard<std::mutex> lock(state->data_mutex);
                 state->memory_data = resp.body;
                 state->current_size = state->memory_data.size();
                 state->total_size = state->memory_data.size();
+#ifndef GHV_NO_CRYPTO
+                if (digest_ok && EVP_DigestUpdate(digest, state->memory_data.data(), state->memory_data.size()) != 1)
+                    digest_ok = false;
+#endif
             }
-            download_compute_md5(state);
-            state->status = GHV_DOWNLOAD_STATUS_DONE;
+            bool digest_published = true;
+#ifndef GHV_NO_CRYPTO
+            digest_published = digest_ok && download_md5_publish(digest, state);
+#endif
+            if (!digest_published) {
+                download_clear_memory(state);
+                download_clear_md5(state);
+                download_try_finish(state, -EIO);
+            } else if (!download_try_finish(state, GHV_DOWNLOAD_STATUS_DONE)) {
+                download_clear_memory(state);
+                download_clear_md5(state);
+            }
         }
+#ifndef GHV_NO_CRYPTO
+        if (digest) EVP_MD_CTX_free(digest);
+#endif
     }
 }
 

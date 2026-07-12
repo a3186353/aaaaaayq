@@ -8,15 +8,6 @@
 
 #define JY_MT "xyq_jy"
 
-#ifndef MYGXY_ASYNC_FRAME_STATUS
-#define MYGXY_ASYNC_FRAME_STATUS
-#define MYGXY_ASYNC_FRAME_QUEUED      0
-#define MYGXY_ASYNC_FRAME_READY       1
-#define MYGXY_ASYNC_FRAME_PENDING     2
-#define MYGXY_ASYNC_FRAME_QUEUE_FULL -2
-#define MYGXY_ASYNC_FRAME_ERROR      -1
-#endif
-
 /* ─── LRU 缓存容量默认值 ───
  * ★ 从 128 调低到 32：
  *   - 单个 JY_UserData 的 key = pid|cdn_eid|act|dir，仅承载单动作单方向
@@ -56,18 +47,6 @@ typedef struct
     /* pal_ver 字段移除：cache 内容与调色板解耦，染色变化零失效 */
     Uint32  lru_tick;
 } JY_CacheEntry;
-
-typedef struct JY_AsyncJob
-{
-    Uint32 frame_id;
-    Uint32 generation;
-    Uint8* idx_pixels;
-    Uint8* alpha_pixels;
-    Uint16* depth;
-    Uint16 w, h;
-    int ok;
-    struct JY_AsyncJob* next;
-} JY_AsyncJob;
 
 /* ─── 主 UserData ─── */
 typedef struct
@@ -112,27 +91,6 @@ typedef struct
     Uint32 cache_cap;          /* 默认 JY_CACHE_CAP_DEFAULT (32)，运行时可按需调整 */
     Uint32 cache_tick;
 
-    /* 后台 CPU 解码队列：worker 只读 atlas/frames 并产出 R8 三 buffer。
-     * 主线程 PollAsync/GetFrame/IsFrameDecoded 吸收结果写入 cache。 */
-    SDL_mutex* async_mutex;
-    SDL_cond* async_cond;
-    SDL_Thread* async_thread;
-    int async_stop;
-    Uint32 async_generation;
-    JY_AsyncJob* async_queue_head;
-    JY_AsyncJob* async_queue_tail;
-    JY_AsyncJob* async_done_head;
-    JY_AsyncJob* async_done_tail;
-    Uint32 async_queued;
-    Uint32 async_ready;
-    Uint32 async_submitted;
-    Uint32 async_decoded;
-    Uint32 async_failed;
-    Uint32 async_cancelled;
-    int async_active;
-    Uint32 async_active_frame;
-    Uint32 async_active_generation;
-
     /* ★ R10：旧 zbuf_cached 已删除
      *   - 旧策略：单 z-buffer 仅保留最深像素 → 半透明部件被遮挡时颜色丢失
      *   - 新策略：per-pixel 8 槽插入排序 + 链式 over alpha（栈分配，无堆开销）
@@ -141,7 +99,3 @@ typedef struct
 
 /* 公共入口 */
 int JY_Create(lua_State* L);
-int JY_NativeRequestFrame(JY_UserData* ud, Uint32 id, const char** status);
-int JY_NativePollAsync(JY_UserData* ud, Uint32 limit);
-int JY_NativeIsFrameDecoded(JY_UserData* ud, Uint32 id);
-void JY_PushPerfStats(lua_State* L);

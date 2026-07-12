@@ -299,11 +299,10 @@ int luaopen_mygxy_fsb(lua_State* L);
 int luaopen_mygxy_wpk(lua_State* L);
 int luaopen_mygxy_jy(lua_State* L);
 int luaopen_mygxy_asset(lua_State* L);
-int luaopen_mygxy_resource(lua_State* L);
 MYGXY_API int luaopen_mygxy(lua_State* L)
 {
 
-    lua_createtable(L, 0, 9);
+    lua_createtable(L, 0, 8);
 
     lua_pushcfunction(L, luaopen_mygxy_tcp);
     lua_call(L, 0, 1);
@@ -336,10 +335,6 @@ MYGXY_API int luaopen_mygxy(lua_State* L)
     lua_pushcfunction(L, luaopen_mygxy_asset);
     lua_call(L, 0, 1);
     lua_setfield(L, -2, "Asset");
-
-    lua_pushcfunction(L, luaopen_mygxy_resource);
-    lua_call(L, 0, 1);
-    lua_setfield(L, -2, "Resource");
 
     lua_createtable(L, 0, 1);
     lua_pushcfunction(L, lua_mygxy_call);

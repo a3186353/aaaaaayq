@@ -15,6 +15,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <limits.h>
 
 
 #if defined(_WIN32)
@@ -23,240 +25,21 @@
 #define MYGXY_API LUAMOD_API
 #endif
 
-#define JY_PERF_SAMPLE_CAP 1024
-
-typedef struct
-{
-    Uint64 count;
-    Uint64 total_us;
-    Uint32 samples[JY_PERF_SAMPLE_CAP];
-    int sample_pos;
-    int sample_count;
-} JY_TimeStats;
-
-typedef struct
-{
-    SDL_mutex* mutex;
-    JY_TimeStats decode_us;
-    JY_TimeStats upload_us;
-    Uint64 cache_bytes;
-    Uint64 decoded_frames;
-    Uint64 cache_hits;
-    Uint64 cache_misses;
-    Uint64 lru_evictions;
-    Uint64 cache_clear_count;
-    Uint64 cache_clear_freed_bytes;
-} JY_PerfStats;
-
-typedef struct
-{
-    SDL_Surface* sf;
-    int refcount;
-} JY_GGETexture;
-
-static JY_PerfStats g_jy_perf = {0};
-
-static void JY_PerfEnsure(void)
-{
-    if (!g_jy_perf.mutex)
-        g_jy_perf.mutex = SDL_CreateMutex();
-}
-
-static Uint64 JY_NowUS(void)
-{
-    Uint64 freq = SDL_GetPerformanceFrequency();
-    if (!freq)
-        return 0;
-    return (SDL_GetPerformanceCounter() * 1000000ULL) / freq;
-}
-
-static void JY_TimeRecord(JY_TimeStats* s, Uint64 elapsed_us)
-{
-    if (!s)
-        return;
-    s->count++;
-    s->total_us += elapsed_us;
-    s->samples[s->sample_pos] = (Uint32)(elapsed_us > 0xFFFFFFFFULL ? 0xFFFFFFFFu : elapsed_us);
-    s->sample_pos = (s->sample_pos + 1) % JY_PERF_SAMPLE_CAP;
-    if (s->sample_count < JY_PERF_SAMPLE_CAP)
-        s->sample_count++;
-}
-
-static void JY_RecordDecode(Uint64 elapsed_us)
-{
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    JY_TimeRecord(&g_jy_perf.decode_us, elapsed_us);
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-}
-
-static void JY_RecordUpload(Uint64 elapsed_us)
-{
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    JY_TimeRecord(&g_jy_perf.upload_us, elapsed_us);
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-}
-
-static Uint64 JY_CacheEntryBytes(const JY_CacheEntry* e)
-{
-    Uint64 npx;
-    if (!e || !e->idx_pixels || e->w == 0 || e->h == 0)
-        return 0;
-    npx = (Uint64)e->w * (Uint64)e->h;
-    return npx + (e->alpha_pixels ? npx : 0) + (e->depth ? npx * sizeof(Uint16) : 0);
-}
-
-static int JY_Uint32Compare(const void* a, const void* b)
-{
-    Uint32 av = *(const Uint32*)a;
-    Uint32 bv = *(const Uint32*)b;
-    return (av > bv) - (av < bv);
-}
-
-static Uint32 JY_Percentile(Uint32* values, int count, int pct)
-{
-    int idx;
-    if (!values || count <= 0)
-        return 0;
-    qsort(values, (size_t)count, sizeof(Uint32), JY_Uint32Compare);
-    idx = (count * pct + 99) / 100;
-    if (idx < 1) idx = 1;
-    if (idx > count) idx = count;
-    return values[idx - 1];
-}
-
-static SDL_Surface* JY_SurfaceAlphaToSurface(SDL_Surface* sf)
-{
-    if (!sf || !sf->format || sf->w <= 0 || sf->h <= 0)
-        return NULL;
-
-    SDL_Surface* src = sf;
-    int free_src = 0;
-    if (sf->format->format != SDL_PIXELFORMAT_ARGB8888)
-    {
-        src = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
-        if (!src)
-            return NULL;
-        free_src = 1;
-    }
-
-    SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, sf->w, sf->h, 8, SDL_PIXELFORMAT_INDEX8);
-    if (!out)
-    {
-        if (free_src)
-            SDL_FreeSurface(src);
-        return NULL;
-    }
-
-    int src_locked = 0;
-    int out_locked = 0;
-    if (SDL_MUSTLOCK(src))
-    {
-        if (SDL_LockSurface(src) != 0)
-        {
-            SDL_FreeSurface(out);
-            if (free_src)
-                SDL_FreeSurface(src);
-            return NULL;
-        }
-        src_locked = 1;
-    }
-    if (SDL_MUSTLOCK(out))
-    {
-        if (SDL_LockSurface(out) != 0)
-        {
-            if (src_locked)
-                SDL_UnlockSurface(src);
-            SDL_FreeSurface(out);
-            if (free_src)
-                SDL_FreeSurface(src);
-            return NULL;
-        }
-        out_locked = 1;
-    }
-
-    for (int y = 0; y < src->h; y++)
-    {
-        const Uint32* src_row = (const Uint32*)((const Uint8*)src->pixels + (size_t)y * (size_t)src->pitch);
-        Uint8* dst = (Uint8*)out->pixels + (size_t)y * (size_t)out->pitch;
-        for (int x = 0; x < src->w; x++)
-            dst[x] = (Uint8)((src_row[x] >> 24) & 0xFF);
-    }
-
-    if (out_locked)
-        SDL_UnlockSurface(out);
-    if (src_locked)
-        SDL_UnlockSurface(src);
-    if (free_src)
-        SDL_FreeSurface(src);
-    return out;
-}
-
-static int JY_PushTexture(lua_State* L, SDL_Texture* tex, SDL_Surface* alpha_src)
-{
-    if (!tex || !alpha_src)
-        return 0;
-
-    luaL_getmetatable(L, "SDL_Texture");
-    if (!lua_istable(L, -1))
-    {
-        lua_pop(L, 1);
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-    lua_pop(L, 1);
-
-    JY_GGETexture* gt = (JY_GGETexture*)SDL_calloc(1, sizeof(JY_GGETexture));
-    if (!gt)
-    {
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-    gt->sf = JY_SurfaceAlphaToSurface(alpha_src);
-    if (!gt->sf)
-    {
-        SDL_free(gt);
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-    gt->refcount = 1;
-    if (SDL_SetTextureUserData(tex, gt) != 0)
-    {
-        SDL_FreeSurface(gt->sf);
-        SDL_free(gt);
-        SDL_DestroyTexture(tex);
-        return 0;
-    }
-
-    SDL_Texture** ud = (SDL_Texture**)lua_newuserdata(L, sizeof(SDL_Texture*));
-    *ud = tex;
-    luaL_setmetatable(L, "SDL_Texture");
-    return 1;
-}
-
 /* ═══════════════════════════════════════════
  *  Forward declarations
  * ═══════════════════════════════════════════ */
 static int JY_GetFrame(lua_State* L);
-static int JY_GetFrameReady(lua_State* L);
-static int JY_GetFrameTexture(lua_State* L);
 static int JY_GetFrameInfo(lua_State* L);
 static int JY_SetPal(lua_State* L);
 static int JY_GetPal(lua_State* L);
 static int JY_SetPP(lua_State* L);
 static int JY_SetPalette(lua_State* L);
 static int JY_Prefetch(lua_State* L);
-static int JY_RequestFrame(lua_State* L);
-static int JY_PollAsync(lua_State* L);
-static int JY_IsFrameDecoded(lua_State* L);
-static int JY_AsyncStats(lua_State* L);
 static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
 static int JY_GC(lua_State* L);
-static SDL_INLINE void JY_FreeR8Triple(void* idx, void* alpha, void* depth);
 
 static int JY_LUA_FreeSurface(lua_State* L);
 
@@ -265,8 +48,6 @@ static const luaL_Reg JY_FUNCS[] = {
     {"__close",     JY_GC},
     {"GetFrame",    JY_GetFrame},
     {"get_frame",   JY_GetFrame},
-    {"GetFrameReady", JY_GetFrameReady},
-    {"GetFrameTexture", JY_GetFrameTexture},
     {"GetFrameInfo", JY_GetFrameInfo},
     {"SetPal",      JY_SetPal},
     {"set_palette", JY_SetPalette},
@@ -274,10 +55,6 @@ static const luaL_Reg JY_FUNCS[] = {
     {"get_palette", JY_GetPal},
     {"SetPP",       JY_SetPP},
     {"Prefetch",    JY_Prefetch},
-    {"RequestFrame", JY_RequestFrame},
-    {"PollAsync",   JY_PollAsync},
-    {"IsFrameDecoded", JY_IsFrameDecoded},
-    {"AsyncStats",  JY_AsyncStats},
     {"CacheClear",  JY_LUA_CacheClear},
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
@@ -438,10 +215,14 @@ static int JY_DecodeFrame(
         return 0;
 
     JY_FrameInfo* f = &ud->frames[id];
-    if (f->sw == 0 || f->sh == 0)
+    if (f->sw == 0 || f->sh == 0
+        || f->sw > UINT16_MAX || f->sh > UINT16_MAX
+        || f->sx > ud->atlas_w || f->sy > ud->atlas_h
+        || f->sw > ud->atlas_w - f->sx || f->sh > ud->atlas_h - f->sy
+        || (size_t)f->sw > SIZE_MAX / (size_t)f->sh)
         return 0;
 
-    Uint32 npx = f->sw * f->sh;
+    size_t npx = (size_t)f->sw * (size_t)f->sh;
 
     /* 分配 R8 idx + R8 alpha + Uint16 depth 三 buffer
      * 任一分配失败即整体回滚（避免半完成状态污染 cache） */
@@ -464,14 +245,15 @@ static int JY_DecodeFrame(
     Uint32 abpp = ud->alpha_bpp;
 
     /* 预计算 depth atlas 边界 */
-    Uint32 depth_buf_pixels = 0;
+    size_t depth_buf_pixels = 0;
     Uint32 depth_stride = 0;
     if (ud->depth_pixels)
     {
         Uint32 daw = ud->depth_atlas_w ? ud->depth_atlas_w : aw;
         Uint32 dah = ud->depth_atlas_h ? ud->depth_atlas_h : ud->atlas_h;
         depth_stride = daw;
-        depth_buf_pixels = daw * dah;
+        if (dah > 0 && (size_t)daw <= SIZE_MAX / (size_t)dah)
+            depth_buf_pixels = (size_t)daw * (size_t)dah;
     }
 
     for (Uint32 y = 0; y < f->sh; y++)
@@ -487,7 +269,7 @@ static int JY_DecodeFrame(
                 continue;
 
             /* Index 像素：R 通道 = 调色板索引，G/B 备用作深度 */
-            Uint32 idx_off = (src_y * aw + src_x) * ibpp;
+            size_t idx_off = ((size_t)src_y * aw + src_x) * ibpp;
             Uint8 pal_idx = ud->index_pixels[idx_off];
             Uint8 depth_hi = 0, depth_lo = 0;
 
@@ -497,18 +279,22 @@ static int JY_DecodeFrame(
                 {
                     /* 独立 depth atlas（与主 atlas 不同坐标），用最近邻映射对齐 */
                     JY_FrameInfo* df = &ud->depth_frames[id];
-                    if (df->sw > 0 && df->sh > 0)
+                    if (df->sw > 0 && df->sh > 0
+                        && df->sx <= ud->depth_atlas_w && df->sy <= ud->depth_atlas_h
+                        && df->sw <= ud->depth_atlas_w - df->sx
+                        && df->sh <= ud->depth_atlas_h - df->sy
+                        && ud->depth_bpp >= 3)
                     {
-                        Uint32 dmx = ((x * 2 + 1) * df->sw) / (f->sw * 2);
-                        Uint32 dmy = ((y * 2 + 1) * df->sh) / (f->sh * 2);
+                        Uint32 dmx = (Uint32)(((uint64_t)x * 2 + 1) * df->sw / ((uint64_t)f->sw * 2));
+                        Uint32 dmy = (Uint32)(((uint64_t)y * 2 + 1) * df->sh / ((uint64_t)f->sh * 2));
                         if (dmx < df->sw && dmy < df->sh)
                         {
                             Uint32 dax = df->sx + dmx;
                             Uint32 day = df->sy + dmy;
-                            Uint32 d_pixel_off = day * depth_stride + dax;
+                            size_t d_pixel_off = (size_t)day * depth_stride + dax;
                             if (d_pixel_off < depth_buf_pixels)
                             {
-                                Uint32 d_byte_off = d_pixel_off * ud->depth_bpp;
+                                size_t d_byte_off = d_pixel_off * ud->depth_bpp;
                                 depth_hi = ud->depth_pixels[d_byte_off + 1];
                                 depth_lo = ud->depth_pixels[d_byte_off + 2];
                             }
@@ -527,12 +313,12 @@ static int JY_DecodeFrame(
             Uint8 alpha = 255;
             if (ud->alpha_pixels)
             {
-                Uint32 a_off = (src_y * aw + src_x) * abpp;
+                size_t a_off = ((size_t)src_y * aw + src_x) * abpp;
                 alpha = ud->alpha_pixels[a_off];
             }
 
             /* 写入三 buffer：idx 不查表，调色延后到 RenderFrameToSurface / Composite */
-            Uint32 dst_off = y * f->sw + x;
+            size_t dst_off = (size_t)y * f->sw + x;
             idx_buf[dst_off]   = pal_idx;
             alpha_buf[dst_off] = alpha;
             Uint32 depth_val = (Uint32)depth_hi * 257u + depth_lo;
@@ -546,17 +332,6 @@ static int JY_DecodeFrame(
     *out_w     = (Uint16)f->sw;
     *out_h     = (Uint16)f->sh;
     return 1;
-}
-
-static int JY_DecodeFrameProfiled(
-    JY_UserData* ud, Uint32 id,
-    Uint8** out_idx, Uint8** out_alpha, Uint16** out_depth,
-    Uint16* out_w, Uint16* out_h)
-{
-    Uint64 start_us = JY_NowUS();
-    int ok = JY_DecodeFrame(ud, id, out_idx, out_alpha, out_depth, out_w, out_h);
-    JY_RecordDecode(JY_NowUS() - start_us);
-    return ok;
 }
 
 /* ═══════════════════════════════════════════
@@ -619,27 +394,14 @@ static SDL_Surface* JY_RenderFrameToSurface(
  * ═══════════════════════════════════════════ */
 
 /* 释放单条 cache entry 的 R8 三 buffer（不清 frame_id/lru_tick，留给 Insert 覆盖） */
-static Uint64 JY_CacheEntryFree(JY_CacheEntry* e)
+static void JY_CacheEntryFree(JY_CacheEntry* e)
 {
-    Uint64 bytes;
-    if (!e) return 0;
-    bytes = JY_CacheEntryBytes(e);
+    if (!e) return;
     if (e->idx_pixels)   { SDL_free(e->idx_pixels);   e->idx_pixels = NULL; }
     if (e->alpha_pixels) { SDL_free(e->alpha_pixels); e->alpha_pixels = NULL; }
     if (e->depth)        { SDL_free(e->depth);        e->depth = NULL; }
     e->w = 0;
     e->h = 0;
-    if (bytes)
-    {
-        JY_PerfEnsure();
-        if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-        if (g_jy_perf.cache_bytes >= bytes)
-            g_jy_perf.cache_bytes -= bytes;
-        else
-            g_jy_perf.cache_bytes = 0;
-        if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-    }
-    return bytes;
 }
 
 static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id)
@@ -653,17 +415,9 @@ static JY_CacheEntry* JY_CacheLookup(JY_UserData* ud, Uint32 frame_id)
         if (e->idx_pixels && e->frame_id == frame_id)
         {
             e->lru_tick = ++ud->cache_tick;
-            JY_PerfEnsure();
-            if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-            g_jy_perf.cache_hits++;
-            if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
             return e;
         }
     }
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    g_jy_perf.cache_misses++;
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
     return NULL;
 }
 
@@ -695,13 +449,6 @@ static void JY_CacheInsert(
     }
 
     JY_CacheEntry* e = &ud->cache[victim];
-    if (e->idx_pixels)
-    {
-        JY_PerfEnsure();
-        if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-        g_jy_perf.lru_evictions++;
-        if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-    }
     JY_CacheEntryFree(e);
 
     e->idx_pixels   = idx;
@@ -711,277 +458,14 @@ static void JY_CacheInsert(
     e->h            = h;
     e->frame_id     = frame_id;
     e->lru_tick     = ++ud->cache_tick;
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    g_jy_perf.cache_bytes += (Uint64)w * (Uint64)h
-        + (alpha ? (Uint64)w * (Uint64)h : 0)
-        + (depth ? (Uint64)w * (Uint64)h * sizeof(Uint16) : 0);
-    g_jy_perf.decoded_frames++;
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
 }
 
 static void JY_CacheClear(JY_UserData* ud)
 {
-    Uint64 freed = 0;
     if (!ud->cache)
         return;
     for (Uint32 i = 0; i < ud->cache_cap; i++)
-        freed += JY_CacheEntryFree(&ud->cache[i]);
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    g_jy_perf.cache_clear_count++;
-    g_jy_perf.cache_clear_freed_bytes += freed;
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-}
-
-static void JY_AsyncJobFree(JY_AsyncJob* job)
-{
-    if (!job) return;
-    JY_FreeR8Triple(job->idx_pixels, job->alpha_pixels, job->depth);
-    SDL_free(job);
-}
-
-static void JY_AsyncJobListFree(JY_AsyncJob* job)
-{
-    while (job)
-    {
-        JY_AsyncJob* next = job->next;
-        job->next = NULL;
-        JY_AsyncJobFree(job);
-        job = next;
-    }
-}
-
-static int JY_AsyncQueueHasFrame(JY_UserData* ud, Uint32 frame_id)
-{
-    JY_AsyncJob* p;
-    if (ud->async_active && ud->async_active_frame == frame_id
-        && ud->async_active_generation == ud->async_generation)
-        return 1;
-    for (p = ud->async_queue_head; p; p = p->next)
-    {
-        if (p->frame_id == frame_id && p->generation == ud->async_generation)
-            return 1;
-    }
-    for (p = ud->async_done_head; p; p = p->next)
-    {
-        if (p->frame_id == frame_id && p->generation == ud->async_generation)
-            return 1;
-    }
-    return 0;
-}
-
-static int JY_AsyncWorker(void* ptr)
-{
-    JY_UserData* ud = (JY_UserData*)ptr;
-    for (;;)
-    {
-        JY_AsyncJob* job = NULL;
-        SDL_LockMutex(ud->async_mutex);
-        while (!ud->async_stop && !ud->async_queue_head)
-            SDL_CondWait(ud->async_cond, ud->async_mutex);
-
-        if (ud->async_stop)
-        {
-            JY_AsyncJob* discard = ud->async_queue_head;
-            ud->async_queue_head = ud->async_queue_tail = NULL;
-            ud->async_cancelled += ud->async_queued;
-            ud->async_queued = 0;
-            SDL_UnlockMutex(ud->async_mutex);
-            JY_AsyncJobListFree(discard);
-            break;
-        }
-
-        job = ud->async_queue_head;
-        if (job)
-        {
-            ud->async_queue_head = job->next;
-            if (!ud->async_queue_head)
-                ud->async_queue_tail = NULL;
-            job->next = NULL;
-            ud->async_active = 1;
-            ud->async_active_frame = job->frame_id;
-            ud->async_active_generation = job->generation;
-            if (ud->async_queued > 0)
-                ud->async_queued--;
-        }
-        SDL_UnlockMutex(ud->async_mutex);
-
-        if (!job)
-            continue;
-
-        job->ok = JY_DecodeFrameProfiled(ud, job->frame_id,
-                                 &job->idx_pixels, &job->alpha_pixels, &job->depth,
-                                 &job->w, &job->h);
-
-        SDL_LockMutex(ud->async_mutex);
-        ud->async_active = 0;
-        ud->async_active_frame = 0;
-        ud->async_active_generation = 0;
-        if (ud->async_stop || job->generation != ud->async_generation)
-        {
-            ud->async_cancelled++;
-            SDL_UnlockMutex(ud->async_mutex);
-            JY_AsyncJobFree(job);
-            continue;
-        }
-
-        if (job->ok)
-            ud->async_decoded++;
-        else
-            ud->async_failed++;
-        if (ud->async_done_tail)
-            ud->async_done_tail->next = job;
-        else
-            ud->async_done_head = job;
-        ud->async_done_tail = job;
-        ud->async_ready++;
-        SDL_UnlockMutex(ud->async_mutex);
-    }
-    return 0;
-}
-
-static int JY_AsyncEnsure(JY_UserData* ud)
-{
-    if (!ud)
-        return 0;
-    if (!ud->async_mutex)
-    {
-        ud->async_mutex = SDL_CreateMutex();
-        if (!ud->async_mutex)
-            return 0;
-    }
-    if (!ud->async_cond)
-    {
-        ud->async_cond = SDL_CreateCond();
-        if (!ud->async_cond)
-        {
-            if (ud->async_mutex)
-            {
-                SDL_DestroyMutex(ud->async_mutex);
-                ud->async_mutex = NULL;
-            }
-            return 0;
-        }
-    }
-    if (!ud->async_thread)
-    {
-        ud->async_stop = 0;
-        ud->async_thread = SDL_CreateThread(JY_AsyncWorker, "jy_decode", ud);
-        if (!ud->async_thread)
-        {
-            if (ud->async_cond)
-            {
-                SDL_DestroyCond(ud->async_cond);
-                ud->async_cond = NULL;
-            }
-            if (ud->async_mutex)
-            {
-                SDL_DestroyMutex(ud->async_mutex);
-                ud->async_mutex = NULL;
-            }
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static void JY_AsyncCancelPending(JY_UserData* ud, int bump_generation)
-{
-    JY_AsyncJob *queue = NULL, *done = NULL;
-    if (!ud || !ud->async_mutex)
-        return;
-    SDL_LockMutex(ud->async_mutex);
-    if (bump_generation)
-        ud->async_generation++;
-    queue = ud->async_queue_head;
-    done = ud->async_done_head;
-    ud->async_queue_head = ud->async_queue_tail = NULL;
-    ud->async_done_head = ud->async_done_tail = NULL;
-    if (!ud->async_active)
-    {
-        ud->async_active_frame = 0;
-        ud->async_active_generation = 0;
-    }
-    ud->async_cancelled += ud->async_queued + ud->async_ready;
-    ud->async_queued = 0;
-    ud->async_ready = 0;
-    SDL_UnlockMutex(ud->async_mutex);
-    JY_AsyncJobListFree(queue);
-    JY_AsyncJobListFree(done);
-}
-
-static void JY_AsyncShutdown(JY_UserData* ud)
-{
-    if (!ud)
-        return;
-    if (ud->async_mutex)
-    {
-        SDL_LockMutex(ud->async_mutex);
-        ud->async_stop = 1;
-        if (ud->async_cond)
-            SDL_CondSignal(ud->async_cond);
-        SDL_UnlockMutex(ud->async_mutex);
-    }
-    if (ud->async_thread)
-    {
-        SDL_WaitThread(ud->async_thread, NULL);
-        ud->async_thread = NULL;
-    }
-    JY_AsyncCancelPending(ud, 1);
-    if (ud->async_cond)
-    {
-        SDL_DestroyCond(ud->async_cond);
-        ud->async_cond = NULL;
-    }
-    if (ud->async_mutex)
-    {
-        SDL_DestroyMutex(ud->async_mutex);
-        ud->async_mutex = NULL;
-    }
-}
-
-static int JY_AsyncPollDecoded(JY_UserData* ud, Uint32 limit)
-{
-    Uint32 processed = 0;
-    if (!ud || !ud->async_mutex)
-        return 0;
-
-    while (limit == 0 || processed < limit)
-    {
-        JY_AsyncJob* job = NULL;
-        SDL_LockMutex(ud->async_mutex);
-        job = ud->async_done_head;
-        if (job)
-        {
-            ud->async_done_head = job->next;
-            if (!ud->async_done_head)
-                ud->async_done_tail = NULL;
-            job->next = NULL;
-            if (ud->async_ready > 0)
-                ud->async_ready--;
-        }
-        SDL_UnlockMutex(ud->async_mutex);
-
-        if (!job)
-            break;
-
-        if (job->ok && job->generation == ud->async_generation && ud->cache)
-        {
-            if (!JY_CacheLookup(ud, job->frame_id))
-            {
-                JY_CacheInsert(ud, job->frame_id,
-                               job->idx_pixels, job->alpha_pixels, job->depth,
-                               job->w, job->h);
-                job->idx_pixels = NULL;
-                job->alpha_pixels = NULL;
-                job->depth = NULL;
-            }
-        }
-        JY_AsyncJobFree(job);
-        processed++;
-    }
-    return (int)processed;
+        JY_CacheEntryFree(&ud->cache[i]);
 }
 
 /* ═══════════════════════════════════════════
@@ -1058,7 +542,6 @@ static int JY_GetFrame(lua_State* L)
 
     Uint32 id = (Uint32)idx;
     JY_FrameInfo* f = &ud->frames[id];
-    JY_AsyncPollDecoded(ud, 4);
 
     /* ─── Cache 命中：按当前 pal[] 实时反查生成 ARGB8888 surface ───
      * R8 优化的核心：cache 内只存 idx + alpha + depth，不存 ARGB
@@ -1079,7 +562,7 @@ static int JY_GetFrame(lua_State* L)
     Uint8 *idx_buf = NULL, *alpha_buf = NULL;
     Uint16* depth_buf = NULL;
     Uint16 w = 0, h = 0;
-    if (!JY_DecodeFrameProfiled(ud, id, &idx_buf, &alpha_buf, &depth_buf, &w, &h))
+    if (!JY_DecodeFrame(ud, id, &idx_buf, &alpha_buf, &depth_buf, &w, &h))
         return 0;
 
     SDL_Surface* sf = JY_RenderFrameToSurface(ud, idx_buf, alpha_buf, w, h);
@@ -1100,84 +583,6 @@ static int JY_GetFrame(lua_State* L)
     }
 
     return JY_PushFrame(L, sf, f);
-}
-
-static int JY_GetFrameReady(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    lua_Integer idx = luaL_checkinteger(L, 2);
-    if (idx < 0 || (Uint32)idx >= ud->frame_count)
-        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
-
-    Uint32 id = (Uint32)idx;
-    JY_FrameInfo* f = &ud->frames[id];
-    JY_AsyncPollDecoded(ud, 4);
-
-    if (ud->cache)
-    {
-        JY_CacheEntry* hit = JY_CacheLookup(ud, id);
-        if (hit && hit->idx_pixels)
-        {
-            SDL_Surface* sf = JY_RenderFrameToSurface(
-                ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
-            if (sf)
-                return JY_PushFrame(L, sf, f);
-        }
-    }
-    return 0;
-}
-
-static int JY_GetFrameTexture(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    SDL_Renderer** rdud = (SDL_Renderer**)luaL_checkudata(L, 2, "SDL_Renderer");
-    lua_Integer idx = luaL_checkinteger(L, 3);
-    if (idx < 0 || (Uint32)idx >= ud->frame_count)
-        return luaL_error(L, "JY frame index out of range: %d (max %d)", (int)idx, (int)ud->frame_count);
-    if (!rdud || !*rdud)
-        return 0;
-
-    Uint32 id = (Uint32)idx;
-    JY_FrameInfo* f = &ud->frames[id];
-    JY_AsyncPollDecoded(ud, 4);
-
-    if (!ud->cache)
-        return 0;
-    JY_CacheEntry* hit = JY_CacheLookup(ud, id);
-    if (!hit || !hit->idx_pixels)
-        return 0;
-
-    SDL_Surface* sf = JY_RenderFrameToSurface(ud, hit->idx_pixels, hit->alpha_pixels, hit->w, hit->h);
-    if (!sf)
-        return 0;
-
-    Uint64 start_us = JY_NowUS();
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(*rdud, sf);
-    if (!tex)
-    {
-        SDL_FreeSurface(sf);
-        return 0;
-    }
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    JY_RecordUpload(JY_NowUS() - start_us);
-
-    if (!JY_PushTexture(L, tex, sf))
-    {
-        SDL_FreeSurface(sf);
-        return 0;
-    }
-
-    SDL_FreeSurface(sf);
-    lua_createtable(L, 0, 4);
-    lua_pushinteger(L, (lua_Integer)f->sh);
-    lua_setfield(L, -2, "height");
-    lua_pushinteger(L, (lua_Integer)f->sw);
-    lua_setfield(L, -2, "width");
-    lua_pushinteger(L, (lua_Integer)f->key_x);
-    lua_setfield(L, -2, "x");
-    lua_pushinteger(L, (lua_Integer)f->key_y);
-    lua_setfield(L, -2, "y");
-    return 2;
 }
 
 static int JY_GetFrameInfo(lua_State* L)
@@ -1341,7 +746,7 @@ static int JY_Prefetch(lua_State* L)
         Uint8 *idx = NULL, *alpha = NULL;
         Uint16* depth = NULL;
         Uint16 w = 0, h = 0;
-        if (JY_DecodeFrameProfiled(ud, id, &idx, &alpha, &depth, &w, &h))
+        if (JY_DecodeFrame(ud, id, &idx, &alpha, &depth, &w, &h))
         {
             if (ud->cache)
                 JY_CacheInsert(ud, id, idx, alpha, depth, w, h);
@@ -1351,195 +756,6 @@ static int JY_Prefetch(lua_State* L)
     }
 
     return 0;
-}
-
-static int JY_RequestFrame(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    lua_Integer idx = luaL_checkinteger(L, 2);
-    if (idx < 0 || (Uint32)idx >= ud->frame_count)
-    {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "frame index out of range");
-        return 2;
-    }
-
-    Uint32 id = (Uint32)idx;
-    JY_AsyncPollDecoded(ud, 4);
-    if (JY_CacheLookup(ud, id))
-    {
-        lua_pushboolean(L, 1);
-        lua_pushstring(L, "ready");
-        return 2;
-    }
-
-    if (!JY_AsyncEnsure(ud))
-    {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "async init failed");
-        return 2;
-    }
-
-    SDL_LockMutex(ud->async_mutex);
-    if (JY_AsyncQueueHasFrame(ud, id))
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "pending");
-        return 2;
-    }
-    if (ud->async_queued >= 128)
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "queue full");
-        return 2;
-    }
-
-    JY_AsyncJob* job = (JY_AsyncJob*)SDL_calloc(1, sizeof(JY_AsyncJob));
-    if (!job)
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "out of memory");
-        return 2;
-    }
-    job->frame_id = id;
-    job->generation = ud->async_generation;
-    if (ud->async_queue_tail)
-        ud->async_queue_tail->next = job;
-    else
-        ud->async_queue_head = job;
-    ud->async_queue_tail = job;
-    ud->async_queued++;
-    ud->async_submitted++;
-    SDL_CondSignal(ud->async_cond);
-    SDL_UnlockMutex(ud->async_mutex);
-
-    lua_pushboolean(L, 0);
-    lua_pushstring(L, "queued");
-    return 2;
-}
-
-int JY_NativePollAsync(JY_UserData* ud, Uint32 limit)
-{
-    return JY_AsyncPollDecoded(ud, limit);
-}
-
-int JY_NativeIsFrameDecoded(JY_UserData* ud, Uint32 id)
-{
-    if (!ud || id >= ud->frame_count)
-        return 0;
-    JY_AsyncPollDecoded(ud, 4);
-    return JY_CacheLookup(ud, id) != NULL;
-}
-
-int JY_NativeRequestFrame(JY_UserData* ud, Uint32 id, const char** status)
-{
-    JY_AsyncJob* job;
-
-    if (status) *status = "error";
-    if (!ud || id >= ud->frame_count)
-    {
-        if (status) *status = "frame index out of range";
-        return MYGXY_ASYNC_FRAME_ERROR;
-    }
-
-    JY_AsyncPollDecoded(ud, 4);
-    if (JY_CacheLookup(ud, id))
-    {
-        if (status) *status = "ready";
-        return MYGXY_ASYNC_FRAME_READY;
-    }
-
-    if (!JY_AsyncEnsure(ud))
-    {
-        if (status) *status = "async init failed";
-        return MYGXY_ASYNC_FRAME_ERROR;
-    }
-
-    SDL_LockMutex(ud->async_mutex);
-    if (JY_AsyncQueueHasFrame(ud, id))
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        if (status) *status = "pending";
-        return MYGXY_ASYNC_FRAME_PENDING;
-    }
-    if (ud->async_queued >= 128)
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        if (status) *status = "queue full";
-        return MYGXY_ASYNC_FRAME_QUEUE_FULL;
-    }
-
-    job = (JY_AsyncJob*)SDL_calloc(1, sizeof(JY_AsyncJob));
-    if (!job)
-    {
-        SDL_UnlockMutex(ud->async_mutex);
-        if (status) *status = "out of memory";
-        return MYGXY_ASYNC_FRAME_ERROR;
-    }
-    job->frame_id = id;
-    job->generation = ud->async_generation;
-    if (ud->async_queue_tail)
-        ud->async_queue_tail->next = job;
-    else
-        ud->async_queue_head = job;
-    ud->async_queue_tail = job;
-    ud->async_queued++;
-    ud->async_submitted++;
-    SDL_CondSignal(ud->async_cond);
-    SDL_UnlockMutex(ud->async_mutex);
-
-    if (status) *status = "queued";
-    return MYGXY_ASYNC_FRAME_QUEUED;
-}
-
-static int JY_PollAsync(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    Uint32 limit = (Uint32)luaL_optinteger(L, 2, 8);
-    lua_pushinteger(L, (lua_Integer)JY_AsyncPollDecoded(ud, limit));
-    return 1;
-}
-
-static int JY_IsFrameDecoded(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    lua_Integer idx = luaL_checkinteger(L, 2);
-    if (idx < 0 || (Uint32)idx >= ud->frame_count)
-    {
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-    JY_AsyncPollDecoded(ud, 4);
-    lua_pushboolean(L, JY_CacheLookup(ud, (Uint32)idx) != NULL);
-    return 1;
-}
-
-static int JY_AsyncStats(lua_State* L)
-{
-    JY_UserData* ud = JY_Check(L, 1);
-    if (ud)
-        JY_AsyncPollDecoded(ud, 0);
-    lua_createtable(L, 0, 8);
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_queued : 0));
-    lua_setfield(L, -2, "queued");
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_ready : 0));
-    lua_setfield(L, -2, "ready");
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_submitted : 0));
-    lua_setfield(L, -2, "submitted");
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_decoded : 0));
-    lua_setfield(L, -2, "decoded");
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_failed : 0));
-    lua_setfield(L, -2, "failed");
-    lua_pushinteger(L, (lua_Integer)(ud ? ud->async_cancelled : 0));
-    lua_setfield(L, -2, "cancelled");
-    lua_pushboolean(L, ud && ud->async_thread != NULL);
-    lua_setfield(L, -2, "worker");
-    lua_pushboolean(L, 1);
-    lua_setfield(L, -2, "native_decode");
-    return 1;
 }
 
 /* ═══════════════════════════════════════════
@@ -1553,10 +769,7 @@ static int JY_LUA_CacheClear(lua_State* L)
 {
     JY_UserData* ud = JY_Check(L, 1);
     if (ud)
-    {
-        JY_AsyncCancelPending(ud, 1);
         JY_CacheClear(ud);
-    }
     return 0;
 }
 
@@ -1757,7 +970,7 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
             Uint8 *decode_idx = NULL, *decode_alpha = NULL;
             Uint16* decode_depth = NULL;
             Uint16 dw = 0, dh = 0;
-            if (!JY_DecodeFrameProfiled(layer_ud, frame_id,
+            if (!JY_DecodeFrame(layer_ud, frame_id,
                                 &decode_idx, &decode_alpha, &decode_depth, &dw, &dh))
                 continue;
 
@@ -2128,7 +1341,6 @@ static int JY_CompositeTo(lua_State* L)
  * ═══════════════════════════════════════════ */
 static void JY_Reset(JY_UserData* ud)
 {
-    JY_AsyncShutdown(ud);
     JY_CacheClear(ud);
 
     if (ud->cache)
@@ -2177,8 +1389,9 @@ static int JY_GC(lua_State* L)
  * ═══════════════════════════════════════════ */
 static SDL_Surface* JY_LoadPNG(const char* data, size_t len)
 {
-    /* SDL_RWFromMem takes void* — cast away const; we only read. */
-    SDL_RWops* rw = SDL_RWFromMem((void*)data, (int)len);
+    if (!data || len == 0 || len > INT_MAX)
+        return NULL;
+    SDL_RWops* rw = SDL_RWFromConstMem(data, (int)len);
     if (!rw)
         return NULL;
     SDL_Surface* sf = IMG_Load_RW(rw, 1); /* 1 = close RW */
@@ -2191,7 +1404,7 @@ static SDL_Surface* JY_LoadPNG(const char* data, size_t len)
  * This avoids platform-dependent BGR byte order issues on Windows. */
 static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Uint32* out_bpp)
 {
-    if (!sf)
+    if (!sf || !sf->format || !out_w || !out_h || !out_bpp)
         return NULL;
 
     /* For 3+ bpp surfaces, normalize to RGB24 to guarantee R,G,B byte order */
@@ -2211,11 +1424,29 @@ static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Ui
         /* If conversion fails, fall through to use original surface */
     }
 
-    *out_w = (Uint32)src->w;
-    *out_h = (Uint32)src->h;
-    *out_bpp = (Uint32)src->format->BytesPerPixel;
+    const int bytes_per_pixel = src->format ? src->format->BytesPerPixel : 0;
+    if (!src->pixels || src->w <= 0 || src->h <= 0 || src->w > 16384 || src->h > 16384
+        || bytes_per_pixel <= 0 || src->pitch <= 0
+        || (size_t)src->w > SIZE_MAX / (size_t)src->h)
+    {
+        if (conv) SDL_FreeSurface(conv);
+        return NULL;
+    }
 
-    size_t total = (size_t)src->w * (size_t)src->h * (size_t)src->format->BytesPerPixel;
+    const size_t pixel_count = (size_t)src->w * (size_t)src->h;
+    if (pixel_count > SIZE_MAX / (size_t)bytes_per_pixel)
+    {
+        if (conv) SDL_FreeSurface(conv);
+        return NULL;
+    }
+    const size_t row_bytes = (size_t)src->w * (size_t)bytes_per_pixel;
+    if (row_bytes > (size_t)src->pitch)
+    {
+        if (conv) SDL_FreeSurface(conv);
+        return NULL;
+    }
+
+    const size_t total = pixel_count * (size_t)bytes_per_pixel;
     Uint8* pixels = (Uint8*)SDL_malloc(total);
     if (!pixels)
     {
@@ -2223,21 +1454,27 @@ static Uint8* JY_ExtractPixels(SDL_Surface* sf, Uint32* out_w, Uint32* out_h, Ui
         return NULL;
     }
 
-    if (SDL_MUSTLOCK(src))
-        SDL_LockSurface(src);
+    if (SDL_MUSTLOCK(src) && SDL_LockSurface(src) != 0)
+    {
+        SDL_free(pixels);
+        if (conv) SDL_FreeSurface(conv);
+        return NULL;
+    }
 
     /* Copy row by row to handle pitch */
-    Uint32 row_bytes = (Uint32)src->w * src->format->BytesPerPixel;
     for (int y = 0; y < src->h; y++)
     {
-        SDL_memcpy(pixels + y * row_bytes,
-                   (Uint8*)src->pixels + y * src->pitch,
+        SDL_memcpy(pixels + (size_t)y * row_bytes,
+                   (Uint8*)src->pixels + (size_t)y * (size_t)src->pitch,
                    row_bytes);
     }
 
     if (SDL_MUSTLOCK(src))
         SDL_UnlockSurface(src);
 
+    *out_w = (Uint32)src->w;
+    *out_h = (Uint32)src->h;
+    *out_bpp = (Uint32)bytes_per_pixel;
     if (conv)
         SDL_FreeSurface(conv);
 
@@ -2258,6 +1495,8 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
 {
     /* ─── FTEN header: tag(4) + version(4) + filesize(4) + hash(4) = 16B ─── */
     Uint32 extra = 16;
+    if (len > UINT32_MAX)
+        return luaL_error(L, "JY-SPR: input too large");
     const Uint8* inner = data + extra;
     Uint32 innerLen = (Uint32)(len - extra);
     if (innerLen < 16)
@@ -2274,9 +1513,13 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     Sint16 ky = *(const Sint16*)(inner + off); off += 2;
     Uint16 image_res_nums = *(const Uint16*)(inner + off); off += 2;
 
-    Uint32 total_frames = (Uint32)dir_cnt * (Uint32)frame_cnt;
-    Uint32 frames_size = total_frames * 14;
-    if (off + frames_size + 4 > innerLen)
+    const size_t total_frames_size = (size_t)dir_cnt * (size_t)frame_cnt;
+    if (dir_cnt == 0 || frame_cnt == 0 || total_frames_size > 65536
+        || total_frames_size > SIZE_MAX / 14)
+        return luaL_error(L, "JY-SPR: invalid frame count");
+    Uint32 total_frames = (Uint32)total_frames_size;
+    size_t frames_size = total_frames_size * 14;
+    if ((size_t)off > innerLen || frames_size + 4 > (size_t)innerLen - off)
         return luaL_error(L, "JY-SPR: frame table overflow");
 
     /* ─── Parse frame entries (14B each) ─── */
@@ -2301,7 +1544,7 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     off += 4; /* sprtype */
 
     /* ─── Image offset table (8B each) ─── */
-    if (off + (Uint32)image_res_nums * 8 > innerLen)
+    if ((size_t)off > innerLen || (size_t)image_res_nums * 8 > (size_t)innerLen - off)
     {
         SDL_free(spr_frames);
         return luaL_error(L, "JY-SPR: offset table overflow");
@@ -2320,8 +1563,10 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         const Uint8* op = inner + off;
         Sint32 img_off = *(const Sint32*)(op + 0);
         Sint32 img_len = *(const Sint32*)(op + 4);
-        img_entries[i].offset = (Uint32)(img_off + (Sint32)extra);
-        img_entries[i].length = (Uint32)img_len;
+        const int64_t absolute_off = (int64_t)img_off + (int64_t)extra;
+        img_entries[i].offset = absolute_off >= 0 && absolute_off <= UINT32_MAX
+            ? (Uint32)absolute_off : UINT32_MAX;
+        img_entries[i].length = img_len > 0 ? (Uint32)img_len : 0;
         off += 8;
     }
 
@@ -2337,13 +1582,20 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
     Uint32 max_w = 0;
     Uint32 total_h = 0;
     Uint32* y_offsets = (Uint32*)SDL_calloc(image_res_nums, sizeof(Uint32));
+    if (!y_offsets)
+    {
+        SDL_free(png_surfaces);
+        SDL_free(img_entries);
+        SDL_free(spr_frames);
+        return luaL_error(L, "JY-SPR: out of memory");
+    }
 
     for (Uint32 i = 0; i < image_res_nums; i++)
     {
         Uint32 ofs = img_entries[i].offset;
         Uint32 blen = img_entries[i].length;
 
-        if (ofs >= (Uint32)len || blen == 0 || ofs + blen > (Uint32)len)
+        if ((size_t)ofs >= len || blen == 0 || (size_t)blen > len - ofs)
             continue;
 
         /* Search for PNG signature (89 50 4E 47) or WebP/RIFF signature (52 49 46 46) */
@@ -2374,7 +1626,8 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
         if (!img_start)
             continue;
 
-        SDL_RWops* rw = SDL_RWFromMem((void*)img_start, (int)img_blen);
+        SDL_RWops* rw = img_blen <= INT_MAX
+            ? SDL_RWFromMem((void*)img_start, (int)img_blen) : NULL;
         if (rw)
         {
             png_surfaces[i] = IMG_Load_RW(rw, 1);
@@ -2382,6 +1635,15 @@ static int JY_CreateFromSPR(lua_State* L, const Uint8* data, size_t len)
 
         if (png_surfaces[i])
         {
+            if (png_surfaces[i]->w <= 0 || png_surfaces[i]->h <= 0
+                || png_surfaces[i]->w > 16384 || png_surfaces[i]->h > 16384
+                || (Uint32)png_surfaces[i]->h > UINT32_MAX - total_h
+                || total_h + (Uint32)png_surfaces[i]->h > 16384)
+            {
+                SDL_FreeSurface(png_surfaces[i]);
+                png_surfaces[i] = NULL;
+                continue;
+            }
             y_offsets[i] = total_h;
             if ((Uint32)png_surfaces[i]->w > max_w)
                 max_w = (Uint32)png_surfaces[i]->w;
@@ -2894,11 +2156,15 @@ static int JY_NEW(lua_State* L)
          * → create a fully opaque alpha buffer. */
         Uint32 aw = (Uint32)idx_sf->w;
         Uint32 ah = (Uint32)idx_sf->h;
-        ud->alpha_pixels = (Uint8*)SDL_malloc(aw * ah);
+        if (ah > 0 && (size_t)aw > SIZE_MAX / (size_t)ah) {
+            SDL_FreeSurface(idx_sf);
+            return luaL_error(L, "JY: alpha atlas size overflow");
+        }
+        ud->alpha_pixels = (Uint8*)SDL_malloc((size_t)aw * ah);
         ud->alpha_bpp = 1;
         aw2 = aw; ah2 = ah;
         if (ud->alpha_pixels)
-            SDL_memset(ud->alpha_pixels, 255, aw * ah);
+            SDL_memset(ud->alpha_pixels, 255, (size_t)aw * ah);
     }
 
     /* Extract pixels */
@@ -2937,12 +2203,19 @@ static int JY_NEW(lua_State* L)
 
     /* ─── Parse global info from frames table (arg 4) ─── */
     lua_getfield(L, frames_arg_idx, "group");
-    ud->group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
+    lua_Integer group_value = lua_isnil(L, -1) ? 1 : lua_tointeger(L, -1);
     lua_pop(L, 1);
 
     lua_getfield(L, frames_arg_idx, "frame");
-    ud->frame_per_group = lua_isnil(L, -1) ? 1 : (Uint32)lua_tointeger(L, -1);
+    lua_Integer frame_value = lua_isnil(L, -1) ? 1 : lua_tointeger(L, -1);
     lua_pop(L, 1);
+
+    if (group_value <= 0 || frame_value <= 0
+        || group_value > 65536 || frame_value > 65536
+        || (size_t)group_value > 65536u / (size_t)frame_value)
+        return luaL_error(L, "JY: invalid group/frame count");
+    ud->group = (Uint32)group_value;
+    ud->frame_per_group = (Uint32)frame_value;
 
     lua_getfield(L, frames_arg_idx, "width");
     ud->width = lua_isnil(L, -1) ? 0 : (Uint16)lua_tointeger(L, -1);
@@ -2960,7 +2233,7 @@ static int JY_NEW(lua_State* L)
     ud->global_y = lua_isnil(L, -1) ? 0 : (Sint16)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    Uint32 total_expected_frames = ud->group * ud->frame_per_group;
+    Uint32 total_expected_frames = (Uint32)((size_t)ud->group * ud->frame_per_group);
 
     /* Arg 6: optional depth frames table (independent depth atlas coordinates) */
     if (lua_type(L, 6) == LUA_TTABLE)
@@ -3084,6 +2357,16 @@ static int JY_NEW(lua_State* L)
             f->sh = lua_isnil(L, -1) ? 0 : (Uint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
 
+            if (f->sw == 0 || f->sh == 0
+                || f->sw > UINT16_MAX || f->sh > UINT16_MAX
+                || f->sx > ud->atlas_w || f->sy > ud->atlas_h
+                || f->sw > ud->atlas_w - f->sx
+                || f->sh > ud->atlas_h - f->sy)
+            {
+                lua_pop(L, 1);
+                return luaL_error(L, "JY: frame %d is outside atlas", (int)(i + 1));
+            }
+
             lua_getfield(L, -1, "key_x");
             f->key_x = lua_isnil(L, -1) ? 0 : (Sint32)lua_tointeger(L, -1);
             lua_pop(L, 1);
@@ -3161,98 +2444,10 @@ static int JY_NEW(lua_State* L)
  * ═══════════════════════════════════════════ */
 static int JY_Open(lua_State* L)
 {
-    JY_PerfEnsure();
     JY_EnsureSDLSurfaceMetatable(L);
     JY_RegisterMetatable(L);
     lua_pushcfunction(L, JY_NEW);
     return 1;
-}
-
-void JY_PushPerfStats(lua_State* L)
-{
-    JY_PerfStats snap;
-    Uint32 decode_samples[JY_PERF_SAMPLE_CAP];
-    Uint32 upload_samples[JY_PERF_SAMPLE_CAP];
-    Uint32 decode_p95;
-    Uint32 decode_p99;
-    Uint32 upload_p95;
-    Uint32 upload_p99;
-
-    SDL_memset(&snap, 0, sizeof(snap));
-    JY_PerfEnsure();
-    if (g_jy_perf.mutex) SDL_LockMutex(g_jy_perf.mutex);
-    snap = g_jy_perf;
-    if (snap.decode_us.sample_count > 0)
-        SDL_memcpy(decode_samples, g_jy_perf.decode_us.samples, sizeof(Uint32) * (size_t)snap.decode_us.sample_count);
-    if (snap.upload_us.sample_count > 0)
-        SDL_memcpy(upload_samples, g_jy_perf.upload_us.samples, sizeof(Uint32) * (size_t)snap.upload_us.sample_count);
-    if (g_jy_perf.mutex) SDL_UnlockMutex(g_jy_perf.mutex);
-
-    decode_p95 = JY_Percentile(decode_samples, snap.decode_us.sample_count, 95);
-    decode_p99 = JY_Percentile(decode_samples, snap.decode_us.sample_count, 99);
-    upload_p95 = JY_Percentile(upload_samples, snap.upload_us.sample_count, 95);
-    upload_p99 = JY_Percentile(upload_samples, snap.upload_us.sample_count, 99);
-
-    lua_createtable(L, 0, 3);
-
-    lua_createtable(L, 0, 9);
-    lua_pushinteger(L, (lua_Integer)snap.decode_us.count);
-    lua_setfield(L, -2, "count");
-    lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
-    lua_setfield(L, -2, "total");
-    lua_pushinteger(L, (lua_Integer)snap.decode_us.total_us);
-    lua_setfield(L, -2, "total_us");
-    lua_pushinteger(L, (lua_Integer)decode_p95);
-    lua_setfield(L, -2, "p95");
-    lua_pushinteger(L, (lua_Integer)decode_p95);
-    lua_setfield(L, -2, "p95_us");
-    lua_pushinteger(L, (lua_Integer)decode_p99);
-    lua_setfield(L, -2, "p99");
-    lua_pushinteger(L, (lua_Integer)decode_p99);
-    lua_setfield(L, -2, "p99_us");
-    lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
-    lua_setfield(L, -2, "samples");
-    lua_pushinteger(L, (lua_Integer)snap.decode_us.sample_count);
-    lua_setfield(L, -2, "sample_count");
-    lua_setfield(L, -2, "decode_us");
-
-    lua_createtable(L, 0, 9);
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.count);
-    lua_setfield(L, -2, "count");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
-    lua_setfield(L, -2, "total");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.total_us);
-    lua_setfield(L, -2, "total_us");
-    lua_pushinteger(L, (lua_Integer)upload_p95);
-    lua_setfield(L, -2, "p95");
-    lua_pushinteger(L, (lua_Integer)upload_p95);
-    lua_setfield(L, -2, "p95_us");
-    lua_pushinteger(L, (lua_Integer)upload_p99);
-    lua_setfield(L, -2, "p99");
-    lua_pushinteger(L, (lua_Integer)upload_p99);
-    lua_setfield(L, -2, "p99_us");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
-    lua_setfield(L, -2, "samples");
-    lua_pushinteger(L, (lua_Integer)snap.upload_us.sample_count);
-    lua_setfield(L, -2, "sample_count");
-    lua_setfield(L, -2, "upload_us");
-
-    lua_createtable(L, 0, 7);
-    lua_pushinteger(L, (lua_Integer)snap.cache_bytes);
-    lua_setfield(L, -2, "bytes");
-    lua_pushinteger(L, (lua_Integer)snap.decoded_frames);
-    lua_setfield(L, -2, "decoded_frames");
-    lua_pushinteger(L, (lua_Integer)snap.cache_hits);
-    lua_setfield(L, -2, "hits");
-    lua_pushinteger(L, (lua_Integer)snap.cache_misses);
-    lua_setfield(L, -2, "misses");
-    lua_pushinteger(L, (lua_Integer)snap.lru_evictions);
-    lua_setfield(L, -2, "lru_evictions");
-    lua_pushinteger(L, (lua_Integer)snap.cache_clear_count);
-    lua_setfield(L, -2, "clear_count");
-    lua_pushinteger(L, (lua_Integer)snap.cache_clear_freed_bytes);
-    lua_setfield(L, -2, "clear_freed_bytes");
-    lua_setfield(L, -2, "cache");
 }
 
 MYGXY_API int luaopen_mygxy_jy(lua_State* L)
