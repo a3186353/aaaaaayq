@@ -1098,7 +1098,7 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
                 if (sa == 0)
                     continue;
 
-                Uint16 d = (sa < 77) ? 0 : (L_p->depth ? L_p->depth[loff] : 0);
+                Uint16 d = L_p->depth ? L_p->depth[loff] : 0;
                 Sint32 dep = (Sint32)d + L_p->z_total;
 
                 /* 调色板查表（带 indexOffset，对齐 JS shader）*/
