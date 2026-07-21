@@ -1665,9 +1665,13 @@ static std::string download_key_from_spec(lua_State* L, int index, std::string& 
     if (type == "palette") {
         int64_t id = 0;
         std::string palette_kind;
-        if (!download_read_spec_number(L, index, "id", id, 0, 1000000000)
-            || !download_read_string(L, index, "palette_kind", palette_kind, 32, true)
+        if (!download_read_string(L, index, "palette_kind", palette_kind, 32, true)
             || !download_valid_segment(palette_kind, 32)) {
+            error = "invalid palette key fields"; return std::string();
+        }
+        const int64_t max_id = palette_kind == "weapon_v5"
+            ? 1000001000000000LL : 1000000000LL;
+        if (!download_read_spec_number(L, index, "id", id, 0, max_id)) {
             error = "invalid palette key fields"; return std::string();
         }
         return download_md5_hex("pal:" + palette_kind + ':' + std::to_string(id));
@@ -1809,10 +1813,11 @@ static int l_download_cdn_key(lua_State* L)
 }
 
 static int l_download_new(lua_State* L) {
-    const char* url = luaL_checkstring(L, 1);
-    const char* filepath = luaL_optstring(L, 2, NULL);
-    const char* range = luaL_optstring(L, 3, NULL);
-    int timeout = (int)luaL_optinteger(L, 4, 60);
+    const int first = lua_istable(L, 1) ? 2 : 1;
+    const char* url = luaL_checkstring(L, first);
+    const char* filepath = luaL_optstring(L, first + 1, NULL);
+    const char* range = luaL_optstring(L, first + 2, NULL);
+    int timeout = (int)luaL_optinteger(L, first + 3, 60);
 
     LuaDownload* self = new LuaDownload();
     self->core->url = url;
