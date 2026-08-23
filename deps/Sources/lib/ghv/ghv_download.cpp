@@ -46,7 +46,8 @@
 
 #define GHV_DOWNLOAD_META "GHV_Download"
 
-#define GHV_DOWNLOAD_MAX_ACTIVE 6
+// 阶段4：worker 池 10 线程，喂满 Lua 层 PC=8 / 移动=5 的并发上限。
+#define GHV_DOWNLOAD_MAX_ACTIVE 10
 #define GHV_DOWNLOAD_QUEUE_CAP 128
 #define GHV_DOWNLOAD_STATUS_DOWNLOADING 1
 #define GHV_DOWNLOAD_STATUS_DONE 100
@@ -88,6 +89,8 @@ struct DownloadCoreState {
     bool                           candidate_mode{false};
     bool                           mirror_prefer{false};
     bool                           mirror_only{false};
+    // 阶段3：明文 http:// 降级默认关闭（spec 可显式开启）。
+    bool                           allow_plain_http{false};
     std::atomic<int>               attempt_status{0};
     std::vector<DownloadCandidate> candidates;
     DownloadCandidate              result;
@@ -98,7 +101,14 @@ struct DownloadCoreState {
     std::mutex           data_mutex;
 };
 
-static void download_do_download(std::shared_ptr<DownloadCoreState> state);
+struct DownloadReuseKey {
+    std::string host;
+    int         port{0};
+    bool        https{false};
+};
+
+static void download_do_download(std::shared_ptr<DownloadCoreState> state,
+    hv::HttpClient& client, DownloadReuseKey& reuse);
 static void download_clear_memory(std::shared_ptr<DownloadCoreState> state);
 static void download_clear_md5(const std::shared_ptr<DownloadCoreState>& state);
 static void download_remove_file(const std::string& filepath);
@@ -439,6 +449,54 @@ static std::string download_mirror_url(const std::string& url)
     return base + url.substr(slash);
 }
 
+// 阶段2：从 URL 提取 (host, port, https)，用于 worker 内连接复用的换宿判断。
+static void download_split_url_host(const std::string& url,
+    std::string& host, int& port, bool& https)
+{
+    https = url.rfind("https://", 0) == 0;
+    const size_t scheme_end = url.find("://");
+    const size_t host_begin = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    const size_t path_slash = url.find('/', host_begin);
+    std::string authority = url.substr(host_begin,
+        path_slash == std::string::npos ? std::string::npos : path_slash - host_begin);
+    const size_t at = authority.find('@');
+    if (at != std::string::npos) authority = authority.substr(at + 1);
+    port = https ? 443 : 80;
+    const bool ipv6 = !authority.empty() && authority.front() == '[';
+    const size_t colon = authority.rfind(':');
+    if (!ipv6 && colon != std::string::npos) {
+        host = authority.substr(0, colon);
+        const int parsed = atoi(authority.c_str() + colon + 1);
+        if (parsed > 0) port = parsed;
+    } else {
+        host = authority;
+    }
+}
+
+// 阶段3：part 链裁剪 cloudrender_full 的进程级默认值；环境变量
+// MYGXY_SPR_SKIP_RENDER_FULL=0 可整体恢复（覆盖 spec 缺省，供新旧 Lua 混布回退）。
+static bool download_default_skip_render_full()
+{
+    static const bool value = []() {
+        const char* raw = std::getenv("MYGXY_SPR_SKIP_RENDER_FULL");
+        return !(raw && (raw[0] == '0' || raw[0] == 'f' || raw[0] == 'F'));
+    }();
+    return value;
+}
+// 阶段2：连接超时与总超时分离。注意本 libhv 版本 HttpRequest::connect_timeout
+// 为 uint16_t、单位秒；默认 3 秒，环境变量 MYGXY_DOWNLOAD_CONNECT_TIMEOUT_S 可覆盖。
+static int download_connect_timeout_sec()
+{
+    static const int value = []() {
+        if (const char* raw = std::getenv("MYGXY_DOWNLOAD_CONNECT_TIMEOUT_S")) {
+            const long v = strtol(raw, nullptr, 10);
+            if (v >= 1 && v <= 30) return static_cast<int>(v);
+        }
+        return 3;
+    }();
+    return value;
+}
+
 static void download_reset_attempt(const std::shared_ptr<DownloadCoreState>& state)
 {
     if (!state) return;
@@ -477,7 +535,9 @@ static void download_add_candidate(
     }
     if (state->mirror_prefer && has_mirror) add(mirror);
     add(url);
-    if (url.compare(0, 8, "https://") == 0)
+    // 阶段3：明文 http:// 降级默认移除——禁明文环境下每档白烧一个超时；
+    // spec.allow_plain_http=true 时保留逃生门。
+    if (state->allow_plain_http && url.compare(0, 8, "https://") == 0)
         add("http://" + url.substr(8));
     if (!state->mirror_prefer && has_mirror) add(mirror);
 }
@@ -555,12 +615,16 @@ static bool download_build_spr_candidates(
 
     bool is_body = false, warride = false, disable_render = false;
     bool allow_direct = false;
+    // 阶段3：part 链默认裁剪会挂起的 cloudrender_full 档；spec/环境变量可显式恢复。
+    bool skip_render_full = download_default_skip_render_full();
     if (!download_read_boolean(L, index, "is_body", is_body)
         || !download_read_boolean(L, index, "warride_weapon", warride)
         || !download_read_boolean(L, index, "disable_render", disable_render)
         || !download_read_boolean(L, index, "allow_direct", allow_direct)
+        || !download_read_boolean(L, index, "skip_render_full", skip_render_full)
         || !download_read_boolean(L, index, "mirror_prefer", state->mirror_prefer)
-        || !download_read_boolean(L, index, "mirror_only", state->mirror_only)) {
+        || !download_read_boolean(L, index, "mirror_only", state->mirror_only)
+        || !download_read_boolean(L, index, "allow_plain_http", state->allow_plain_http)) {
         error = "invalid SPR boolean fields";
         return false;
     }
@@ -591,9 +655,12 @@ static bool download_build_spr_candidates(
 
     std::set<std::string> seen;
     int logical_index = 0;
-    const int logical_total = warride ? 3
+    const int part_total = fallback_act.empty()
+        ? (skip_render_full ? 4 : 5)
+        : (skip_render_full ? 8 : 10);
+    const int logical_total = warride ? (skip_render_full ? 2 : 3)
         : (policy == "basic_weapon" ? 4
-        : (policy == "part" ? (fallback_act.empty() ? 5 : 10)
+        : (policy == "part" ? part_total
         : (is_body ? (disable_render ? 2 : 4) : (disable_render ? 1 : 2))));
     auto add_spr = [&](const std::string& candidate_kind, int64_t candidate_eid,
         int candidate_dir, const std::string& candidate_act, const std::string& candidate_ver,
@@ -667,8 +734,12 @@ static bool download_build_spr_candidates(
         if (!warride) {
             add_spr("bodymapped_hash", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
                 cache_jsoncmd, false, true, source_mode, std::string(), false, false);
-            add_spr("cloudrender_full", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
-                cache_jsoncmd, false, true, source_mode, "full", true, false);
+            // 阶段3：cloudrender_full(restype=json) 实测会挂起且返回非 SPR，默认裁剪；
+            // spec.skip_render_full=false 可恢复旧行为。
+            if (!skip_render_full) {
+                add_spr("cloudrender_full", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
+                    cache_jsoncmd, false, true, source_mode, "full", true, false);
+            }
             add_spr("semantic_hash", eid, (int)dir, act, original_ver, original_jsoncmd,
                 cache_jsoncmd, false, true, source_mode, std::string(), false, false);
             if (allow_direct && original_ver.empty() && (original_jsoncmd.empty()
@@ -680,9 +751,11 @@ static bool download_build_spr_candidates(
                 add_spr("fallback_bodymapped_hash", eid, (int)dir, fallback_act, fallback_ver,
                     fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
                     false, true, source_mode, std::string(), false, false);
-                add_spr("fallback_cloudrender_full", eid, (int)dir, fallback_act, fallback_ver,
-                    fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
-                    false, true, source_mode, "full", true, false);
+                if (!skip_render_full) {
+                    add_spr("fallback_cloudrender_full", eid, (int)dir, fallback_act, fallback_ver,
+                        fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
+                        false, true, source_mode, "full", true, false);
+                }
                 add_spr("fallback_semantic_hash", eid, (int)dir, fallback_act, fallback_ver,
                     fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
                     false, true, source_mode, std::string(), false, false);
@@ -706,8 +779,10 @@ static bool download_build_spr_candidates(
                 cache_jsoncmd, false, true, source_mode, std::string(), false, false);
             add_spr("cloudrender_bare", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
                 cache_jsoncmd, true, true, source_mode, std::string(), true, false);
-            add_spr("cloudrender_full", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
-                cache_jsoncmd, false, true, source_mode, "full", true, false);
+            if (!skip_render_full) {
+                add_spr("cloudrender_full", eid, (int)dir, act, mapped_ver, mapped_jsoncmd,
+                    cache_jsoncmd, false, true, source_mode, "full", true, false);
+            }
         }
         return download_finalize_candidates(state);
     }
@@ -846,7 +921,8 @@ static bool download_build_static_candidates(
     std::string source_mode;
     if (!download_read_string(L, index, "source_mode", source_mode, 64)
         || !download_read_boolean(L, index, "mirror_prefer", state->mirror_prefer)
-        || !download_read_boolean(L, index, "mirror_only", state->mirror_only)) {
+        || !download_read_boolean(L, index, "mirror_only", state->mirror_only)
+        || !download_read_boolean(L, index, "allow_plain_http", state->allow_plain_http)) {
         error = "invalid static CDN routing fields";
         return false;
     }
@@ -1176,6 +1252,9 @@ private:
 
     void worker_loop()
     {
+        // 阶段2：每 worker 一个 HttpClient，跨任务复用 keep-alive 连接。
+        hv::HttpClient client;
+        DownloadReuseKey reuse;
         for (;;) {
             std::shared_ptr<DownloadCoreState> state;
             {
@@ -1201,7 +1280,7 @@ private:
                 continue;
             }
 
-            download_do_download(state);
+            download_do_download(state, client, reuse);
             finish_one(state);
         }
     }
@@ -1242,7 +1321,8 @@ static DownloadManager& download_manager()
     return manager;
 }
 
-static void download_do_single(std::shared_ptr<DownloadCoreState> state)
+static void download_do_single(std::shared_ptr<DownloadCoreState> state,
+    hv::HttpClient& client, DownloadReuseKey& reuse)
 {
     if (!state || state->cancelled.load()) {
         if (state)
@@ -1250,17 +1330,32 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state)
         return;
     }
 
+    // 阶段2：worker 本地连接复用——同 host 直接复用 keep-alive 连接，
+    // 换 host 时先 close 旧连接。省掉每个小文件的 DNS+TCP+TLS 握手。
+    {
+        std::string host; int port = 0; bool is_https = false;
+        download_split_url_host(state->url, host, port, is_https);
+        if (!host.empty() && (host != reuse.host || port != reuse.port
+            || is_https != reuse.https)) {
+            client.close();
+            reuse.host = host;
+            reuse.port = port;
+            reuse.https = is_https;
+        }
+    }
+
     HttpRequest req;
     req.method = HTTP_GET;
     req.url = state->url;
     req.timeout = state->timeout;
+    // 阶段2：连接超时与总超时分离（默认 3 秒，环境变量可覆盖）。
+    req.connect_timeout = download_connect_timeout_sec();
 
     if (!state->range.empty()) {
         req.headers["Range"] = "bytes=" + state->range;
     }
 
     HttpResponse resp;
-    hv::HttpClient client;
 
     if (!state->filepath.empty()) {
         bool append_mode = !state->range.empty();
@@ -1481,10 +1576,11 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state)
     }
 }
 
-static void download_do_download(std::shared_ptr<DownloadCoreState> state)
+static void download_do_download(std::shared_ptr<DownloadCoreState> state,
+    hv::HttpClient& client, DownloadReuseKey& reuse)
 {
     if (!state || !state->candidate_mode) {
-        download_do_single(state);
+        download_do_single(state, client, reuse);
         return;
     }
     int final_status = -1;
@@ -1495,7 +1591,7 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state)
         }
         download_reset_attempt(state);
         state->url = candidate.url;
-        download_do_single(state);
+        download_do_single(state, client, reuse);
         const int attempt_status = state->attempt_status.load();
         if (attempt_status == GHV_DOWNLOAD_STATUS_DONE) {
             bool publish = false;
