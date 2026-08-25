@@ -2368,7 +2368,7 @@ typedef struct THX_ASYNC_JOB {
     struct THX_ASYNC_JOB* next_done;
 } THX_ASYNC_JOB;
 
-static SDL_Mutex* g_thxa_lock = NULL;
+static SDL_mutex* g_thxa_lock = NULL;   /* SDL2 类型名为小写 mutex（SDL_Mutex 是 SDL3 才有） */
 static THX_ASYNC_JOB* g_thxa_done = NULL;
 static int g_thxa_active = 0;
 #define THXA_MAX_ACTIVE 2
