@@ -2352,6 +2352,191 @@ static int WPK_NativeTryInflateWithWindowBits(const Uint8* src, size_t srcSize, 
     return 1;
 }
 
+/* THX background inflate (root fix for mid-game freeze):
+ * submit to worker thread, poll dispatches lua callbacks on main thread.
+ * Worker never touches lua_State: input deep-copied on submit,
+ * output freed after dispatch. Mutex-guarded done list.
+ * Max 2 concurrent; overflow nil -> lua falls back to sync path. */
+typedef struct THX_ASYNC_JOB {
+    int cb_ref;
+    Uint8* src;
+    size_t src_size;
+    Uint8* out;
+    size_t out_size;
+    int ok;
+    const char* err;
+    struct THX_ASYNC_JOB* next_done;
+} THX_ASYNC_JOB;
+
+static SDL_Mutex* g_thxa_lock = NULL;
+static THX_ASYNC_JOB* g_thxa_done = NULL;
+static int g_thxa_active = 0;
+#define THXA_MAX_ACTIVE 2
+
+static int SDLCALL THXA_Worker(void* arg)
+{
+    THX_ASYNC_JOB* job = (THX_ASYNC_JOB*)arg;
+    static const int windows[] = { 15 + 32, -15 };
+    int i;
+    for (i = 0; i < 2; ++i)
+    {
+        if (WPK_NativeTryInflateWithWindowBits(job->src, job->src_size,
+                                               windows[i], &job->out, &job->out_size))
+        {
+            job->ok = 1;
+            break;
+        }
+    }
+    if (!job->ok)
+        job->err = "inflate_failed";
+    SDL_free(job->src);
+    job->src = NULL;
+
+    if (SDL_LockMutex(g_thxa_lock) == 0)
+    {
+        job->next_done = g_thxa_done;
+        g_thxa_done = job;
+        --g_thxa_active;
+        SDL_UnlockMutex(g_thxa_lock);
+    }
+    return 0;
+}
+
+static int LUA_ThxAsyncUncompress(lua_State* L)
+{
+    size_t src_size = 0;
+    const char* src = luaL_checklstring(L, 1, &src_size);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (!g_thxa_lock)
+        g_thxa_lock = SDL_CreateMutex();
+    if (!g_thxa_lock)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    int active = 0;
+    if (SDL_LockMutex(g_thxa_lock) == 0)
+    {
+        active = g_thxa_active;
+        SDL_UnlockMutex(g_thxa_lock);
+    }
+    if (active >= THXA_MAX_ACTIVE)
+    {
+        lua_pushnil(L);                      /* full: lua falls back to sync */
+        return 1;
+    }
+
+    THX_ASYNC_JOB* job = (THX_ASYNC_JOB*)SDL_calloc(1, sizeof(THX_ASYNC_JOB));
+    if (!job)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+    job->src = (Uint8*)SDL_malloc(src_size ? src_size : 1);
+    if (!job->src)
+    {
+        SDL_free(job);
+        lua_pushnil(L);
+        return 1;
+    }
+    if (src_size)
+        SDL_memcpy(job->src, src, src_size);
+    job->src_size = src_size;
+
+    lua_pushvalue(L, 2);
+    job->cb_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    if (SDL_LockMutex(g_thxa_lock) == 0)
+    {
+        ++g_thxa_active;
+        SDL_UnlockMutex(g_thxa_lock);
+    }
+    SDL_Thread* th = SDL_CreateThread(THXA_Worker, "mygxy-thx", job);
+    if (!th)
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, job->cb_ref);
+        SDL_free(job->src);
+        SDL_free(job);
+        if (SDL_LockMutex(g_thxa_lock) == 0)
+        {
+            --g_thxa_active;
+            SDL_UnlockMutex(g_thxa_lock);
+        }
+        lua_pushnil(L);
+        return 1;
+    }
+    SDL_DetachThread(th);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
+static int LUA_ThxAsyncPoll(lua_State* L)
+{
+    if (!g_thxa_lock)
+    {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    THX_ASYNC_JOB* list = NULL;
+    if (SDL_LockMutex(g_thxa_lock) == 0)
+    {
+        list = g_thxa_done;
+        g_thxa_done = NULL;
+        SDL_UnlockMutex(g_thxa_lock);
+    }
+    int dispatched = 0;
+    while (list)
+    {
+        THX_ASYNC_JOB* job = list;
+        list = job->next_done;
+        lua_rawgeti(L, LUA_REGISTRYINDEX, job->cb_ref);
+        if (lua_isfunction(L, -1))
+        {
+            if (job->ok)
+            {
+                lua_pushlstring(L, (const char*)job->out, job->out_size);
+                lua_pushnil(L);
+            }
+            else
+            {
+                lua_pushnil(L);
+                lua_pushstring(L, job->err ? job->err : "failed");
+            }
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK)
+            {
+                SDL_Log("ThxAsync callback error: %s", lua_tostring(L, -1));
+                lua_pop(L, 1);
+            }
+            ++dispatched;
+        }
+        else
+        {
+            lua_pop(L, 1);
+        }
+        luaL_unref(L, LUA_REGISTRYINDEX, job->cb_ref);
+        if (job->out)
+            SDL_free(job->out);
+        SDL_free(job);
+    }
+    lua_pushinteger(L, dispatched);
+    return 1;
+}
+
+MYGXY_API int luaopen_mygxy_thx_async(lua_State* L)
+{
+    const luaL_Reg funcs[] = {
+        {"异步解压", LUA_ThxAsyncUncompress},
+        {"取解压结果", LUA_ThxAsyncPoll},
+        {NULL, NULL},
+    };
+    if (!g_thxa_lock)
+        g_thxa_lock = SDL_CreateMutex();
+    lua_createtable(L, 0, 2);
+    luaL_setfuncs(L, funcs, 0);
+    return 1;
+}
+
 static int WPK_NativeTryZlibDecompress(const Uint8* src, size_t srcSize, Uint8** outData, size_t* outSize)
 {
     if (!WPK_IsZlibHeader(src, srcSize) && !WPK_IsGzipMagic(src, srcSize))
