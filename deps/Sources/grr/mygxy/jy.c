@@ -500,7 +500,8 @@ typedef struct
     int    end_x, end_y;      /* 画布上有效像素终点（不含） */
     Sint32 z_total;           /* -frame.z + z_bias，每像素累加 */
     int    index_offset;
-    int    transparent;       /* 0 / 1 透明遮罩或 depth_only 遮挡标志 */
+    int    transparent;       /* 1 = layer mask 打洞，清空累积色 */
+    int    depth_only;        /* 1 = 占 depth 遮挡后方，不写本层颜色；禁止折成 transparent */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
     Uint32 frame_id;
     int    cache_after;
@@ -899,7 +900,8 @@ static int JY_LUA_SetCacheCap(lua_State* L)
  *    1) 每像素维护实际 layer 数插入排序数组（dep 升序，远→近）
  *    2) 逐层 over alpha 链式混合（compare_color 等价）
  *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
- *    4) transparent=1 时清空累积色（layer mask 路径）
+ *    4) transparent=1 时清空累积色（layer mask 打洞）
+ *    5) depth_only=1 时占 depth、清空后方累积色、不写本层颜色（马体深度）
  *
  *  effective_d = pixel_depth(G/B 通道) - frame.z + z_bias
  * ═══════════════════════════════════════════ */
@@ -942,8 +944,6 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
         lua_rawgeti(L, -1, 6); int index_offset = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 7); int transparent  = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 8); int depth_only   = (int)lua_tointeger(L, -1); lua_pop(L, 1);
-        if (depth_only)
-            transparent = 1;
 
         lua_pop(L, 1); /* pop layer entry table */
 
@@ -1028,7 +1028,8 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
         L_slot->end_y        = ey;
         L_slot->z_total      = z_bias - (Sint32)frame_z;
         L_slot->index_offset = index_offset;
-        L_slot->transparent  = transparent;
+        L_slot->transparent  = transparent ? 1 : 0;
+        L_slot->depth_only   = depth_only ? 1 : 0;
         L_slot->owned        = owned;
         L_slot->frame_id     = frame_id;
         L_slot->cache_after  = cache_after;
@@ -1062,12 +1063,14 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
     Uint32* col_arr = (Uint32*)SDL_malloc((size_t)layer_n * sizeof(Uint32));
     Uint8*  alf_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
     Uint8*  trs_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
-    if (!dep_arr || !col_arr || !alf_arr || !trs_arr)
+    Uint8*  dol_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
+    if (!dep_arr || !col_arr || !alf_arr || !trs_arr || !dol_arr)
     {
         if (dep_arr) SDL_free(dep_arr);
         if (col_arr) SDL_free(col_arr);
         if (alf_arr) SDL_free(alf_arr);
         if (trs_arr) SDL_free(trs_arr);
+        if (dol_arr) SDL_free(dol_arr);
         SDL_free(active_layers);
         return 0;
     }
@@ -1125,11 +1128,13 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
                     col_arr[i] = col_arr[i-1];
                     alf_arr[i] = alf_arr[i-1];
                     trs_arr[i] = trs_arr[i-1];
+                    dol_arr[i] = dol_arr[i-1];
                 }
                 dep_arr[slot] = dep;
                 col_arr[slot] = col;
                 alf_arr[slot] = sa;
                 trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
+                dol_arr[slot] = (Uint8)(L_p->depth_only ? 1 : 0);
                 n_slot++;
             }
 
@@ -1139,11 +1144,12 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
             /* compare_color：从 i=0（最远）→ n-1（最近）顺序 over alpha 混合
              *   over 算子 acc = acc*(1-sa) + new：最后参与循环的(最近)在视觉最上层
              *   累积值在 premultiplied alpha 空间内运算，输出时反预乘
-             *   trans=1 时清空 cur_color（layer mask 行为，对齐 JS shader） */
+             *   trans=1：layer mask 打洞，清空累积色
+             *   depth_only=1：占 depth 遮挡后方，不写本层颜色（马体深度，禁止折成 trans） */
             Uint32 acc_a = 0, acc_r = 0, acc_g = 0, acc_b = 0;
             for (int i = 0; i < n_slot; i++)
             {
-                if (trs_arr[i])
+                if (trs_arr[i] || dol_arr[i])
                 {
                     acc_a = acc_r = acc_g = acc_b = 0;
                     continue;
@@ -1189,6 +1195,7 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
     SDL_free(col_arr);
     SDL_free(alf_arr);
     SDL_free(trs_arr);
+    SDL_free(dol_arr);
     SDL_free(active_layers);
     return 1;
 }
