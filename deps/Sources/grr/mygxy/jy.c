@@ -39,6 +39,7 @@ static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
+static int JY_CompositeSupportsDepthOnly(lua_State* L);
 static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
@@ -59,6 +60,7 @@ static const luaL_Reg JY_FUNCS[] = {
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
     {"CompositeTo", JY_CompositeTo},
+    {"CompositeSupportsDepthOnly", JY_CompositeSupportsDepthOnly},
     {NULL, NULL},
 };
 
@@ -498,7 +500,7 @@ typedef struct
     int    end_x, end_y;      /* 画布上有效像素终点（不含） */
     Sint32 z_total;           /* -frame.z + z_bias，每像素累加 */
     int    index_offset;
-    int    transparent;       /* 0 / 1 透明遮罩标志 */
+    int    transparent;       /* 0 / 1 透明遮罩或 depth_only 遮挡标志 */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
     Uint32 frame_id;
     int    cache_after;
@@ -891,7 +893,7 @@ static int JY_LUA_SetCacheCap(lua_State* L)
  *        ~230KB 分配/释放(密集场景手机端 heap 锁竞争 + 分页抖动主因)
  *      → target 必须 ARGB8888 且 w>=canvas_w,h>=canvas_h;返回 bool
  *
- *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
+ *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent, depth_only}, ... }
  *
  *  算法（与 JS jinyi.min.js depthVs shader 等价）:
  *    1) 每像素维护实际 layer 数插入排序数组（dep 升序，远→近）
@@ -926,7 +928,8 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
             continue;
         }
 
-        /* 7 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent} */
+        /* 8 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent, depth_only}
+         * depth_only=1：占 depth 并遮挡后方色，不写本层颜色。禁止用 transparent=1 冒充马深度（那是 mask 打洞）。 */
         lua_rawgeti(L, -1, 1);
         JY_UserData* layer_ud = (JY_UserData*)luaL_testudata(L, -1, JY_MT);
         lua_pop(L, 1);
@@ -938,6 +941,9 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
         lua_rawgeti(L, -1, 5); int off_y        = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 6); int index_offset = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 7); int transparent  = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, -1, 8); int depth_only   = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+        if (depth_only)
+            transparent = 1;
 
         lua_pop(L, 1); /* pop layer entry table */
 
@@ -1208,6 +1214,13 @@ static void JY_ReleaseLayerSet(JY_CompLayer* layers, int layer_n)
         }
     }
     SDL_free(layers);
+}
+
+static int JY_CompositeSupportsDepthOnly(lua_State* L)
+{
+    (void)L;
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 /* ─── Lua API: Composite — 每帧新建 surface 路径(向后兼容) ─── */
