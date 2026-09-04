@@ -39,7 +39,6 @@ static int JY_LUA_CacheClear(lua_State* L);
 static int JY_LUA_SetCacheCap(lua_State* L);
 static int JY_Composite(lua_State* L);
 static int JY_CompositeTo(lua_State* L);
-static int JY_CompositeSupportsDepthOnly(lua_State* L);
 static int JY_GC(lua_State* L);
 
 static int JY_LUA_FreeSurface(lua_State* L);
@@ -60,7 +59,6 @@ static const luaL_Reg JY_FUNCS[] = {
     {"SetCacheCap", JY_LUA_SetCacheCap},
     {"Composite",   JY_Composite},
     {"CompositeTo", JY_CompositeTo},
-    {"CompositeSupportsDepthOnly", JY_CompositeSupportsDepthOnly},
     {NULL, NULL},
 };
 
@@ -501,7 +499,6 @@ typedef struct
     Sint32 z_total;           /* -frame.z + z_bias，每像素累加 */
     int    index_offset;
     int    transparent;       /* 1 = layer mask 打洞，清空累积色 */
-    int    depth_only;        /* 1 = 占 depth 遮挡后方，不写本层颜色；禁止折成 transparent */
     int    owned;             /* 1 = 调用方 free，0 = borrow */
     Uint32 frame_id;
     int    cache_after;
@@ -894,14 +891,13 @@ static int JY_LUA_SetCacheCap(lua_State* L)
  *        ~230KB 分配/释放(密集场景手机端 heap 锁竞争 + 分页抖动主因)
  *      → target 必须 ARGB8888 且 w>=canvas_w,h>=canvas_h;返回 bool
  *
- *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent, depth_only}, ... }
+ *  layers_table = { {ud, frame_id, z_bias, x, y, index_offset, transparent}, ... }
  *
  *  算法（与 JS jinyi.min.js depthVs shader 等价）:
  *    1) 每像素维护实际 layer 数插入排序数组（dep 升序，远→近）
  *    2) 逐层 over alpha 链式混合（compare_color 等价）
  *    3) 调色板 indexOffset 偏移（对齐 JS shader 中 r.indexOffset 公式）
  *    4) transparent=1 时清空累积色（layer mask 打洞）
- *    5) depth_only=1 时占 depth、清空后方累积色、不写本层颜色（马体深度）
  *
  *  effective_d = pixel_depth(G/B 通道) - frame.z + z_bias
  * ═══════════════════════════════════════════ */
@@ -930,8 +926,7 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
             continue;
         }
 
-        /* 8 字段 layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent, depth_only}
-         * depth_only=1：占 depth 并遮挡后方色，不写本层颜色。禁止用 transparent=1 冒充马深度（那是 mask 打洞）。 */
+        /* layer entry: {ud, frame_id, z_bias, off_x, off_y, index_offset, transparent} */
         lua_rawgeti(L, -1, 1);
         JY_UserData* layer_ud = (JY_UserData*)luaL_testudata(L, -1, JY_MT);
         lua_pop(L, 1);
@@ -943,7 +938,6 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
         lua_rawgeti(L, -1, 5); int off_y        = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 6); int index_offset = (int)lua_tointeger(L, -1); lua_pop(L, 1);
         lua_rawgeti(L, -1, 7); int transparent  = (int)lua_tointeger(L, -1); lua_pop(L, 1);
-        lua_rawgeti(L, -1, 8); int depth_only   = (int)lua_tointeger(L, -1); lua_pop(L, 1);
 
         lua_pop(L, 1); /* pop layer entry table */
 
@@ -1029,7 +1023,6 @@ static int JY_BuildLayerSet(lua_State* L, int layers_idx, int canvas_w, int canv
         L_slot->z_total      = z_bias - (Sint32)frame_z;
         L_slot->index_offset = index_offset;
         L_slot->transparent  = transparent ? 1 : 0;
-        L_slot->depth_only   = depth_only ? 1 : 0;
         L_slot->owned        = owned;
         L_slot->frame_id     = frame_id;
         L_slot->cache_after  = cache_after;
@@ -1063,14 +1056,12 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
     Uint32* col_arr = (Uint32*)SDL_malloc((size_t)layer_n * sizeof(Uint32));
     Uint8*  alf_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
     Uint8*  trs_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
-    Uint8*  dol_arr = (Uint8*) SDL_malloc((size_t)layer_n * sizeof(Uint8));
-    if (!dep_arr || !col_arr || !alf_arr || !trs_arr || !dol_arr)
+    if (!dep_arr || !col_arr || !alf_arr || !trs_arr)
     {
         if (dep_arr) SDL_free(dep_arr);
         if (col_arr) SDL_free(col_arr);
         if (alf_arr) SDL_free(alf_arr);
         if (trs_arr) SDL_free(trs_arr);
-        if (dol_arr) SDL_free(dol_arr);
         SDL_free(active_layers);
         return 0;
     }
@@ -1128,13 +1119,11 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
                     col_arr[i] = col_arr[i-1];
                     alf_arr[i] = alf_arr[i-1];
                     trs_arr[i] = trs_arr[i-1];
-                    dol_arr[i] = dol_arr[i-1];
                 }
                 dep_arr[slot] = dep;
                 col_arr[slot] = col;
                 alf_arr[slot] = sa;
                 trs_arr[slot] = (Uint8)(L_p->transparent ? 1 : 0);
-                dol_arr[slot] = (Uint8)(L_p->depth_only ? 1 : 0);
                 n_slot++;
             }
 
@@ -1144,12 +1133,11 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
             /* compare_color：从 i=0（最远）→ n-1（最近）顺序 over alpha 混合
              *   over 算子 acc = acc*(1-sa) + new：最后参与循环的(最近)在视觉最上层
              *   累积值在 premultiplied alpha 空间内运算，输出时反预乘
-             *   trans=1：layer mask 打洞，清空累积色
-             *   depth_only=1：占 depth 遮挡后方，不写本层颜色（马体深度，禁止折成 trans） */
+             *   trans=1：layer mask 打洞，清空累积色 */
             Uint32 acc_a = 0, acc_r = 0, acc_g = 0, acc_b = 0;
             for (int i = 0; i < n_slot; i++)
             {
-                if (trs_arr[i] || dol_arr[i])
+                if (trs_arr[i])
                 {
                     acc_a = acc_r = acc_g = acc_b = 0;
                     continue;
@@ -1195,7 +1183,6 @@ static int JY_RunCompositeKernel(SDL_Surface* dst, const JY_CompLayer* layers, i
     SDL_free(col_arr);
     SDL_free(alf_arr);
     SDL_free(trs_arr);
-    SDL_free(dol_arr);
     SDL_free(active_layers);
     return 1;
 }
@@ -1221,13 +1208,6 @@ static void JY_ReleaseLayerSet(JY_CompLayer* layers, int layer_n)
         }
     }
     SDL_free(layers);
-}
-
-static int JY_CompositeSupportsDepthOnly(lua_State* L)
-{
-    (void)L;
-    lua_pushboolean(L, 1);
-    return 1;
 }
 
 /* ─── Lua API: Composite — 每帧新建 surface 路径(向后兼容) ─── */
