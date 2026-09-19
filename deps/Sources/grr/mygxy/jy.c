@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
+#include "zlib.h"
 
 
 #if defined(_WIN32)
@@ -239,6 +240,29 @@ static int JY_DecodeFrame(
     /* 透明像素的索引置 0（idx 0 通常是透明色，避免随机数据污染缓存） */
     SDL_memset(idx_buf, 0, npx);
     SDL_memset(alpha_buf, 0, npx);
+
+    if (ud->depth16_pixels)
+    {
+        /* 保留灰16原值，输出严格等价旧Lua转换的G/B与非零遮罩，暂不改变深度量纲。 */
+        for (Uint32 y = 0; y < f->sh; y++)
+        {
+            const Uint16* src = ud->depth16_pixels + (size_t)(f->sy + y) * ud->atlas_w + f->sx;
+            for (Uint32 x = 0; x < f->sw; x++)
+            {
+                size_t dst = (size_t)y * f->sw + x;
+                Uint32 raw = src[x];
+                Uint32 effective = raw + (raw >> 8);
+                alpha_buf[dst] = raw ? 255 : 0;
+                depth_buf[dst] = (Uint16)(effective > 65535u ? 65535u : effective);
+            }
+        }
+        *out_idx = idx_buf;
+        *out_alpha = alpha_buf;
+        *out_depth = depth_buf;
+        *out_w = (Uint16)f->sw;
+        *out_h = (Uint16)f->sh;
+        return 1;
+    }
 
     Uint32 aw   = ud->atlas_w;
     Uint32 ibpp = ud->index_bpp;
@@ -1368,6 +1392,11 @@ static void JY_Reset(JY_UserData* ud)
         SDL_free(ud->depth_pixels);
         ud->depth_pixels = NULL;
     }
+    if (ud->depth16_pixels)
+    {
+        SDL_free(ud->depth16_pixels);
+        ud->depth16_pixels = NULL;
+    }
     if (ud->depth_frames)
     {
         SDL_free(ud->depth_frames);
@@ -1955,6 +1984,289 @@ static void JY_SetInfoNumber(lua_State* L, int idx, const char* key, lua_Number 
     lua_setfield(L, idx, key);
 }
 
+/* 装备深度只接受已确认的单图、单方向、非交错灰16格式，避免通用图像解码器降为8位。 */
+static Uint32 JY_DepthReadBE32(const Uint8* p)
+{
+    return ((Uint32)p[0] << 24) | ((Uint32)p[1] << 16) | ((Uint32)p[2] << 8) | p[3];
+}
+
+static Uint32 JY_DepthReadLE32(const Uint8* p)
+{
+    return (Uint32)p[0] | ((Uint32)p[1] << 8) | ((Uint32)p[2] << 16) | ((Uint32)p[3] << 24);
+}
+
+static Uint16 JY_DepthReadLE16(const Uint8* p)
+{
+    return (Uint16)((Uint16)p[0] | ((Uint16)p[1] << 8));
+}
+
+static Sint32 JY_DepthReadSigned16(const Uint8* p)
+{
+    Uint16 v = JY_DepthReadLE16(p);
+    return v <= 32767u ? (Sint32)v : (Sint32)v - 65536;
+}
+
+static const char* JY_LoadDepthPNG(JY_UserData* ud, const Uint8* png, size_t len)
+{
+    static const Uint8 signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    Uint32 width = 0, height = 0;
+    size_t idat_begin = 0, idat_end = 0;
+    int seen_idat = 0, after_idat = 0, ended = 0;
+    if (len < 8 || memcmp(png, signature, 8) != 0)
+        return "装备深度PNG签名非法";
+
+    /* 先验证全部边界和CRC，不复制IDAT，也不交给图像库解释gAMA/cHRM。 */
+    for (size_t at = 8; at < len;)
+    {
+        if (len - at < 12)
+            return "装备深度PNG块截断";
+        Uint32 n = JY_DepthReadBE32(png + at);
+        if ((size_t)n > len - at - 12)
+            return "装备深度PNG块长度非法";
+        const Uint8* kind = png + at + 4;
+        const Uint8* payload = png + at + 8;
+        if ((Uint32)crc32(0L, kind, (uInt)(n + 4u)) != JY_DepthReadBE32(payload + n))
+            return "装备深度PNG校验失败";
+        if (at == 8)
+        {
+            if (memcmp(kind, "IHDR", 4) != 0 || n != 13)
+                return "装备深度PNG缺少IHDR";
+            width = JY_DepthReadBE32(payload);
+            height = JY_DepthReadBE32(payload + 4);
+            if (!width || !height || width > 16384 || height > 4096
+                || (size_t)width > SIZE_MAX / height
+                || (size_t)width * height > 4u * 1024u * 1024u)
+                return "装备深度PNG尺寸越界";
+            if (payload[8] != 16 || payload[9] != 0 || payload[10] != 0
+                || payload[11] != 0 || payload[12] != 0)
+                return "装备深度PNG仅支持无交错16位灰度";
+        }
+        else if (memcmp(kind, "IDAT", 4) == 0)
+        {
+            if (after_idat || n == 0)
+                return "装备深度PNG数据块顺序非法";
+            if (!seen_idat) idat_begin = at;
+            seen_idat = 1;
+            idat_end = at + (size_t)n + 12;
+        }
+        else if (memcmp(kind, "IEND", 4) == 0)
+        {
+            if (!seen_idat || n != 0 || at + 12 != len)
+                return "装备深度PNG结束块非法";
+            ended = 1;
+            break;
+        }
+        else
+        {
+            if (!((memcmp(kind, "gAMA", 4) == 0 && n == 4)
+                || (memcmp(kind, "cHRM", 4) == 0 && n == 32)))
+                return "装备深度PNG包含未支持的块";
+            if (seen_idat) after_idat = 1;
+        }
+        at += (size_t)n + 12;
+    }
+    if (!ended)
+        return "装备深度PNG未结束";
+    for (Uint32 i = 0; i < ud->frame_count; i++)
+    {
+        const JY_FrameInfo* f = &ud->frames[i];
+        if (f->sx > width || f->sy > height || f->sw > width - f->sx || f->sh > height - f->sy)
+            return "装备深度SPR帧超出PNG";
+    }
+
+    const size_t row_bytes = (size_t)width * 2;
+    const size_t stride = row_bytes + 1;
+    if (stride > (SIZE_MAX - 1) / height || stride * height >= UINT_MAX)
+        return "装备深度PNG解压尺寸溢出";
+    const size_t expected = stride * height;
+    /* 多留1字节用于识别实际解压超量；整个压缩流只解一次。 */
+    Uint8* filtered = (Uint8*)SDL_malloc(expected + 1);
+    if (!filtered)
+        return "装备深度PNG解压内存不足";
+    z_stream stream;
+    memset(&stream, 0, sizeof(stream));
+    if (inflateInit(&stream) != Z_OK)
+    {
+        SDL_free(filtered);
+        return "装备深度PNG解压器创建失败";
+    }
+    stream.next_out = filtered;
+    stream.avail_out = (uInt)(expected + 1);
+    const char* error = NULL;
+    int finished = 0;
+    for (size_t at = idat_begin; at < idat_end && !error;)
+    {
+        Uint32 n = JY_DepthReadBE32(png + at);
+        stream.next_in = (Bytef*)(png + at + 8);
+        stream.avail_in = (uInt)n;
+        while (stream.avail_in > 0)
+        {
+            uLong before_in = stream.total_in, before_out = stream.total_out;
+            int result = inflate(&stream, Z_NO_FLUSH);
+            if (result == Z_STREAM_END)
+            {
+                finished = 1;
+                if (stream.avail_in != 0 || at + (size_t)n + 12 != idat_end)
+                    error = "装备深度PNG压缩流尾部非法";
+                break;
+            }
+            if (result != Z_OK || stream.avail_out == 0
+                || (before_in == stream.total_in && before_out == stream.total_out))
+            {
+                error = "装备深度PNG压缩流损坏或解压超限";
+                break;
+            }
+        }
+        at += (size_t)n + 12;
+    }
+    if (!error && (!finished || stream.total_out != expected))
+        error = "装备深度PNG数据尺寸不符或压缩流未结束";
+    inflateEnd(&stream);
+    if (error)
+    {
+        SDL_free(filtered);
+        return error;
+    }
+
+    ud->depth16_pixels = (Uint16*)SDL_malloc((size_t)width * height * sizeof(Uint16));
+    if (!ud->depth16_pixels)
+    {
+        SDL_free(filtered);
+        return "装备深度像素内存不足";
+    }
+    /* PNG滤波按字节执行，灰16每像素2字节；还原后显式读取大端，不依赖宿主字节序。 */
+    for (Uint32 y = 0; y < height; y++)
+    {
+        Uint8* row = filtered + (size_t)y * stride + 1;
+        const Uint8* prev = y ? row - stride : NULL;
+        Uint8 filter = row[-1];
+        if (filter > 4)
+        {
+            SDL_free(filtered);
+            return "装备深度PNG滤波类型非法";
+        }
+        if (filter != 0)
+        {
+            for (size_t x = 0; x < row_bytes; x++)
+            {
+                int a = x >= 2 ? row[x - 2] : 0;
+                int b = prev ? prev[x] : 0;
+                int c = prev && x >= 2 ? prev[x - 2] : 0;
+                int prediction;
+                if (filter == 1) prediction = a;
+                else if (filter == 2) prediction = b;
+                else if (filter == 3) prediction = (a + b) / 2;
+                else
+                {
+                    int p = a + b - c;
+                    int pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
+                    prediction = pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+                }
+                row[x] = (Uint8)(row[x] + prediction);
+            }
+        }
+        Uint16* dst = ud->depth16_pixels + (size_t)y * width;
+        for (Uint32 x = 0; x < width; x++)
+            dst[x] = (Uint16)(((Uint16)row[x * 2] << 8) | row[x * 2 + 1]);
+    }
+    SDL_free(filtered);
+    ud->atlas_w = width;
+    ud->atlas_h = height;
+    return NULL;
+}
+
+static int JY_DepthFailure(lua_State* L, JY_UserData* ud, const char* error)
+{
+    if (ud) JY_Reset(ud);
+    lua_pushnil(L);
+    lua_pushstring(L, error);
+    return 2;
+}
+
+static int JY_CreateDepthSPR(lua_State* L)
+{
+    if (lua_type(L, 1) != LUA_TSTRING)
+        return JY_DepthFailure(L, NULL, "装备深度SPR必须为字符串");
+    size_t len;
+    const Uint8* data = (const Uint8*)lua_tolstring(L, 1, &len);
+    if (len < 60 || len > 8u * 1024u * 1024u)
+        return JY_DepthFailure(L, NULL, "装备深度SPR长度非法");
+    if (memcmp(data, "FTEN", 4) != 0 || JY_DepthReadLE32(data + 4) != 1
+        || JY_DepthReadLE32(data + 8) != len - 16 || memcmp(data + 16, "RP", 2) != 0)
+        return JY_DepthFailure(L, NULL, "装备深度SPR签名或长度非法");
+    Uint16 count = JY_DepthReadLE16(data + 20);
+    if (JY_DepthReadLE16(data + 18) != 1 || count < 1 || count > 64
+        || JY_DepthReadLE16(data + 30) != 1)
+        return JY_DepthFailure(L, NULL, "装备深度SPR仅支持单方向单图且1至64帧");
+    Uint16 width = JY_DepthReadLE16(data + 22), height = JY_DepthReadLE16(data + 24);
+    if (!width || !height || width > 4096 || height > 4096)
+        return JY_DepthFailure(L, NULL, "装备深度SPR尺寸非法");
+    size_t table_end = 32 + (size_t)count * 14;
+    if (table_end > len || len - table_end < 12)
+        return JY_DepthFailure(L, NULL, "装备深度SPR帧表截断");
+    size_t png_at = table_end + 12;
+    Uint32 image_len = JY_DepthReadLE32(data + table_end + 8);
+    if (JY_DepthReadLE32(data + table_end) != 1
+        || JY_DepthReadLE32(data + table_end + 4) != png_at - 16
+        || image_len == 0 || image_len != len - png_at)
+        return JY_DepthFailure(L, NULL, "装备深度SPR图片边界或类型非法");
+
+    JY_UserData* ud = (JY_UserData*)lua_newuserdata(L, sizeof(JY_UserData));
+    SDL_memset(ud, 0, sizeof(*ud));
+    luaL_setmetatable(L, JY_MT);
+    ud->frame_count = ud->frame_per_group = count;
+    ud->group = 1;
+    ud->frames = (JY_FrameInfo*)SDL_calloc(count, sizeof(JY_FrameInfo));
+    if (!ud->frames)
+        return JY_DepthFailure(L, ud, "装备深度帧表内存不足");
+    for (Uint32 i = 0; i < count; i++)
+    {
+        const Uint8* src = data + 32 + (size_t)i * 14;
+        Sint32 x = JY_DepthReadSigned16(src + 2), y = JY_DepthReadSigned16(src + 4);
+        JY_FrameInfo* f = &ud->frames[i];
+        f->sw = JY_DepthReadLE16(src + 6);
+        f->sh = JY_DepthReadLE16(src + 8);
+        if (JY_DepthReadLE16(src) != 0 || x < 0 || y < 0 || !f->sw || !f->sh)
+            return JY_DepthFailure(L, ud, "装备深度SPR帧矩形非法");
+        f->sx = (Uint32)x;
+        f->sy = (Uint32)y;
+        f->key_x = JY_DepthReadSigned16(src + 10);
+        f->key_y = JY_DepthReadSigned16(src + 12);
+        JY_UpdateFrameBounds(ud, f);
+    }
+    const char* error = JY_LoadDepthPNG(ud, data + png_at, image_len);
+    if (error) return JY_DepthFailure(L, ud, error);
+    /* 旧转换Atlas用最大帧尺寸及零全局锚点，保持同样的外部几何与默认帧率。 */
+    ud->width = ud->max_frame_w;
+    ud->height = ud->max_frame_h;
+    ud->pal_count = 256;
+    for (Uint32 i = 0; i < 256; i++)
+        ud->pal[i] = (255u << 24) | (i << 16) | (i << 8) | i;
+    JY_CalcPalMod(ud);
+    ud->cache_cap = JY_CACHE_CAP_DEFAULT;
+    ud->cache = (JY_CacheEntry*)SDL_calloc(ud->cache_cap, sizeof(JY_CacheEntry));
+    if (!ud->cache) return JY_DepthFailure(L, ud, "装备深度帧缓存内存不足");
+
+    lua_createtable(L, 0, 15);
+    JY_SetInfoInteger(L, -1, "group", 1);
+    JY_SetInfoInteger(L, -1, "frame", count);
+    JY_SetInfoInteger(L, -1, "total", count);
+    JY_SetInfoInteger(L, -1, "frameRate", 8);
+    JY_SetInfoInteger(L, -1, "width", ud->width);
+    JY_SetInfoInteger(L, -1, "height", ud->height);
+    JY_SetInfoInteger(L, -1, "x", 0);
+    JY_SetInfoInteger(L, -1, "y", 0);
+    JY_SetInfoInteger(L, -1, "max_frame_w", ud->max_frame_w);
+    JY_SetInfoInteger(L, -1, "max_frame_h", ud->max_frame_h);
+    JY_SetInfoInteger(L, -1, "max_key_x", ud->max_key_x);
+    JY_SetInfoInteger(L, -1, "max_key_y", ud->max_key_y);
+    JY_SetInfoInteger(L, -1, "max_frame_right", ud->max_frame_right);
+    JY_SetInfoInteger(L, -1, "max_frame_bottom", ud->max_frame_bottom);
+    lua_pushliteral(L, "JY");
+    lua_setfield(L, -2, "type");
+    return 2;
+}
+
 static int JY_PushAtlasFramesFromJson(lua_State* L, const char* json, size_t json_len)
 {
     int top = lua_gettop(L);
@@ -2453,4 +2765,13 @@ static int JY_Open(lua_State* L)
 MYGXY_API int luaopen_mygxy_jy(lua_State* L)
 {
     return JY_Open(L);
+}
+
+/* 独立入口不猜测普通SPR用途；成功返回兼容JY对象，坏输入返回nil和原因。 */
+MYGXY_API int luaopen_mygxy_jy_depth(lua_State* L)
+{
+    JY_EnsureSDLSurfaceMetatable(L);
+    JY_RegisterMetatable(L);
+    lua_pushcfunction(L, JY_CreateDepthSPR);
+    return 1;
 }

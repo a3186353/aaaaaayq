@@ -55,6 +55,7 @@ typedef struct
     Uint8*  index_pixels;      /* RGB24 (R=pal idx, G/B=depth) */
     Uint8*  alpha_pixels;      /* Grayscale alpha (单通道) */
     Uint8*  depth_pixels;      /* RGB24 (G/B=depth) */
+    Uint16* depth16_pixels;    /* 装备灰16原值，独立保存；合成时沿用旧Atlas有效深度 */
     Uint32  atlas_w, atlas_h;
     Uint32  depth_atlas_w, depth_atlas_h; /* 深度 atlas 尺寸（可能与主 atlas 不同） */
     Uint32  index_bpp;         /* 每像素字节数 (3=RGB, 4=RGBA) */
