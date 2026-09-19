@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <condition_variable>
 #include <cstdio>
@@ -54,6 +55,7 @@
 #define GHV_DOWNLOAD_STATUS_CANCELLED -10001
 #define GHV_DOWNLOAD_STATUS_QUEUE_FULL -10002
 #define GHV_DOWNLOAD_CDN_MAX_BYTES (128LL * 1024 * 1024)
+#define GHV_DOWNLOAD_DIAGNOSTIC_LIMIT 32
 
 struct DownloadCandidate {
     std::string url;
@@ -64,13 +66,32 @@ struct DownloadCandidate {
     std::string act;
     std::string ver;
     std::string jsoncmd;
+    std::string ext;
+    std::string slot;
     int64_t pid{0};
     int64_t eid{0};
+    int64_t shape{0};
+    int64_t resource_id{0};
     int dir{0};
     int candidate_index{0};
     int candidate_total{0};
     bool bare{false};
     bool cacheable{true};
+};
+
+struct DownloadAttempt {
+    DownloadCandidate candidate;
+    std::string effective_url;
+    int ret{0};
+    int http_status{0};
+    int status{0};
+    bool has_ret{false};
+    bool http_received{false};
+    bool url_redacted{false};
+    int64_t bytes{0};
+    double elapsed_ms{0};
+    std::string stage;
+    std::string error;
 };
 
 struct DownloadCoreState {
@@ -95,6 +116,15 @@ struct DownloadCoreState {
     std::vector<DownloadCandidate> candidates;
     DownloadCandidate              result;
     bool                           has_result{false};
+
+    // 仅保存已完成请求的白名单证据；不收集响应正文、header 或凭据。
+    std::deque<DownloadAttempt>     attempts;
+    DownloadAttempt                first_failure;
+    DownloadAttempt                last_failure;
+    bool                           has_failure{false};
+    int                            attempt_total{0};
+    std::atomic<bool>               diagnostic_active{false};
+    std::atomic<bool>               diagnostics_incomplete{false};
 
     std::string          memory_data;
     std::string          md5_hex;
@@ -759,7 +789,7 @@ static bool download_build_spr_candidates(
                 add_spr("fallback_semantic_hash", eid, (int)dir, fallback_act, fallback_ver,
                     fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
                     false, true, source_mode, std::string(), false, false);
-                if (fallback_ver.empty() && (fallback_jsoncmd.empty() || fallback_jsoncmd == "[]")) {
+                if (allow_direct && fallback_ver.empty() && (fallback_jsoncmd.empty() || fallback_jsoncmd == "[]")) {
                     add_spr("fallback_direct", eid, (int)dir, fallback_act, fallback_ver,
                         fallback_jsoncmd, fallback_cache_jsoncmd.empty() ? cache_jsoncmd : fallback_cache_jsoncmd,
                         false, true, source_mode, std::string(), false, true);
@@ -939,6 +969,10 @@ static bool download_build_static_candidates(
     }
     DownloadCandidate base = download_candidate_base(
         type, "static", source_mode, key, pid, eid, (int)dir, act, std::string(), false, true, 1, 1);
+    base.shape = shape;
+    base.resource_id = id;
+    base.ext = ext;
+    base.slot = slot;
     const bool avtres = type == "ride_mask";
     std::set<std::string> seen;
     download_add_candidate(state, base, avtres ? download_join_avtres(path) : download_join_static(path), seen);
@@ -1321,12 +1355,80 @@ static DownloadManager& download_manager()
     return manager;
 }
 
-static void download_do_single(std::shared_ptr<DownloadCoreState> state,
-    hv::HttpClient& client, DownloadReuseKey& reuse)
+static void download_record_attempt(const std::shared_ptr<DownloadCoreState>& state,
+    const DownloadAttempt& attempt)
 {
-    if (!state || state->cancelled.load()) {
-        if (state)
-            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
+    // 诊断分配失败不能改变原下载结果，更不能让 worker 因诊断异常退出。
+    try {
+        std::lock_guard<std::mutex> lock(state->data_mutex);
+        ++state->attempt_total;
+        if (attempt.status < 0) {
+            if (!state->has_failure) state->first_failure = attempt;
+            state->last_failure = attempt;
+            state->has_failure = true;
+        }
+        state->attempts.push_back(attempt);
+        if (state->attempts.size() > GHV_DOWNLOAD_DIAGNOSTIC_LIMIT)
+            state->attempts.pop_front();
+    } catch (...) {
+        state->diagnostics_incomplete = true;
+    }
+}
+
+static void download_redact_url_userinfo(std::string& url, bool& redacted)
+{
+    const size_t scheme = url.find("://");
+    const size_t authority = scheme == std::string::npos ? 0 : scheme + 3;
+    const size_t end = url.find_first_of("/?#", authority);
+    const size_t credentials = url.find('@', authority);
+    if (credentials != std::string::npos && (end == std::string::npos || credentials < end)) {
+        url.replace(authority, credentials - authority, "[redacted]");
+        redacted = true;
+    }
+}
+
+static void download_do_single(std::shared_ptr<DownloadCoreState> state,
+    hv::HttpClient& client, DownloadReuseKey& reuse, const DownloadCandidate* candidate = nullptr)
+{
+    if (!state) return;
+    HttpRequest req;
+    DownloadAttempt attempt;
+    try {
+        if (candidate) attempt.candidate = *candidate;
+        else {
+            attempt.candidate.url = state->url;
+            attempt.candidate.kind = "url";
+            attempt.candidate.candidate_index = 1;
+            attempt.candidate.candidate_total = 1;
+        }
+        download_redact_url_userinfo(attempt.candidate.url, attempt.url_redacted);
+    } catch (...) {
+        state->diagnostics_incomplete = true;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    state->diagnostic_active = true;
+    const auto finish = [&](int status, const char* stage, const char* error) {
+        attempt.status = status;
+        attempt.bytes = state->current_size.load();
+        attempt.elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        try {
+            attempt.stage = stage;
+            attempt.error = error ? error : "unknown download error";
+            if (attempt.has_ret) {
+                attempt.effective_url = req.url;
+                download_redact_url_userinfo(attempt.effective_url, attempt.url_redacted);
+            }
+            download_record_attempt(state, attempt);
+        } catch (...) {
+            state->diagnostics_incomplete = true;
+        }
+        state->diagnostic_active = false;
+        // 先发布诊断，再发布终态，Lua 观察到完成时不会漏掉最后一次请求。
+        return download_try_finish(state, status);
+    };
+    if (state->cancelled.load()) {
+        finish(GHV_DOWNLOAD_STATUS_CANCELLED, "cancelled", "download cancelled");
         return;
     }
 
@@ -1344,7 +1446,6 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         }
     }
 
-    HttpRequest req;
     req.method = HTTP_GET;
     req.url = state->url;
     req.timeout = state->timeout;
@@ -1361,7 +1462,7 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         bool append_mode = !state->range.empty();
         int64_t requested_offset = 0;
         if (append_mode && !download_parse_range_start(state->range, &requested_offset)) {
-            download_try_finish(state, -EINVAL);
+            finish(-EINVAL, "range", "invalid download range");
             return;
         }
 #ifndef GHV_NO_CRYPTO
@@ -1376,17 +1477,19 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
 #ifndef GHV_NO_CRYPTO
             if (digest) EVP_MD_CTX_free(digest);
 #endif
-            download_try_finish(state, -1);
+            finish(-1, "file_open", "download target open failed");
             return;
         }
 
-        resp.http_cb = [state, &fp, append_mode, requested_offset, &write_failed
+        resp.http_cb = [state, &attempt, &fp, append_mode, requested_offset, &write_failed
 #ifndef GHV_NO_CRYPTO
             , digest, &digest_ok
 #endif
         ](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
             if (state->cancelled.load()) return;
             if (state_h == HP_HEADERS_COMPLETE) {
+                attempt.http_received = true;
+                attempt.http_status = static_cast<const HttpResponse*>(msg)->status_code;
                 if (append_mode) {
                     const HttpResponse* response = static_cast<const HttpResponse*>(msg);
                     const std::string content_range = msg->GetHeader("Content-Range");
@@ -1445,18 +1548,25 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         };
 
         int ret = client.send(&req, &resp);
+        attempt.ret = ret;
+        attempt.has_ret = true;
         if (fp && fclose(fp) != 0)
             write_failed = true;
 
         if (state->cancelled.load()) {
             download_remove_file(state->filepath);
             download_clear_md5(state);
-            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
+            finish(GHV_DOWNLOAD_STATUS_CANCELLED, "cancelled", "download cancelled");
         } else if (write_failed || ret != 0 || !download_response_ok(state, resp.status_code)
             || (state->candidate_mode && state->current_size.load() <= 0)) {
             download_remove_file(state->filepath);
             download_clear_md5(state);
-            download_try_finish(state, write_failed ? -EIO : download_final_error(ret, resp.status_code));
+            finish(write_failed ? -EIO : download_final_error(ret, resp.status_code),
+                write_failed ? "write" : (ret != 0 ? "transport"
+                    : (download_response_ok(state, resp.status_code) ? "data" : "http")),
+                write_failed ? "download file write or range validation failed"
+                    : (ret != 0 ? http_client_strerror(ret)
+                        : (download_response_ok(state, resp.status_code) ? "download body empty" : resp.status_message())));
         } else {
             bool digest_published = true;
 #ifndef GHV_NO_CRYPTO
@@ -1465,8 +1575,8 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
             if (!digest_published) {
                 download_remove_file(state->filepath);
                 download_clear_md5(state);
-                download_try_finish(state, -EIO);
-            } else if (!download_try_finish(state, GHV_DOWNLOAD_STATUS_DONE)) {
+                finish(-EIO, "md5", "download digest failed");
+            } else if (!finish(GHV_DOWNLOAD_STATUS_DONE, "ready", "")) {
                 download_remove_file(state->filepath);
                 download_clear_md5(state);
             }
@@ -1480,7 +1590,7 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         EVP_MD_CTX* digest = download_md5_create();
         bool digest_ok = digest != nullptr;
 #endif
-        resp.http_cb = [state
+        resp.http_cb = [state, &attempt
             , &data_failed
 #ifndef GHV_NO_CRYPTO
             , digest, &digest_ok
@@ -1488,6 +1598,8 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         ](HttpMessage* msg, http_parser_state state_h, const char* data, size_t size) {
             if (state->cancelled.load()) return;
             if (state_h == HP_HEADERS_COMPLETE) {
+                attempt.http_received = true;
+                attempt.http_status = static_cast<const HttpResponse*>(msg)->status_code;
                 download_set_content_length(state, msg->GetHeader("Content-Length"));
                 if (state->candidate_mode && state->total_size.load() > GHV_DOWNLOAD_CDN_MAX_BYTES) {
                     data_failed = true;
@@ -1525,15 +1637,20 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
         };
 
         int ret = client.send(&req, &resp);
+        attempt.ret = ret;
+        attempt.has_ret = true;
 
         if (state->cancelled.load()) {
             download_clear_memory(state);
             download_clear_md5(state);
-            download_try_finish(state, GHV_DOWNLOAD_STATUS_CANCELLED);
+            finish(GHV_DOWNLOAD_STATUS_CANCELLED, "cancelled", "download cancelled");
         } else if (data_failed || ret != 0 || !download_response_ok(state, resp.status_code)) {
             download_clear_memory(state);
             download_clear_md5(state);
-            download_try_finish(state, download_final_error(ret, resp.status_code));
+            finish(download_final_error(ret, resp.status_code),
+                data_failed ? "memory" : (ret != 0 ? "transport" : "http"),
+                data_failed ? "download memory or size limit failed"
+                    : (ret != 0 ? http_client_strerror(ret) : resp.status_message()));
         } else {
             if (state->memory_data.empty() && !resp.body.empty()) {
                 std::lock_guard<std::mutex> lock(state->data_mutex);
@@ -1564,8 +1681,9 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
             if (!digest_published) {
                 download_clear_memory(state);
                 download_clear_md5(state);
-                download_try_finish(state, -EIO);
-            } else if (!download_try_finish(state, GHV_DOWNLOAD_STATUS_DONE)) {
+                finish(-EIO, data_failed ? "data" : "md5",
+                    data_failed ? "download data empty or allocation failed" : "download digest failed");
+            } else if (!finish(GHV_DOWNLOAD_STATUS_DONE, "ready", "")) {
                 download_clear_memory(state);
                 download_clear_md5(state);
             }
@@ -1591,7 +1709,7 @@ static void download_do_download(std::shared_ptr<DownloadCoreState> state,
         }
         download_reset_attempt(state);
         state->url = candidate.url;
-        download_do_single(state, client, reuse);
+        download_do_single(state, client, reuse, &candidate);
         const int attempt_status = state->attempt_status.load();
         if (attempt_status == GHV_DOWNLOAD_STATUS_DONE) {
             bool publish = false;
@@ -1690,6 +1808,94 @@ static int l_download_get_result(lua_State* L)
     lua_pushstring(L, result.ver.c_str()); lua_setfield(L, -2, "ver");
     lua_pushlstring(L, result.jsoncmd.data(), result.jsoncmd.size()); lua_setfield(L, -2, "jsoncmd");
     return 1;
+}
+
+static void download_push_attempt(lua_State* L, const DownloadAttempt& attempt)
+{
+    const DownloadCandidate& c = attempt.candidate;
+    lua_createtable(L, 0, 24);
+    lua_pushlstring(L, c.url.data(), c.url.size()); lua_setfield(L, -2, "url");
+    lua_pushlstring(L, attempt.effective_url.data(), attempt.effective_url.size()); lua_setfield(L, -2, "effective_url");
+    lua_pushboolean(L, attempt.url_redacted); lua_setfield(L, -2, "url_redacted");
+    lua_pushstring(L, c.kind.c_str()); lua_setfield(L, -2, "kind");
+    lua_pushstring(L, c.resource_type.c_str()); lua_setfield(L, -2, "resource_type");
+    lua_pushstring(L, c.source_mode.c_str()); lua_setfield(L, -2, "source_mode");
+    lua_pushstring(L, c.cache_key.c_str()); lua_setfield(L, -2, "cache_key");
+    lua_pushinteger(L, c.pid); lua_setfield(L, -2, "pid");
+    lua_pushinteger(L, c.eid); lua_setfield(L, -2, "eid");
+    lua_pushinteger(L, c.shape); lua_setfield(L, -2, "shape");
+    lua_pushinteger(L, c.resource_id); lua_setfield(L, -2, "id");
+    lua_pushstring(L, c.ext.c_str()); lua_setfield(L, -2, "ext");
+    lua_pushstring(L, c.slot.c_str()); lua_setfield(L, -2, "slot");
+    lua_pushinteger(L, c.dir); lua_setfield(L, -2, "dir");
+    lua_pushstring(L, c.act.c_str()); lua_setfield(L, -2, "act");
+    lua_pushstring(L, c.ver.c_str()); lua_setfield(L, -2, "ver");
+    lua_pushlstring(L, c.jsoncmd.data(), c.jsoncmd.size()); lua_setfield(L, -2, "jsoncmd");
+    lua_pushboolean(L, c.bare); lua_setfield(L, -2, "bare");
+    lua_pushboolean(L, c.cacheable); lua_setfield(L, -2, "cacheable");
+    lua_pushinteger(L, c.candidate_index); lua_setfield(L, -2, "candidate_index");
+    lua_pushinteger(L, c.candidate_total); lua_setfield(L, -2, "candidate_total");
+    if (attempt.has_ret) { lua_pushinteger(L, attempt.ret); lua_setfield(L, -2, "ret"); }
+    if (attempt.http_received) {
+        lua_pushinteger(L, attempt.http_status); lua_setfield(L, -2, "http_status");
+    }
+    lua_pushinteger(L, attempt.status); lua_setfield(L, -2, "status");
+    lua_pushstring(L, attempt.stage.c_str()); lua_setfield(L, -2, "stage");
+    lua_pushstring(L, attempt.error.c_str()); lua_setfield(L, -2, "error");
+    lua_pushnumber(L, attempt.elapsed_ms); lua_setfield(L, -2, "elapsed_ms");
+    lua_pushinteger(L, attempt.bytes); lua_setfield(L, -2, "bytes");
+}
+
+static int l_download_get_diagnostics(lua_State* L)
+{
+    LuaDownload* self = check_download(L);
+    try {
+        std::deque<DownloadAttempt> attempts;
+        DownloadAttempt first, last;
+        int total;
+        bool has_failure;
+        // 先采终态，再复制证据；避免复制后 worker 才完成却把旧快照标成 complete。
+        const int status = self->core->status.load();
+        const bool active = self->core->diagnostic_active.load();
+        {
+            std::lock_guard<std::mutex> lock(self->core->data_mutex);
+            attempts = self->core->attempts;
+            total = self->core->attempt_total;
+            has_failure = self->core->has_failure;
+            if (has_failure) {
+                first = self->core->first_failure;
+                last = self->core->last_failure;
+            }
+        }
+        const bool incomplete = self->core->diagnostics_incomplete.load();
+        lua_createtable(L, 0, 10);
+        lua_pushboolean(L, true); lua_setfield(L, -2, "available");
+        lua_pushinteger(L, 1); lua_setfield(L, -2, "schema");
+        lua_pushinteger(L, status); lua_setfield(L, -2, "status");
+        lua_pushinteger(L, total); lua_setfield(L, -2, "attempt_total");
+        lua_pushinteger(L, GHV_DOWNLOAD_DIAGNOSTIC_LIMIT); lua_setfield(L, -2, "history_limit");
+        lua_pushboolean(L, total > (int)attempts.size()); lua_setfield(L, -2, "truncated");
+        lua_pushboolean(L, incomplete); lua_setfield(L, -2, "incomplete");
+        lua_pushboolean(L, status != GHV_DOWNLOAD_STATUS_DOWNLOADING
+            && !active && !incomplete);
+        lua_setfield(L, -2, "complete");
+        lua_createtable(L, (int)attempts.size(), 0);
+        int i = 0;
+        for (const auto& attempt : attempts) {
+            download_push_attempt(L, attempt);
+            lua_rawseti(L, -2, ++i);
+        }
+        lua_setfield(L, -2, "attempts");
+        if (has_failure) {
+            download_push_attempt(L, first); lua_setfield(L, -2, "first_failure");
+            download_push_attempt(L, last); lua_setfield(L, -2, "last_failure");
+        }
+        return 1;
+    } catch (const std::exception& e) {
+        return luaL_error(L, "download diagnostics: %s", e.what());
+    } catch (...) {
+        return luaL_error(L, "download diagnostics unavailable");
+    }
 }
 
 static int l_download_cancel(lua_State* L) {
@@ -1963,6 +2169,7 @@ GHV_EXPORT int luaopen_ghv_download(lua_State* L)
         {"GetData",  l_download_get_data},
         {"GetMD5",   l_download_get_md5},
         {"GetResult",l_download_get_result},
+        {"GetDiagnostics", l_download_get_diagnostics},
         {"Cancel",   l_download_cancel},
         {"Stats",    l_download_stats},
         {"GetStats", l_download_stats},
