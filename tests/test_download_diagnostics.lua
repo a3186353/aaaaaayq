@@ -1,6 +1,5 @@
 -- 由同目录 Python 夹具驱动：真实下载器/HTTP，必须使用本轮 CI ggelua.dll。
 local engine, base, closed_port = assert(arg[1]), assert(arg[2]), assert(arg[3])
-local gge = assert(package.loadlib(engine .. '/ggelua.dll', 'luaopen_ggelua'))()
 local download = assert(package.loadlib(engine .. '/ggelua.dll', 'luaopen_ghv_download'))()
 local function done(handle)
     assert(type(handle.GetDiagnostics) == 'function', 'CI产物缺少GetDiagnostics，禁止用旧DLL冒充通过')
@@ -9,7 +8,10 @@ local function done(handle)
         local _, _, status = handle:GetState()
         if status == 100 or status < 0 then return status, handle:GetDiagnostics() end
         assert(os.time() <= deadline, '真实下载未在上限内结算')
-        gge.delay(10)
+        -- lua.exe 没有 GGELUA 主循环 extraspace 的 SDL mutex，不能调用 gge.delay。
+        -- 仅此有界夹具短轮询；不用于生产动画时钟或性能测量。
+        local pause_until = os.clock() + 0.01
+        while os.clock() < pause_until do end
     end
 end
 local function raw(path, expected)
