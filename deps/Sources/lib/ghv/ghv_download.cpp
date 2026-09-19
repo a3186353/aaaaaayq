@@ -17,6 +17,7 @@
 #include "ghv_common.h"
 #include "HttpClient.h"
 #include "hbase.h"
+#include "herr.h"
 #include "md5.h"
 
 #include <algorithm>
@@ -1387,12 +1388,27 @@ static void download_redact_url_userinfo(std::string& url, bool& redacted)
     }
 }
 
+static const char* download_transport_error(int ret, char* buffer, size_t size)
+{
+    // libhv 错误码不能交给 Win32 解释；FormatMessageA 还会产生非 UTF-8 文本。
+    // 仅已知库错误使用静态 ASCII 描述，其他错误保留原码，不猜系统语义。
+    switch (ret) {
+#define F(code, name, message) case code: return hv_strerror(ret);
+        FOREACH_ERR(F)
+#undef F
+        default:
+            snprintf(buffer, size, "Unknown socket/transport error (raw code %d)", ret);
+            return buffer;
+    }
+}
+
 static void download_do_single(std::shared_ptr<DownloadCoreState> state,
     hv::HttpClient& client, DownloadReuseKey& reuse, const DownloadCandidate* candidate = nullptr)
 {
     if (!state) return;
     HttpRequest req;
     DownloadAttempt attempt;
+    char transport_error[96] = {0};
     try {
         if (candidate) attempt.candidate = *candidate;
         else {
@@ -1565,7 +1581,7 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
                 write_failed ? "write" : (ret != 0 ? "transport"
                     : (download_response_ok(state, resp.status_code) ? "data" : "http")),
                 write_failed ? "download file write or range validation failed"
-                    : (ret != 0 ? http_client_strerror(ret)
+                    : (ret != 0 ? download_transport_error(ret, transport_error, sizeof(transport_error))
                         : (download_response_ok(state, resp.status_code) ? "download body empty" : resp.status_message())));
         } else {
             bool digest_published = true;
@@ -1650,7 +1666,7 @@ static void download_do_single(std::shared_ptr<DownloadCoreState> state,
             finish(download_final_error(ret, resp.status_code),
                 data_failed ? "memory" : (ret != 0 ? "transport" : "http"),
                 data_failed ? "download memory or size limit failed"
-                    : (ret != 0 ? http_client_strerror(ret) : resp.status_message()));
+                    : (ret != 0 ? download_transport_error(ret, transport_error, sizeof(transport_error)) : resp.status_message()));
         } else {
             if (state->memory_data.empty() && !resp.body.empty()) {
                 std::lock_guard<std::mutex> lock(state->data_mutex);
